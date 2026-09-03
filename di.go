@@ -7,10 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"reflect"
 	"runtime"
 	"slices"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // ---- keys ------------------------------------------------------------------
@@ -74,12 +78,17 @@ type state struct {
 	name   string
 	parent *state
 
-	mu      sync.Mutex
-	pending []*binding // registrations not yet indexed
-	index   map[key]*binding
-	groups  map[reflect.Type][]*binding
-	frozen  bool
-	started []*binding // instantiation order; stopped in reverse
+	mu       sync.Mutex
+	pending  []*binding // registrations not yet indexed
+	index    map[key]*binding
+	groups   map[reflect.Type][]*binding
+	frozen   bool
+	started  []*binding // instantiation order; stopped in reverse
+	children []*state
+
+	shutdownOnce sync.Once
+	shutdownCh   chan struct{}
+	shutdownErr  error
 }
 
 func (st *state) freeze() {
@@ -113,10 +122,24 @@ type Scope struct {
 func New() *Scope { return &Scope{state: newState("root", nil)} }
 
 func newState(name string, parent *state) *state {
-	return &state{name: name, parent: parent, index: map[key]*binding{}, groups: map[reflect.Type][]*binding{}}
+	return &state{
+		name:       name,
+		parent:     parent,
+		index:      map[key]*binding{},
+		groups:     map[reflect.Type][]*binding{},
+		shutdownCh: make(chan struct{}),
+	}
 }
 
-func (s *Scope) Child(name string) *Scope { return &Scope{state: newState(name, s.state)} }
+// Child creates a scope that resolves through s. Stopping s stops its
+// children first.
+func (s *Scope) Child(name string) *Scope {
+	st := newState(name, s.state)
+	s.mu.Lock()
+	s.children = append(s.children, st)
+	s.mu.Unlock()
+	return &Scope{state: st}
+}
 
 func (s *Scope) view(r *resolver) *Scope { return &Scope{state: s.state, r: r} }
 
@@ -345,7 +368,9 @@ func recoverAbort(err *error) {
 
 // ---- lifecycle -------------------------------------------------------------
 
-// Start builds eager bindings, then runs OnStart hooks in build order.
+// Start builds every Eager binding, then runs OnStart hooks in build order.
+// If a hook fails, the hooks that already ran are rolled back with OnStop in
+// reverse order and the scope is left with nothing to stop.
 func (s *Scope) Start(ctx context.Context) (err error) {
 	defer recoverAbort(&err)
 	s.freeze()
@@ -363,23 +388,39 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	s.mu.Lock()
 	started := slices.Clone(s.started)
 	s.mu.Unlock()
-	for _, b := range started {
-		if b.onStart != nil {
-			if err := b.onStart(ctx, b.value); err != nil {
-				return fmt.Errorf("di: starting %s: %w", b.key, err)
-			}
+	for i, b := range started {
+		if b.onStart == nil {
+			continue
+		}
+		if err := b.onStart(ctx, b.value); err != nil {
+			err = fmt.Errorf("di: starting %s: %w", b.key, err)
+			s.mu.Lock()
+			s.started = nil
+			s.mu.Unlock()
+			return errors.Join(err, stopAll(ctx, started[:i]))
 		}
 	}
 	return nil
 }
 
-// Stop runs OnStop hooks in reverse build order (dependents first) and
-// reports every failure.
+// Stop stops child scopes first, then runs OnStop hooks in reverse build
+// order (dependents first). Every failure is reported; Stop is idempotent.
 func (s *Scope) Stop(ctx context.Context) error {
 	s.mu.Lock()
+	children := slices.Clone(s.children)
 	started := s.started
 	s.started = nil
 	s.mu.Unlock()
+
+	var errs []error
+	for _, c := range children {
+		errs = append(errs, (&Scope{state: c}).Stop(ctx))
+	}
+	errs = append(errs, stopAll(ctx, started))
+	return errors.Join(errs...)
+}
+
+func stopAll(ctx context.Context, started []*binding) error {
 	var errs []error
 	for _, b := range slices.Backward(started) {
 		if b.onStop != nil {
@@ -389,4 +430,67 @@ func (s *Scope) Stop(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Shutdown asks a running Run to stop, optionally recording why. It never
+// blocks, may be called from any goroutine, and the first call wins. The
+// request propagates to ancestor scopes, so a service in a child scope can
+// stop the application.
+func (s *Scope) Shutdown(err error) {
+	for st := s.state; st != nil; st = st.parent {
+		st.shutdownOnce.Do(func() {
+			st.shutdownErr = err
+			close(st.shutdownCh)
+		})
+	}
+}
+
+// RunOption configures Run.
+type RunOption func(*runConfig)
+
+type runConfig struct {
+	stopTimeout time.Duration
+	signals     []os.Signal
+}
+
+// StopTimeout bounds how long Stop may take once Run decides to exit.
+// The default is 15 seconds.
+func StopTimeout(d time.Duration) RunOption { return func(c *runConfig) { c.stopTimeout = d } }
+
+// Signals replaces the signals that make Run exit. The default is
+// os.Interrupt and SIGTERM.
+func Signals(sig ...os.Signal) RunOption { return func(c *runConfig) { c.signals = sig } }
+
+// Run starts the scope and blocks until ctx is cancelled, a termination
+// signal arrives, or Shutdown is called. It then stops the scope with a
+// bounded context; a second signal during the stop cancels that context so
+// a hung hook cannot keep the process alive. Run returns the Start error, the
+// error passed to Shutdown, and any Stop errors, joined.
+func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
+	cfg := runConfig{stopTimeout: 15 * time.Second, signals: []os.Signal{os.Interrupt, syscall.SIGTERM}}
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	// Register before Start so a signal during a slow start is not lost.
+	sigCtx, cancelSig := signal.NotifyContext(ctx, cfg.signals...)
+	defer cancelSig()
+
+	if err := s.Start(ctx); err != nil {
+		return err
+	}
+
+	var cause error
+	select {
+	case <-sigCtx.Done():
+	case <-s.shutdownCh:
+		cause = s.shutdownErr
+	}
+
+	stopCtx, cancelStop := context.WithTimeout(context.WithoutCancel(ctx), cfg.stopTimeout)
+	defer cancelStop()
+	forceCtx, cancelForce := signal.NotifyContext(stopCtx, cfg.signals...)
+	defer cancelForce()
+
+	return errors.Join(cause, s.Stop(forceCtx))
 }
