@@ -107,18 +107,23 @@ Call them before the scope is first resolved; afterwards they panic.
 |---|---|
 | `s.Provide(func(*di.Scope) T)` | Lazily built singleton. `T` is inferred from the constructor. |
 | `s.Value(v)` | An instance you already have. |
-| `s.Bind[I, T]()` | Serve requests for interface `I` from `T`'s binding. Checked at registration. |
+| `s.Bind[I, T]()` | Serve requests for interface `I` from `T`'s binding, with `T`'s lifetime and hooks. Checked at registration. |
 | `s.Add(func(*di.Scope) T)` | Append to the multi-binding group for `T`. |
 | `.Named("replica")` | Register under a name in addition to the type. |
-| `.Transient()` | Build a fresh instance on every resolution. Transients are not tracked, so `OnStop` never runs for them; a transient must own its own cleanup. |
+| `.Transient()` | Build a fresh instance on every resolution, in the resolving scope. Instances are not tracked, so lifecycle hooks and `Eager` are rejected on a transient; it must own its own cleanup. |
 | `.Scoped()` | One instance per resolving scope, built and stopped there. Not allowed on `Value`. |
-| `.Eager()` | Build during `Start`. |
+| `.Eager()` | Build during `Start`, in registration order. |
 | `.OnStart(f)` / `.OnStop(f)` | Typed lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.Run(f)` | Long-running function for `T`, run in its own goroutine and cancelled on stop. |
 | `.Health(f)` | Health check for `T`, run by `HealthCheck`. |
 
 Later registrations of the same key override earlier ones, which is how a
-child scope shadows its parent.
+child scope shadows its parent and how a test substitutes a fake. Once a key
+has been resolved it can no longer be overridden: replacing it then would
+leave two live instances of one service, so it panics instead. Combinations
+that cannot be honoured, such as a lifecycle hook on a transient, are
+rejected the first time the scope is resolved, whatever order the builder
+methods were called in.
 
 ## Resolution
 
@@ -212,14 +217,16 @@ func TestRepo(t *testing.T) {
 ## Lifecycle
 
 `Start` builds every `Eager` binding, then runs `OnStart` hooks in build order.
-If a hook fails, the hooks that already ran are rolled back with `OnStop` and
-`Start` returns both errors. A service built after `Start`, lazily or in a
+If a hook fails, `Start` stops the scope and returns both errors, which rolls
+back exactly the services that did start, child scopes included. A service built after `Start`, lazily or in a
 child scope, runs its `OnStart` as part of being built, so nothing is ever
 handed out unstarted; if that hook fails the resolution fails.
 
 `Stop` stops child scopes first, then runs `OnStop` hooks in reverse build
-order and returns all failures joined with `errors.Join`. Only services that
-were actually built are stopped. Stopping a child scope also detaches it from
+order and returns all failures joined with `errors.Join`. A service is
+stopped only when its stop is owed: its `OnStart` succeeded, or it has no
+`OnStart` to pair with, in which case `OnStop` is a plain destructor for what
+the constructor acquired. Stopping a child scope also detaches it from
 its parent, which is what releases a per-request scope. A stopped scope, and
 any scope under it, refuses to resolve anything with `di.ErrStopped`, so a
 closed service is never handed out.

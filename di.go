@@ -22,8 +22,8 @@
 // A binding is a singleton by default, cached in the scope that registered
 // it. [Binding.Scoped] makes it one instance per resolving scope, built
 // there so it can see that scope's values, which is how request-scoped
-// services are declared once in the root. [Binding.Transient] builds a new
-// instance on every resolution. [Scope.Add] and [Scope.All] handle groups,
+// services are declared once in the root. [Binding.Transient] builds an
+// untracked new instance on every resolution. [Scope.Add] and [Scope.All] handle groups,
 // [Scope.Bind] aliases an interface to an implementation, and
 // [Scope.Maybe] resolves optional dependencies.
 //
@@ -163,19 +163,62 @@ type binding struct {
 	scoped    bool
 	eager     bool
 	isValue   bool // registered with Value: lifetimes do not apply
+	alias     *key // Bind: serve this key from another binding, lifetime included
 	build     func(*Scope) any
 	onStart   func(context.Context, any) error
 	onStop    func(context.Context, any) error
 	run       func(context.Context, any) error
 	health    func(context.Context, any) error
 
+	// used is set once any instance of this binding exists, after which the
+	// registration can no longer be overridden.
+	used atomic.Bool
+
 	single *instance // the singleton; scoped bindings keep one instance per state
 }
+
+// validate rejects lifetime and hook combinations that cannot be honoured.
+// It runs at freeze, so the order the builder methods were called in does
+// not matter.
+func (b *binding) validate() {
+	bad := func(what, why string) {
+		panic(fmt.Sprintf("di: %s (provided at %s): %s %s", b.key, b.site, what, why))
+	}
+	hooks := b.onStart != nil || b.onStop != nil || b.run != nil || b.health != nil
+	switch {
+	case b.transient && b.scoped:
+		bad("Transient and Scoped", "are mutually exclusive")
+	case b.transient && hooks:
+		bad("lifecycle hooks", "do not apply to a Transient binding: its instances are not tracked")
+	case b.transient && b.eager:
+		bad("Eager", "does not apply to a Transient binding: the instance would be discarded")
+	case b.scoped && b.eager:
+		bad("Eager", "does not apply to a Scoped binding: it is built per resolving scope")
+	case b.alias != nil && (b.transient || b.scoped || b.eager || hooks):
+		bad("lifetimes and lifecycle hooks", "belong on the target binding, not on a Bind alias")
+	}
+}
+
+// phase is an instance's position in the build/start/stop sequence. It is
+// read and written only under the owning state's mutex, so the decision of
+// who starts or stops an instance is never split across two critical
+// sections.
+type phase int8
+
+const (
+	phaseNew      phase = iota // no value yet
+	phaseBuilt                 // constructor ran; the start step has not
+	phaseStarting              // a goroutine has claimed the start step
+	phaseStarted               // the start step succeeded
+	phaseFailed                // the start step failed
+	phaseStopped               // the stop step ran, or was skipped for good
+)
 
 // instance is one built value of a binding, owned by the state that stops it.
 type instance struct {
 	b     *binding
 	once  sync.Once
+	ph    phase // guarded by the owning state's mutex
 	value any
 	err   error
 
@@ -204,16 +247,76 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 		go func() {
 			defer close(in.done)
 			err := b.run(rctx, in.value)
-			switch {
-			case err == nil:
-			case rctx.Err() == nil: // died on its own: stop the application
-				(&Scope{state: owner}).Shutdown(fmt.Errorf("di: %s: %w", b.key, err))
-			case !errors.Is(err, context.Canceled):
-				in.runErr = err
+			if err == nil || errors.Is(err, context.Canceled) {
+				return
+			}
+			// Record it whoever cancelled, so Stop reports it in every
+			// driving mode, then wake a waiting Run if it died on its own.
+			in.runErr = err
+			if rctx.Err() == nil {
+				(&Scope{state: owner}).shutdown(fmt.Errorf("di: %s: %w", b.key, err), false)
 			}
 		}()
 	}
 	return nil
+}
+
+// everStarted reports whether Start was called on this scope or an ancestor.
+func (st *state) everStarted() bool {
+	for ; st != nil; st = st.parent {
+		st.mu.Lock()
+		started := st.startCtx != nil
+		st.mu.Unlock()
+		if started {
+			return true
+		}
+	}
+	return false
+}
+
+// claim takes the start step for this goroutine, returning false if another
+// one already has it or the instance is past starting.
+func (in *instance) claim(owner *state) bool {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if in.ph != phaseBuilt {
+		return false
+	}
+	in.ph = phaseStarting
+	return true
+}
+
+// startClaimed runs the start step of an instance already in phaseStarting.
+func (in *instance) startClaimed(ctx context.Context, owner *state) error {
+	err := in.start(ctx, owner)
+	owner.mu.Lock()
+	if err != nil {
+		in.ph = phaseFailed
+	} else {
+		in.ph = phaseStarted
+	}
+	owner.mu.Unlock()
+	return err
+}
+
+// stopIfNeeded runs the stop step once, and only when it is owed. It is owed
+// when the start step succeeded, and when the instance was merely built but
+// its OnStop is not paired with anything: either the binding declares no
+// OnStart, or the scope was never started at all, in which case OnStop is a
+// plain destructor for what the constructor acquired. An instance whose
+// OnStart was skipped by a rollback, or failed, is not stopped.
+func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
+	paired := in.b.onStart != nil && owner.everStarted()
+	owner.mu.Lock()
+	owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired)
+	if in.ph != phaseStarting {
+		in.ph = phaseStopped
+	}
+	owner.mu.Unlock()
+	if !owed {
+		return nil
+	}
+	return in.stop(ctx, owner)
 }
 
 // stop cancels the Run hook, waits for it within ctx, then runs OnStop.
@@ -254,12 +357,14 @@ type state struct {
 	index     map[key]*binding
 	groups    map[reflect.Type][]*binding
 	frozen    bool
+	all       []*binding             // every binding, in registration order
 	started   []*instance            // build order; stopped in reverse
 	scoped    map[*binding]*instance // per-scope instances of Scoped bindings
 	children  []*state
 	observers []func(Event)
 
 	stopped  atomic.Bool     // set by Stop or a failed Start; resolution then fails with ErrStopped
+	stopCtx  context.Context // the context Stop was called with
 	startCtx context.Context // set by Start; read by Context()
 	running  bool            // set once Start reaches the hook phase; enables late OnStart
 
@@ -276,11 +381,20 @@ func (st *state) freeze() {
 	}
 	st.frozen = true
 	for _, b := range st.pending {
+		b.validate()
 		if b.group {
 			st.groups[b.key.t] = append(st.groups[b.key.t], b)
 		} else {
-			st.index[b.key] = b // later registration wins; that is the override rule
+			// Later registration wins, which is how overrides work, but only
+			// until the key has been resolved: replacing it afterwards would
+			// leave two live instances of one service.
+			if prev, ok := st.index[b.key]; ok && prev.used.Load() {
+				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it has already been resolved",
+					b.key, prev.site, b.site))
+			}
+			st.index[b.key] = b
 		}
+		st.all = append(st.all, b)
 	}
 	st.pending = nil
 }
@@ -378,13 +492,18 @@ func (s *Scope) Value[T any](v T) Binding[T] {
 	return Binding[T]{s, b}
 }
 
-// Bind registers an alias: requests for I are served by T's binding.
-// Both parameters are explicit: s.Bind[Reader, *Repo]().
+// Bind registers an alias: requests for I are served by T's binding, with
+// T's lifetime, instance and hooks. Both parameters are explicit:
+// s.Bind[Reader, *Repo](). Lifetimes and lifecycle hooks belong on the
+// target binding, not on the alias.
 func (s *Scope) Bind[I, T any]() Binding[I] {
 	if !reflect.TypeFor[T]().Implements(reflect.TypeFor[I]()) {
 		panic(fmt.Sprintf("di: %s does not implement %s", typeName(reflect.TypeFor[T]()), typeName(reflect.TypeFor[I]())))
 	}
-	return Binding[I]{s, s.register(key{t: reflect.TypeFor[I]()}, func(s *Scope) any { return any(s.Get[T]()).(I) })}
+	b := s.register(key{t: reflect.TypeFor[I]()}, nil)
+	target := key{t: reflect.TypeFor[T]()}
+	b.alias = &target
+	return Binding[I]{s, b}
 }
 
 // Add appends to the multi-binding group for T; read back with s.All[T]().
@@ -408,9 +527,9 @@ func (b Binding[T]) Named(name string) Binding[T] {
 	return b.edit(func(b *binding) { b.key.name = name })
 }
 
-// Transient builds a new instance on every resolution. Transients are not
-// tracked by the scope: OnStop, Run and Health never apply to them, so a
-// transient must own its own cleanup.
+// Transient builds a new instance on every resolution, in the scope that
+// resolves it. Instances are not tracked, so lifecycle hooks and Eager are
+// rejected on a transient binding: it must own its own cleanup.
 func (b Binding[T]) Transient() Binding[T] {
 	return b.edit(func(b *binding) { b.lifetimeCheck("Transient"); b.transient = true })
 }
@@ -496,6 +615,17 @@ func (s *Scope) get(k key) any {
 	if b == nil {
 		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, s.r.path())})
 	}
+	if b.alias != nil {
+		// Resolve the target instead, so its lifetime and hooks apply; the
+		// alias key stays on the stack for cycle detection and error paths.
+		r := s.r
+		if slices.Contains(r.stack, k) {
+			panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), k)})
+		}
+		r.stack = append(r.stack, k)
+		defer func() { r.stack = r.stack[:len(r.stack)-1] }()
+		return s.get(*b.alias)
+	}
 	return s.resolve(b, owner, k)
 }
 
@@ -512,8 +642,12 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 	r.stack = append(r.stack, k)
 	defer func() { r.stack = r.stack[:len(r.stack)-1] }()
 
+	b.used.Store(true)
+
 	if b.transient {
-		return b.build((&Scope{state: owner}).view(r))
+		// Built in the resolving scope, like Scoped: nothing is cached, so
+		// it cannot become captive, and it can see this scope's values.
+		return b.build((&Scope{state: s.state}).view(r))
 	}
 
 	// Singletons live in the scope that registered them; scoped instances
@@ -549,23 +683,34 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 		if in.err != nil {
 			return
 		}
-		if ctx, running := holder.runContext(); running {
-			if err := in.start(ctx, holder); err != nil {
-				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
-				return
-			}
-		}
 		holder.mu.Lock()
 		if holder.stopped.Load() {
-			// Stop ran between our stopped check and this append, so its
-			// snapshot did not include us: undo the start here and fail.
+			// Stop ran while we were building, so its snapshot did not
+			// include us: undo with the context Stop was given, and fail.
+			stopCtx := holder.stopCtx
+			in.ph = phaseBuilt
 			holder.mu.Unlock()
-			_ = in.stop(context.Background(), holder)
-			in.err = fmt.Errorf("di: %s: %w", k, ErrStopped)
+			if stopCtx == nil {
+				stopCtx = context.Background()
+			}
+			in.err = errors.Join(fmt.Errorf("di: %s: %w", k, ErrStopped), in.stopIfNeeded(stopCtx, holder))
 			return
 		}
+		in.ph = phaseBuilt
 		holder.started = append(holder.started, in)
 		holder.mu.Unlock()
+
+		// The append above strictly precedes this read, and Start sets
+		// running before it drains, so either we see running and start the
+		// instance ourselves, or Start's drain finds it in the list.
+		if sctx, running := holder.runContext(); running && in.claim(holder) {
+			if sctx == nil {
+				sctx = context.Background()
+			}
+			if err := in.startClaimed(sctx, holder); err != nil {
+				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
+			}
+		}
 	})
 	if in.err != nil {
 		panic(abort{in.err})
@@ -702,11 +847,12 @@ func recoverAbort(err *error) {
 
 // ---- lifecycle -------------------------------------------------------------
 
-// Start builds every Eager binding, then runs OnStart hooks in build order.
-// If a hook fails, the hooks that already ran are rolled back with OnStop in
-// reverse order and the scope is left with nothing to stop. After Start
-// returns, a binding built later runs its OnStart as part of being built, so
-// lazily resolved services start too. Start may be called once.
+// Start builds every Eager binding in registration order, then runs the
+// start step of everything built so far, in build order. If a step fails,
+// the scope is stopped, which rolls back exactly the services that did
+// start, child scopes included. After Start returns, a service built later
+// runs its start step as part of being built, so lazily resolved services
+// start too. Start may be called once.
 func (s *Scope) Start(ctx context.Context) (err error) {
 	defer recoverAbort(&err)
 	s.freeze()
@@ -717,39 +863,61 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	}
 	s.startCtx = ctx
 	var eager []*binding
-	for _, b := range s.index {
+	for _, b := range s.all {
 		if b.eager {
 			eager = append(eager, b)
 		}
 	}
 	s.mu.Unlock()
+
+	// Registration order, so eager services build predictably.
 	for _, b := range eager {
-		s.enter().get(b.key)
+		s.enter().resolve(b, s.state, b.key)
 	}
 
-	// Everything built from here on starts itself inside get.
 	s.mu.Lock()
-	started := slices.Clone(s.started)
 	s.running = true
 	s.mu.Unlock()
 
-	for _, in := range started {
-		if err := in.start(ctx, s.state); err != nil {
+	// Drain: anything built before the flag was set is still waiting here,
+	// and starting one service may build more.
+	for {
+		in, owner := s.claimNext()
+		if in == nil {
+			return nil
+		}
+		if err := in.startClaimed(ctx, owner); err != nil {
 			err = fmt.Errorf("di: starting %s: %w", in.b.key, err)
-			s.mu.Lock()
-			built := s.started
-			s.started = nil
-			s.running = false
-			s.stopped.Store(true)
-			s.mu.Unlock()
-			return errors.Join(err, stopAll(ctx, s.state, slices.DeleteFunc(built, func(x *instance) bool { return x == in })))
+			return errors.Join(err, s.Stop(context.WithoutCancel(ctx)))
 		}
 	}
-	return nil
+}
+
+// claimNext claims the start step of the next built-but-unstarted instance
+// in this scope or a descendant, in build order.
+func (st *state) claimNext() (*instance, *state) {
+	st.mu.Lock()
+	for _, in := range st.started {
+		if in.ph == phaseBuilt {
+			in.ph = phaseStarting
+			st.mu.Unlock()
+			return in, st
+		}
+	}
+	children := slices.Clone(st.children)
+	st.mu.Unlock()
+	for _, c := range children {
+		if in, owner := c.claimNext(); in != nil {
+			return in, owner
+		}
+	}
+	return nil, nil
 }
 
 // Stop stops child scopes first, then runs OnStop hooks in reverse build
-// order (dependents first). Every failure is reported; Stop is idempotent.
+// order (dependents first). A service is stopped only if it actually
+// started, or if it declares no OnStart, in which case OnStop is a plain
+// destructor. Every failure is reported; Stop is idempotent.
 // Afterwards the scope and its descendants refuse to resolve anything, with
 // ErrStopped, so a closed service can never be handed out.
 // Stopping a child scope also detaches it from its parent, so per-request
@@ -759,6 +927,7 @@ func (s *Scope) Stop(ctx context.Context) error {
 	children := slices.Clone(s.children)
 	started := s.started
 	s.started = nil
+	s.stopCtx = ctx
 	s.stopped.Store(true)
 	s.mu.Unlock()
 
@@ -779,7 +948,7 @@ func (s *Scope) Stop(ctx context.Context) error {
 func stopAll(ctx context.Context, owner *state, started []*instance) error {
 	var errs []error
 	for _, in := range slices.Backward(started) {
-		errs = append(errs, in.stop(ctx, owner))
+		errs = append(errs, in.stopIfNeeded(ctx, owner))
 	}
 	return errors.Join(errs...)
 }
@@ -890,17 +1059,24 @@ func (s *Scope) Middleware(next http.Handler) http.Handler {
 // blocks, may be called from any goroutine, and the first call wins. The
 // request propagates to ancestor scopes, so a service in a child scope can
 // stop the application.
-func (s *Scope) Shutdown(err error) {
+func (s *Scope) Shutdown(err error) { s.shutdown(err, true) }
+
+// shutdown wakes any waiting Run. record says whether the cause should be
+// returned by Run; a dying Run hook passes false because Stop reports its
+// error instead, which keeps it reported in every driving mode.
+func (s *Scope) shutdown(cause error, record bool) {
 	first := false
 	for st := s.state; st != nil; st = st.parent {
 		st.shutdownOnce.Do(func() {
-			st.shutdownErr = err
+			if record {
+				st.shutdownErr = cause
+			}
 			close(st.shutdownCh)
 			first = first || st == s.state
 		})
 	}
 	if first {
-		s.emit(Event{Kind: EventShutdown, Scope: s.name, Err: err})
+		s.emit(Event{Kind: EventShutdown, Scope: s.name, Err: cause})
 	}
 }
 

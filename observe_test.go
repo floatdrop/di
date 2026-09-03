@@ -91,32 +91,47 @@ func TestSlogObserver(t *testing.T) {
 	}
 }
 
-// A build that completes after Stop took its snapshot must be undone and
-// reported as ErrStopped, never handed out or left running.
+// A build that completes after Stop took its snapshot must be rejected with
+// ErrStopped and never handed out. Whether its OnStop runs follows the same
+// pairing rule as a rollback: a declared OnStart that never ran means the
+// OnStop is not owed, while an unpaired OnStop is a destructor and runs.
 func TestBuildRacingStopIsUndone(t *testing.T) {
-	building := make(chan struct{})
-	release := make(chan struct{})
-	stops := 0
-	s := di.New()
-	s.Provide(func(*di.Scope) *DB { close(building); <-release; return &DB{} }).
-		OnStart(func(context.Context, *DB) error { return nil }).
-		OnStop(func(context.Context, *DB) error { stops++; return nil })
-	if err := s.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name      string
+		withStart bool
+		wantStops int
+	}{
+		{"paired OnStart is not owed a stop", true, 0},
+		{"unpaired OnStop is a destructor", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			building := make(chan struct{})
+			release := make(chan struct{})
+			stops := 0
+			s := di.New()
+			b := s.Provide(func(*di.Scope) *DB { close(building); <-release; return &DB{} })
+			if tc.withStart {
+				b = b.OnStart(func(context.Context, *DB) error { return nil })
+			}
+			b.OnStop(func(context.Context, *DB) error { stops++; return nil })
+			if err := s.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 
-	result := make(chan error, 1)
-	go func() { _, err := s.Resolve[*DB](); result <- err }()
-	<-building
-	if err := s.Stop(context.Background()); err != nil { // snapshot is empty: nothing to stop yet
-		t.Fatal(err)
-	}
-	close(release)
+			result := make(chan error, 1)
+			go func() { _, err := s.Resolve[*DB](); result <- err }()
+			<-building
+			if err := s.Stop(context.Background()); err != nil { // snapshot is empty: nothing to stop yet
+				t.Fatal(err)
+			}
+			close(release)
 
-	if err := <-result; !errors.Is(err, di.ErrStopped) {
-		t.Fatalf("got %v", err)
-	}
-	if stops != 1 {
-		t.Fatalf("late instance must be stopped exactly once, got %d", stops)
+			if err := <-result; !errors.Is(err, di.ErrStopped) {
+				t.Fatalf("got %v", err)
+			}
+			if stops != tc.wantStops {
+				t.Fatalf("stops = %d, want %d", stops, tc.wantStops)
+			}
+		})
 	}
 }
