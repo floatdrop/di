@@ -107,6 +107,7 @@ Call them before the scope is first resolved; afterwards they panic.
 | `s.Add(func(*di.Scope) T)` | Append to the multi-binding group for `T`. |
 | `.Named("replica")` | Register under a name in addition to the type. |
 | `.Transient()` | Build a fresh instance on every resolution. |
+| `.Scoped()` | One instance per resolving scope, built and stopped there. |
 | `.Eager()` | Build during `Start`. |
 | `.OnStart(f)` / `.OnStop(f)` | Typed lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.Run(f)` | Long-running function for `T`, run in its own goroutine and cancelled on stop. |
@@ -175,8 +176,8 @@ func main() {
 A child resolves through its parent, reuses the parent's singletons, and owns
 the lifecycle of whatever it builds itself. A singleton always builds its
 dependencies in the scope that registered it, so a child cannot rewire a
-parent singleton; register the consumer in the child too if it must see
-child-scoped values.
+parent singleton. A service that must see child-scoped values is declared
+`Scoped()`: one instance per resolving scope, built there.
 
 For tests, wire the production graph into a fresh scope and override before
 anything is resolved:
@@ -273,11 +274,20 @@ mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
-A service registered in the root that depends on `*http.Request` cannot be
-built there, since the request only exists in the child. Resolve it through
-the request scope and it is built once per request and released with it.
-`di.WithScope` and `di.FromContext` are the primitives if you are not using
-`net/http`.
+Services that depend on the request are declared once, in the root, with
+`Scoped()`:
+
+```go
+app.Provide(func(s *di.Scope) *User {
+    return &User{Name: s.Get[*http.Request]().Header.Get("X-User")}
+}).Scoped()
+```
+
+A scoped binding is built in the scope that resolves it, so it sees that
+request's `*http.Request`, is cached for the rest of the request, and is
+stopped with it. Resolving it from the root fails with `ErrNotProvided`
+rather than producing an instance built with the wrong data. `di.WithScope`
+and `di.FromContext` are the primitives if you are not using `net/http`.
 
 The complete pattern, with a worker, a health endpoint, request scopes, and
 graceful shutdown, is in [`examples/app`](examples/app/main.go).

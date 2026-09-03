@@ -66,6 +66,7 @@ type binding struct {
 	site      string
 	group     bool
 	transient bool
+	scoped    bool
 	eager     bool
 	build     func(*Scope) any
 	onStart   func(context.Context, any) error
@@ -73,6 +74,12 @@ type binding struct {
 	run       func(context.Context, any) error
 	health    func(context.Context, any) error
 
+	single *instance // the singleton; scoped bindings keep one instance per state
+}
+
+// instance is one built value of a binding, owned by the state that stops it.
+type instance struct {
+	b     *binding
 	once  sync.Once
 	value any
 	err   error
@@ -86,24 +93,25 @@ type binding struct {
 // start runs OnStart and launches the Run hook. The Run context is detached
 // from ctx so the worker is cancelled by Stop, in dependency order, rather
 // than the moment the application context is cancelled.
-func (b *binding) start(ctx context.Context, owner *state) error {
+func (in *instance) start(ctx context.Context, owner *state) error {
+	b := in.b
 	if b.onStart != nil {
-		if err := b.onStart(ctx, b.value); err != nil {
+		if err := b.onStart(ctx, in.value); err != nil {
 			return err
 		}
 	}
 	if b.run != nil {
 		rctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		b.cancel, b.done = cancel, make(chan struct{})
+		in.cancel, in.done = cancel, make(chan struct{})
 		go func() {
-			defer close(b.done)
-			err := b.run(rctx, b.value)
+			defer close(in.done)
+			err := b.run(rctx, in.value)
 			switch {
 			case err == nil:
 			case rctx.Err() == nil: // died on its own: stop the application
 				(&Scope{state: owner}).Shutdown(fmt.Errorf("di: %s: %w", b.key, err))
 			case !errors.Is(err, context.Canceled):
-				b.runErr = err
+				in.runErr = err
 			}
 		}()
 	}
@@ -111,21 +119,22 @@ func (b *binding) start(ctx context.Context, owner *state) error {
 }
 
 // stop cancels the Run hook, waits for it within ctx, then runs OnStop.
-func (b *binding) stop(ctx context.Context) error {
+func (in *instance) stop(ctx context.Context) error {
+	b := in.b
 	var errs []error
-	if b.cancel != nil {
-		b.cancel()
+	if in.cancel != nil {
+		in.cancel()
 		select {
-		case <-b.done:
-			if b.runErr != nil {
-				errs = append(errs, fmt.Errorf("di: %s: %w", b.key, b.runErr))
+		case <-in.done:
+			if in.runErr != nil {
+				errs = append(errs, fmt.Errorf("di: %s: %w", b.key, in.runErr))
 			}
 		case <-ctx.Done():
 			errs = append(errs, fmt.Errorf("di: stopping %s: Run hook did not return: %w", b.key, ctx.Err()))
 		}
 	}
 	if b.onStop != nil {
-		if err := b.onStop(ctx, b.value); err != nil {
+		if err := b.onStop(ctx, in.value); err != nil {
 			errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
 		}
 	}
@@ -141,7 +150,8 @@ type state struct {
 	index    map[key]*binding
 	groups   map[reflect.Type][]*binding
 	frozen   bool
-	started  []*binding // instantiation order; stopped in reverse
+	started  []*instance            // build order; stopped in reverse
+	scoped   map[*binding]*instance // per-scope instances of Scoped bindings
 	children []*state
 
 	startCtx context.Context // set by Start; read by Context()
@@ -188,6 +198,7 @@ func newState(name string, parent *state) *state {
 		parent:     parent,
 		index:      map[key]*binding{},
 		groups:     map[reflect.Type][]*binding{},
+		scoped:     map[*binding]*instance{},
 		shutdownCh: make(chan struct{}),
 	}
 }
@@ -221,6 +232,7 @@ type Binding[T any] struct {
 
 func (s *Scope) register(k key, build func(*Scope) any) *binding {
 	b := &binding{key: k, site: callsite(), build: build}
+	b.single = &instance{b: b}
 	s.mu.Lock()
 	s.pending = append(s.pending, b)
 	s.mu.Unlock()
@@ -268,7 +280,13 @@ func (b Binding[T]) Named(name string) Binding[T] {
 	return b.edit(func(b *binding) { b.key.name = name })
 }
 func (b Binding[T]) Transient() Binding[T] { return b.edit(func(b *binding) { b.transient = true }) }
-func (b Binding[T]) Eager() Binding[T]     { return b.edit(func(b *binding) { b.eager = true }) }
+
+// Scoped makes the binding one-per-scope: each scope that resolves it gets
+// its own instance, built in that scope (so it can see that scope's
+// values) and stopped with it. Declare request-scoped services once in the
+// root and resolve them through the request scope.
+func (b Binding[T]) Scoped() Binding[T] { return b.edit(func(b *binding) { b.scoped = true }) }
+func (b Binding[T]) Eager() Binding[T]  { return b.edit(func(b *binding) { b.eager = true }) }
 
 // Typed lifecycle hooks: no interface sniffing, no reflection.
 func (b Binding[T]) OnStart(f func(context.Context, T) error) Binding[T] {
@@ -343,35 +361,50 @@ func (s *Scope) get(k key) any {
 	r.stack = append(r.stack, k)
 	defer func() { r.stack = r.stack[:len(r.stack)-1] }()
 
-	ownerView := (&Scope{state: owner}).view(r)
 	if b.transient {
-		return b.build(ownerView)
+		return b.build((&Scope{state: owner}).view(r))
 	}
-	b.once.Do(func() {
+
+	// Singletons live in the scope that registered them; scoped instances
+	// live in the scope that resolves them and are built there.
+	holder, in := owner, b.single
+	if b.scoped {
+		holder = s.state
+		holder.mu.Lock()
+		in = holder.scoped[b]
+		if in == nil {
+			in = &instance{b: b}
+			holder.scoped[b] = in
+		}
+		holder.mu.Unlock()
+	}
+	buildView := (&Scope{state: holder}).view(r)
+
+	in.once.Do(func() {
 		defer func() {
 			if rec := recover(); rec != nil {
 				if a, ok := rec.(abort); ok {
-					b.err = fmt.Errorf("di: building %s (provided at %s): %w", k, b.site, a.err)
+					in.err = fmt.Errorf("di: building %s (provided at %s): %w", k, b.site, a.err)
 					return
 				}
-				b.err = fmt.Errorf("di: building %s (provided at %s): panic: %v", k, b.site, rec)
+				in.err = fmt.Errorf("di: building %s (provided at %s): panic: %v", k, b.site, rec)
 			}
 		}()
-		b.value = b.build(ownerView)
-		if ctx, running := owner.runContext(); running {
-			if err := b.start(ctx, owner); err != nil {
-				b.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
+		in.value = b.build(buildView)
+		if ctx, running := holder.runContext(); running {
+			if err := in.start(ctx, holder); err != nil {
+				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
 				return
 			}
 		}
-		owner.mu.Lock()
-		owner.started = append(owner.started, b)
-		owner.mu.Unlock()
+		holder.mu.Lock()
+		holder.started = append(holder.started, in)
+		holder.mu.Unlock()
 	})
-	if b.err != nil {
-		panic(abort{b.err})
+	if in.err != nil {
+		panic(abort{in.err})
 	}
-	return b.value
+	return in.value
 }
 
 func (r *resolver) path() string {
@@ -522,15 +555,15 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	s.running = true
 	s.mu.Unlock()
 
-	for _, b := range started {
-		if err := b.start(ctx, s.state); err != nil {
-			err = fmt.Errorf("di: starting %s: %w", b.key, err)
+	for _, in := range started {
+		if err := in.start(ctx, s.state); err != nil {
+			err = fmt.Errorf("di: starting %s: %w", in.b.key, err)
 			s.mu.Lock()
 			built := s.started
 			s.started = nil
 			s.running = false
 			s.mu.Unlock()
-			return errors.Join(err, stopAll(ctx, slices.DeleteFunc(built, func(x *binding) bool { return x == b })))
+			return errors.Join(err, stopAll(ctx, slices.DeleteFunc(built, func(x *instance) bool { return x == in })))
 		}
 	}
 	return nil
@@ -561,10 +594,10 @@ func (s *Scope) Stop(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func stopAll(ctx context.Context, started []*binding) error {
+func stopAll(ctx context.Context, started []*instance) error {
 	var errs []error
-	for _, b := range slices.Backward(started) {
-		errs = append(errs, b.stop(ctx))
+	for _, in := range slices.Backward(started) {
+		errs = append(errs, in.stop(ctx))
 	}
 	return errors.Join(errs...)
 }
@@ -573,13 +606,13 @@ func stopAll(ctx context.Context, started []*binding) error {
 // its descendants, concurrently, and returns the failures joined. Each
 // failure wraps ErrUnhealthy and names the service.
 func (s *Scope) HealthCheck(ctx context.Context) error {
-	var bs []*binding
+	var ins []*instance
 	var collect func(st *state)
 	collect = func(st *state) {
 		st.mu.Lock()
-		for _, b := range st.started {
-			if b.health != nil {
-				bs = append(bs, b)
+		for _, in := range st.started {
+			if in.b.health != nil {
+				ins = append(ins, in)
 			}
 		}
 		children := slices.Clone(st.children)
@@ -590,12 +623,12 @@ func (s *Scope) HealthCheck(ctx context.Context) error {
 	}
 	collect(s.state)
 
-	errs := make([]error, len(bs))
+	errs := make([]error, len(ins))
 	var wg sync.WaitGroup
-	for i, b := range bs {
+	for i, in := range ins {
 		wg.Go(func() {
-			if err := b.health(ctx, b.value); err != nil {
-				errs[i] = fmt.Errorf("di: %s %w: %w", b.key, ErrUnhealthy, err)
+			if err := in.b.health(ctx, in.value); err != nil {
+				errs[i] = fmt.Errorf("di: %s %w: %w", in.b.key, ErrUnhealthy, err)
 			}
 		})
 	}

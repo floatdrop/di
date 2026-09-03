@@ -50,11 +50,11 @@ func main() {
 			}
 		})
 
-	// Request-scoped: *http.Request is only available inside the request
-	// scope created by Middleware, so this is built once per request.
+	// Request-scoped: declared once here, built once per request scope
+	// created by Middleware, where the *http.Request exists.
 	app.Provide(func(s *di.Scope) *User {
 		return &User{Name: s.Get[*http.Request]().Header.Get("X-User")}
-	})
+	}).Scoped()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
