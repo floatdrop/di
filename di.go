@@ -222,6 +222,8 @@ type instance struct {
 	value any
 	err   error
 
+	startDone chan struct{} // closed when the claimed start step finishes
+
 	// Run hook bookkeeping, set by start and consumed by stop.
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -247,8 +249,11 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 		go func() {
 			defer close(in.done)
 			err := b.run(rctx, in.value)
-			if err == nil || errors.Is(err, context.Canceled) {
+			if err == nil {
 				return
+			}
+			if rctx.Err() != nil && errors.Is(err, context.Canceled) {
+				return // we cancelled it and it reported just that
 			}
 			// Record it whoever cancelled, so Stop reports it in every
 			// driving mode, then wake a waiting Run if it died on its own.
@@ -283,19 +288,27 @@ func (in *instance) claim(owner *state) bool {
 		return false
 	}
 	in.ph = phaseStarting
+	in.startDone = make(chan struct{})
 	return true
 }
 
 // startClaimed runs the start step of an instance already in phaseStarting.
+// The phase is settled and startDone closed even if the hook panics, so a
+// concurrent Stop waiting on it can never hang.
 func (in *instance) startClaimed(ctx context.Context, owner *state) error {
+	ok := false
+	defer func() {
+		owner.mu.Lock()
+		if ok {
+			in.ph = phaseStarted
+		} else {
+			in.ph = phaseFailed
+		}
+		close(in.startDone)
+		owner.mu.Unlock()
+	}()
 	err := in.start(ctx, owner)
-	owner.mu.Lock()
-	if err != nil {
-		in.ph = phaseFailed
-	} else {
-		in.ph = phaseStarted
-	}
-	owner.mu.Unlock()
+	ok = err == nil
 	return err
 }
 
@@ -308,10 +321,20 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) error {
 func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
 	paired := in.b.onStart != nil && owner.everStarted()
 	owner.mu.Lock()
-	owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired)
-	if in.ph != phaseStarting {
-		in.ph = phaseStopped
+	if in.ph == phaseStarting {
+		// Another goroutine is mid-start. Wait for it rather than skipping,
+		// or the instance would escape Stop entirely.
+		done := in.startDone
+		owner.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return fmt.Errorf("di: stopping %s: start step did not finish: %w", in.b.key, ctx.Err())
+		}
+		owner.mu.Lock()
 	}
+	owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired)
+	in.ph = phaseStopped
 	owner.mu.Unlock()
 	if !owed {
 		return nil
@@ -711,6 +734,11 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
 			}
 		}
+		if in.err == nil && holder.stopped.Load() {
+			// Stop ran while we were starting; it waits for the start step,
+			// so the instance is torn down. Do not hand it out.
+			in.err = fmt.Errorf("di: %s: %w", k, ErrStopped)
+		}
 	})
 	if in.err != nil {
 		panic(abort{in.err})
@@ -848,9 +876,11 @@ func recoverAbort(err *error) {
 // ---- lifecycle -------------------------------------------------------------
 
 // Start builds every Eager binding in registration order, then runs the
-// start step of everything built so far, in build order. If a step fails,
-// the scope is stopped, which rolls back exactly the services that did
-// start, child scopes included. After Start returns, a service built later
+// start step of everything built so far, in build order. If a constructor
+// or a start step fails, the scope is stopped, which rolls back exactly the
+// services that did start, child scopes included. A service that was built
+// but never started is not stopped, so acquire resources in OnStart rather
+// than in the constructor when the binding declares one. After Start returns, a service built later
 // runs its start step as part of being built, so lazily resolved services
 // start too. Start may be called once.
 func (s *Scope) Start(ctx context.Context) (err error) {
@@ -864,15 +894,17 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	s.startCtx = ctx
 	var eager []*binding
 	for _, b := range s.all {
-		if b.eager {
+		// Registration order, but only bindings that still own their key:
+		// an overridden eager registration must not be built as well.
+		if b.eager && (b.group || s.index[b.key] == b) {
 			eager = append(eager, b)
 		}
 	}
 	s.mu.Unlock()
 
-	// Registration order, so eager services build predictably.
-	for _, b := range eager {
-		s.enter().resolve(b, s.state, b.key)
+	// F3: a failing eager constructor must roll back like a failing hook.
+	if err := s.buildEager(eager); err != nil {
+		return errors.Join(err, s.Stop(context.WithoutCancel(ctx)))
 	}
 
 	s.mu.Lock()
@@ -893,6 +925,16 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	}
 }
 
+// buildEager builds the eager bindings, turning a constructor failure into
+// an error rather than letting it unwind past Start's rollback.
+func (s *Scope) buildEager(eager []*binding) (err error) {
+	defer recoverAbort(&err)
+	for _, b := range eager {
+		s.enter().resolve(b, s.state, b.key)
+	}
+	return nil
+}
+
 // claimNext claims the start step of the next built-but-unstarted instance
 // in this scope or a descendant, in build order.
 func (st *state) claimNext() (*instance, *state) {
@@ -900,6 +942,7 @@ func (st *state) claimNext() (*instance, *state) {
 	for _, in := range st.started {
 		if in.ph == phaseBuilt {
 			in.ph = phaseStarting
+			in.startDone = make(chan struct{})
 			st.mu.Unlock()
 			return in, st
 		}

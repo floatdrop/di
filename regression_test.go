@@ -6,6 +6,8 @@ package di_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -301,5 +303,102 @@ func TestRegressionTransientBuildsInResolvingScope(t *testing.T) {
 	}
 	if got.db.dsn != "request-scoped" {
 		t.Fatalf("transient saw %q", got.db.dsn)
+	}
+}
+
+// The four below are regressions introduced by the fixes above and caught by
+// a second review pass.
+
+// 13. An eager binding that a later registration overrode must not be built.
+func TestRegressionShadowedEagerNotBuilt(t *testing.T) {
+	var log []string
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { log = append(log, "real"); return &DB{dsn: "real"} }).Eager().
+		OnStart(func(context.Context, *DB) error { log = append(log, "startReal"); return nil })
+	s.Provide(func(*di.Scope) *DB { log = append(log, "fake"); return &DB{dsn: "fake"} }).Eager().
+		OnStart(func(context.Context, *DB) error { log = append(log, "startFake"); return nil })
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(log, ","); got != "fake,startFake" {
+		t.Fatalf("got %q, want only the winning registration built", got)
+	}
+	if got := s.Get[*DB]().dsn; got != "fake" {
+		t.Fatalf("Get returned %q", got)
+	}
+}
+
+// 14. An instance whose start step is in flight when Stop runs must be
+// stopped, and must not be handed to the caller.
+func TestRegressionStopWaitsForInFlightStart(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	stopped := false
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).
+		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
+		OnStop(func(context.Context, *DB) error { stopped = true; return nil })
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	res := make(chan error, 1)
+	go func() { _, err := s.Resolve[*DB](); res <- err }()
+	<-entered
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- s.Stop(context.Background()) }()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Fatal("Stop skipped an instance that was mid-start")
+	}
+	if err := <-res; !errors.Is(err, di.ErrStopped) {
+		t.Fatalf("a stopped scope handed out the value: %v", err)
+	}
+}
+
+// 15. A failing eager constructor rolls back like a failing start hook.
+func TestRegressionEagerConstructorFailureRollsBack(t *testing.T) {
+	boom := errors.New("dial failed")
+	var stops []string
+	s := di.New()
+	child := s.Child("child")
+	child.Value(&Worker{}).OnStop(func(context.Context, *Worker) error { stops = append(stops, "child"); return nil })
+	child.Get[*Worker]()
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).Eager().
+		OnStop(func(context.Context, *DB) error { stops = append(stops, "db"); return nil })
+	s.Provide(func(sc *di.Scope) *Repo { return sc.Must((*Repo)(nil), boom) }).Eager()
+
+	err := s.Start(context.Background())
+	if !errors.Is(err, boom) {
+		t.Fatalf("got %v", err)
+	}
+	if !slices.Contains(stops, "db") || !slices.Contains(stops, "child") {
+		t.Fatalf("rollback stopped %v, want the built service and the child scope", stops)
+	}
+	if _, err := s.Resolve[*DB](); !errors.Is(err, di.ErrStopped) {
+		t.Fatalf("scope must be stopped after a failed Start, got %v", err)
+	}
+}
+
+// 16. A worker dying with an error that wraps context.Canceled, while its own
+// context is alive, is still reported.
+func TestRegressionRunErrorWrappingCanceled(t *testing.T) {
+	s := di.New()
+	s.Value(&Worker{}).Eager().
+		Run(func(ctx context.Context, _ *Worker) error { return fmt.Errorf("upstream dial: %w", context.Canceled) })
+	done := make(chan error, 1)
+	go func() { done <- s.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "upstream dial") {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a dead worker did not stop the application")
 	}
 }
