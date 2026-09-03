@@ -119,8 +119,10 @@ Call them before the scope is first resolved; afterwards they panic.
 
 Later registrations of the same key override earlier ones, which is how a
 child scope shadows its parent and how a test substitutes a fake. Once a key
-has been resolved it can no longer be overridden: replacing it then would
-leave two live instances of one service, so it panics instead. Combinations
+has served a value it can no longer be overridden: replacing it then would
+leave two live instances of one service, so it panics instead. A resolution
+that failed built nothing, so it leaves the key re-registerable, which is
+the only way to recover a key whose constructor failed. Combinations
 that cannot be honoured, such as a lifecycle hook on a transient, are
 rejected the first time the scope is resolved, whatever order the builder
 methods were called in.

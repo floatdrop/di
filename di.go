@@ -171,8 +171,11 @@ type binding struct {
 	run       func(context.Context, any) error
 	health    func(context.Context, any) error
 
-	// used is set once any instance of this binding exists, after which the
-	// registration can no longer be overridden.
+	// used is set once this binding has successfully served a value, after
+	// which the registration can no longer be overridden: doing so would
+	// leave two live instances of one service. A resolution that failed
+	// built nothing, so it leaves the key re-registerable, which is the
+	// only way to recover a key whose constructor failed.
 	used atomic.Bool
 
 	single *instance // the singleton; scoped bindings keep one instance per state
@@ -788,12 +791,15 @@ func (s *Scope) get(k key) any {
 	case f.b == nil:
 		panic(abort{fmt.Errorf("di: %s: %w%s", f.at, ErrNotProvided, r.path())})
 	}
-	// An alias key counts as resolved once something has been served
-	// through it, so it cannot be re-registered either.
+	v := s.resolve(f.b, f.owner, f.at)
+	// An alias key counts as resolved once a value has actually been served
+	// through it. resolve panics on failure, so a failed resolution leaves
+	// the alias re-registerable, which is what lets a caller redirect the
+	// interface to a working implementation.
 	for _, ab := range f.aliases {
 		ab.used.Store(true)
 	}
-	return s.resolve(f.b, f.owner, f.at)
+	return v
 }
 
 // resolve produces b's value for the resolving scope s, honouring the
@@ -814,12 +820,12 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 	r.stack = append(r.stack, k)
 	defer func() { r.stack = r.stack[:len(r.stack)-1] }()
 
-	b.used.Store(true)
-
 	if b.transient {
 		// Built in the resolving scope, like Scoped: nothing is cached, so
 		// it cannot become captive, and it can see this scope's values.
-		return b.build((&Scope{state: s.state}).view(r))
+		v := b.build((&Scope{state: s.state}).view(r))
+		b.used.Store(true)
+		return v
 	}
 
 	// Singletons live in the scope that registered them; scoped instances
@@ -888,6 +894,7 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 	if in.err != nil {
 		panic(abort{in.err})
 	}
+	b.used.Store(true)
 	return in.value
 }
 

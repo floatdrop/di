@@ -775,3 +775,52 @@ func TestRegressionAliasKeyCannotBeRebound(t *testing.T) {
 	s.Provide(func(*di.Scope) Reader { return &Repo{db: &DB{dsn: "second"}} })
 	mustPanic(t, "cannot be overridden", func() { _ = s.Get[Reader]() })
 }
+
+// The two below were found by a seventh, narrow pass over the transactional
+// freeze and the alias used-marking.
+
+// 33. A key whose constructor failed built nothing, so it can be
+// re-registered. Because a failed instance caches its error for good, this
+// is the only way to recover such a key.
+func TestRegressionFailedResolveLeavesKeyReRegisterable(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { panic("boom") })
+	if _, err := s.Resolve[*DB](); err == nil {
+		t.Fatal("expected the constructor panic to surface")
+	}
+	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "recovered"} })
+	got, err := s.Resolve[*DB]()
+	if err != nil {
+		t.Fatalf("re-registration should recover the key: %v", err)
+	}
+	if got.dsn != "recovered" {
+		t.Fatalf("got %q", got.dsn)
+	}
+}
+
+// 34. The same for an alias: redirecting the interface to a working
+// implementation is the whole point of Bind, so a failed target must not
+// foreclose it.
+func TestRegressionFailedAliasTargetLeavesKeyReAliasable(t *testing.T) {
+	s := di.New()
+	s.Bind[Reader, *Repo]()
+	s.Provide(func(*di.Scope) *Repo { panic("boom") })
+	if _, err := s.Resolve[Reader](); err == nil {
+		t.Fatal("expected the target's panic to surface")
+	}
+
+	// Redirect the interface at a different, untouched implementation.
+	s.Bind[Reader, *altReader]()
+	s.Provide(func(*di.Scope) *altReader { return &altReader{} })
+	got, err := s.Resolve[Reader]()
+	if err != nil {
+		t.Fatalf("re-aliasing should be allowed: %v", err)
+	}
+	if got.Read() != "alt" {
+		t.Fatalf("got %q", got.Read())
+	}
+}
+
+type altReader struct{}
+
+func (*altReader) Read() string { return "alt" }
