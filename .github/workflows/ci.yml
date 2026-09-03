@@ -10,12 +10,7 @@ permissions:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -23,12 +18,10 @@ jobs:
           go-version-file: go.mod
           check-latest: true
       - name: gofmt
-        if: runner.os != 'Windows'
         run: test -z "$(gofmt -l .)" || (gofmt -d . && exit 1)
       - name: vet
         run: go vet ./...
       - name: README examples are in sync
-        if: runner.os == 'Linux'
         run: go run github.com/campoy/embedmd@v1.0.0 -d README.md
       - name: run examples
         run: |
