@@ -122,6 +122,8 @@ child scope shadows its parent.
 | `s.Lookup(di.Named[T]("replica"))` | Resolve a named binding through a typed key. |
 | `s.Maybe[T]()` | `(T, bool)` for optional dependencies. |
 | `s.All[T]()` | Every member of the group for `T`, across the scope chain. |
+| `s.Must(v, err)` | Inside a constructor: unwrap a `(T, error)` pair, aborting on error. `db := s.Must(sql.Open(...))` |
+| `s.Context()` | The context passed to `Start`/`Run`, so constructors can dial with a deadline. |
 
 Errors wrap `di.ErrNotProvided` or `di.ErrCycle` and read like:
 
@@ -205,9 +207,14 @@ func TestRepo(t *testing.T) {
 
 `Start` builds every `Eager` binding, then runs `OnStart` hooks in build order.
 If a hook fails, the hooks that already ran are rolled back with `OnStop` and
-`Start` returns both errors. `Stop` stops child scopes first, then runs
-`OnStop` hooks in reverse build order and returns all failures joined with
-`errors.Join`. Only services that were actually built are stopped.
+`Start` returns both errors. A service built after `Start`, lazily or in a
+child scope, runs its `OnStart` as part of being built, so nothing is ever
+handed out unstarted; if that hook fails the resolution fails.
+
+`Stop` stops child scopes first, then runs `OnStop` hooks in reverse build
+order and returns all failures joined with `errors.Join`. Only services that
+were actually built are stopped. Stopping a child scope also detaches it from
+its parent, which is what releases a per-request scope.
 
 Start hooks must not block. A server binds its listener synchronously so a
 busy port fails `Start`, then serves in a goroutine.

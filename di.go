@@ -86,6 +86,9 @@ type state struct {
 	started  []*binding // instantiation order; stopped in reverse
 	children []*state
 
+	startCtx context.Context // set by Start; read by Context()
+	running  bool            // set once Start reaches the hook phase; enables late OnStart
+
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{}
 	shutdownErr  error
@@ -282,6 +285,12 @@ func (s *Scope) get(k key) any {
 			}
 		}()
 		b.value = b.build(ownerView)
+		if ctx, running := owner.runContext(); running && b.onStart != nil {
+			if err := b.onStart(ctx, b.value); err != nil {
+				b.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
+				return
+			}
+		}
 		owner.mu.Lock()
 		owner.started = append(owner.started, b)
 		owner.mu.Unlock()
@@ -350,6 +359,47 @@ func (s *Scope) All[T any]() []T {
 	return out
 }
 
+// Must unwraps a (value, error) pair inside a constructor:
+//
+//	db := s.Must(sql.Open("postgres", dsn))
+//
+// A non-nil error aborts the constructor and surfaces from the enclosing
+// Resolve, Start or Run. Outside a constructor it panics with the error.
+func (s *Scope) Must[T any](v T, err error) T {
+	if err == nil {
+		return v
+	}
+	if s.r != nil {
+		panic(abort{err})
+	}
+	panic(err)
+}
+
+// Context returns the context passed to Start (or Run) on this scope or the
+// nearest started ancestor, so constructors can dial with a deadline. Before
+// Start it returns context.Background().
+func (s *Scope) Context() context.Context {
+	if ctx, _ := s.runContext(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
+// runContext walks up the scope chain to the nearest state that Start was
+// called on. running reports whether that Start has passed its hook phase,
+// which is when bindings built later must start themselves.
+func (st *state) runContext() (ctx context.Context, running bool) {
+	for ; st != nil; st = st.parent {
+		st.mu.Lock()
+		ctx, running = st.startCtx, st.running
+		st.mu.Unlock()
+		if ctx != nil {
+			return ctx, running
+		}
+	}
+	return nil, false
+}
+
 // Resolve is the error-returning entry point.
 func (s *Scope) Resolve[T any]() (v T, err error) {
 	defer recoverAbort(&err)
@@ -370,11 +420,18 @@ func recoverAbort(err *error) {
 
 // Start builds every Eager binding, then runs OnStart hooks in build order.
 // If a hook fails, the hooks that already ran are rolled back with OnStop in
-// reverse order and the scope is left with nothing to stop.
+// reverse order and the scope is left with nothing to stop. After Start
+// returns, a binding built later runs its OnStart as part of being built, so
+// lazily resolved services start too. Start may be called once.
 func (s *Scope) Start(ctx context.Context) (err error) {
 	defer recoverAbort(&err)
 	s.freeze()
 	s.mu.Lock()
+	if s.startCtx != nil {
+		s.mu.Unlock()
+		return errors.New("di: Start called twice")
+	}
+	s.startCtx = ctx
 	var eager []*binding
 	for _, b := range s.index {
 		if b.eager {
@@ -385,19 +442,25 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	for _, b := range eager {
 		s.enter().get(b.key)
 	}
+
+	// Everything built from here on starts itself inside get.
 	s.mu.Lock()
 	started := slices.Clone(s.started)
+	s.running = true
 	s.mu.Unlock()
-	for i, b := range started {
+
+	for _, b := range started {
 		if b.onStart == nil {
 			continue
 		}
 		if err := b.onStart(ctx, b.value); err != nil {
 			err = fmt.Errorf("di: starting %s: %w", b.key, err)
 			s.mu.Lock()
+			built := s.started
 			s.started = nil
+			s.running = false
 			s.mu.Unlock()
-			return errors.Join(err, stopAll(ctx, started[:i]))
+			return errors.Join(err, stopAll(ctx, slices.DeleteFunc(built, func(x *binding) bool { return x == b })))
 		}
 	}
 	return nil
@@ -405,6 +468,8 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 
 // Stop stops child scopes first, then runs OnStop hooks in reverse build
 // order (dependents first). Every failure is reported; Stop is idempotent.
+// Stopping a child scope also detaches it from its parent, so per-request
+// scopes are released once stopped.
 func (s *Scope) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	children := slices.Clone(s.children)
@@ -417,6 +482,12 @@ func (s *Scope) Stop(ctx context.Context) error {
 		errs = append(errs, (&Scope{state: c}).Stop(ctx))
 	}
 	errs = append(errs, stopAll(ctx, started))
+
+	if p := s.parent; p != nil {
+		p.mu.Lock()
+		p.children = slices.DeleteFunc(p.children, func(c *state) bool { return c == s.state })
+		p.mu.Unlock()
+	}
 	return errors.Join(errs...)
 }
 
