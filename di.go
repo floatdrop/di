@@ -56,6 +56,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
@@ -193,7 +194,7 @@ func (b *binding) validate() {
 	case b.eager && lifetimeName(b) != "":
 		// Contradictory on its own terms, so rejected even if a later
 		// registration overrides it. Whether an override can inherit
-		// eagerness is a separate question, settled in recomputeEager.
+		// eagerness is a separate question, settled in deriveEager.
 		bad("Eager", "does not apply to a "+lifetimeName(b)+" binding: it is not built once")
 	case b.alias != nil && (b.transient || b.scoped || hooks):
 		// Eager is allowed: it says the key exists by the time Start
@@ -412,7 +413,7 @@ type state struct {
 	groups    map[reflect.Type][]*binding
 	frozen    bool
 	all       []*binding             // every binding, in registration order
-	eager     []*binding             // derived by recomputeEager: what Start builds
+	eager     []*binding             // derived by deriveEager: what Start builds
 	started   []*instance            // build order; stopped in reverse
 	scoped    map[*binding]*instance // per-scope instances of Scoped bindings
 	children  []*state
@@ -428,54 +429,65 @@ type state struct {
 	shutdownErr  error
 }
 
+// freeze commits the pending registrations. It is transactional: the batch
+// is validated against a prospective copy of the registry and only then
+// committed, so a rejected registration leaves the scope exactly as it was.
+// A scope that holds an invalid registration therefore keeps rejecting,
+// consistently, instead of appearing to succeed on a second attempt with
+// the offending entry silently dropped.
 func (st *state) freeze() {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if len(st.pending) == 0 {
 		return
 	}
-	st.frozen = true
+
+	index := maps.Clone(st.index)
+	groups := maps.Clone(st.groups)
+	all := slices.Clone(st.all)
 	for _, b := range st.pending {
 		b.validate()
 		if b.group {
-			st.groups[b.key.t] = append(st.groups[b.key.t], b)
+			groups[b.key.t] = append(slices.Clone(groups[b.key.t]), b)
 		} else {
 			// Later registration wins, which is how overrides work, but only
 			// until the key has been resolved: replacing it afterwards would
 			// leave two live instances of one service.
-			if prev, ok := st.index[b.key]; ok && prev.used.Load() {
+			if prev, ok := index[b.key]; ok && prev.used.Load() {
 				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it has already been resolved",
 					b.key, prev.site, b.site))
 			}
-			st.index[b.key] = b
+			index[b.key] = b
 		}
-		st.all = append(st.all, b)
+		all = append(all, b)
 	}
-	st.pending = nil
-	st.recomputeEager()
+	eager := deriveEager(all, index)
+
+	st.index, st.groups, st.all, st.eager = index, groups, all, eager
+	st.pending, st.frozen = nil, true
 }
 
-// recomputeEager derives the ordered set of bindings Start builds. It runs
-// whenever registrations change, and is the only place that decides what
-// Eager means, so the set and the rules it must satisfy cannot drift apart:
+// deriveEager returns the ordered set of bindings Start builds. It is the
+// only place that decides what Eager means, so the set and the rules it must
+// satisfy cannot drift apart:
 //
-// For every key, the set holds the binding that owns the key exactly once if
-// any registration for that key was marked Eager, at the position of the
+// For every key, the set holds the binding that serves the key exactly once
+// if any registration for that key was marked Eager, at the position of the
 // first such registration. A group member is its own entry. A binding that
-// owns the key but has a per-scope lifetime cannot honour eagerness and is
+// serves the key but has a per-scope lifetime cannot honour eagerness and is
 // rejected here, whether that combination was declared directly or arrived
-// through an override. A Bind alias may own an eager key: Start then builds
-// the target it redirects to.
-func (st *state) recomputeEager() {
-	st.eager = st.eager[:0]
-	seen := make(map[*binding]bool, len(st.all))
-	for _, b := range st.all {
+// through an override. A Bind alias may serve an eager key: Start then
+// builds the target it redirects to.
+func deriveEager(all []*binding, index map[key]*binding) []*binding {
+	var eager []*binding
+	seen := make(map[*binding]bool, len(all))
+	for _, b := range all {
 		if !b.eager {
 			continue
 		}
 		w := b
 		if !b.group {
-			if w = st.index[b.key]; w == nil {
+			if w = index[b.key]; w == nil {
 				continue
 			}
 		}
@@ -488,8 +500,9 @@ func (st *state) recomputeEager() {
 				b.key, b.site, kind, w.site))
 		}
 		seen[w] = true
-		st.eager = append(st.eager, w)
+		eager = append(eager, w)
 	}
+	return eager
 }
 
 // resolver is the per-resolution context: the path being built, for cycle
@@ -685,11 +698,12 @@ func (b Binding[T]) Health(f func(context.Context, T) error) Binding[T] {
 // the alias keys traversed on the way. An alias binding is never reported,
 // so resolve cannot receive one.
 type found struct {
-	b     *binding
-	owner *state
-	at    key   // the key b is registered under, after following aliases
-	via   []key // alias keys traversed, for cycle detection and error paths
-	cycle bool  // the alias chain looped back on itself
+	b       *binding
+	owner   *state
+	at      key        // the key b is registered under, after following aliases
+	via     []key      // alias keys traversed, for cycle detection and error paths
+	aliases []*binding // the alias bindings traversed, so they count as used
+	cycle   bool       // the alias chain looped back on itself
 }
 
 // lookupKey finds the binding registered for k in this scope or an ancestor,
@@ -721,6 +735,7 @@ func (s *Scope) lookup(k key) found {
 			return f
 		}
 		f.via = append(f.via, f.at)
+		f.aliases = append(f.aliases, b)
 		next := *b.alias
 		if slices.Contains(f.via, next) {
 			f.cycle, f.at = true, next
@@ -772,6 +787,11 @@ func (s *Scope) get(k key) any {
 		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), f.at)})
 	case f.b == nil:
 		panic(abort{fmt.Errorf("di: %s: %w%s", f.at, ErrNotProvided, r.path())})
+	}
+	// An alias key counts as resolved once something has been served
+	// through it, so it cannot be re-registered either.
+	for _, ab := range f.aliases {
+		ab.used.Store(true)
 	}
 	return s.resolve(f.b, f.owner, f.at)
 }
@@ -1010,7 +1030,8 @@ func recoverAbort(err *error) {
 // but never started is not stopped, so acquire resources in OnStart rather
 // than in the constructor when the binding declares one. After Start returns, a service built later
 // runs its start step as part of being built, so lazily resolved services
-// start too. Start may be called once.
+// start too. Start may be called once. It builds this scope's own Eager
+// bindings; a child scope's are built by that child's Start.
 func (s *Scope) Start(ctx context.Context) (err error) {
 	defer recoverAbort(&err)
 	s.freeze()

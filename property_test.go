@@ -13,6 +13,10 @@ package di_test
 //	binding that serves an eager key may not have a per-scope lifetime, nor
 //	may a single registration combine Eager with one.
 
+// The generator starts from a fresh scope each iteration and never touches
+// one again after a rejection, so it cannot see defects in freeze's error
+// paths; those are covered by regression tests instead.
+
 import (
 	"context"
 	"errors"

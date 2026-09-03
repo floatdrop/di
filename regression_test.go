@@ -706,3 +706,72 @@ func TestRegressionEagerDeclaredOnAlias(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// The three below were found by a sixth review pass, which also audited the
+// property test's own model rather than trusting it.
+
+// 30. A rejected registration must be rejected every time. freeze used to
+// clear pending before deriving the eager set, so a panic there left the
+// batch consumed and a retried Start silently succeeded with the invalid
+// configuration dropped.
+func TestRegressionRejectionIsRepeatable(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).Eager()
+	s.Provide(func(*di.Scope) *Repo { return &Repo{} }).Eager()
+	s.Provide(func(*di.Scope) *Repo { return &Repo{} }).Scoped() // eagerness cannot transfer
+
+	for attempt := range 3 {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatalf("attempt %d: Start was accepted, the invalid config was dropped", attempt)
+				}
+			}()
+			_ = s.Start(context.Background())
+		}()
+	}
+}
+
+// 31. A rejected batch must leave the scope as it was, so the rejection is
+// the same on every subsequent operation rather than a half-applied registry.
+func TestRegressionRejectedBatchIsNotHalfApplied(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { return &DB{} })
+	s.Provide(func(*di.Scope) *Repo { return &Repo{} }).Scoped().Transient() // invalid
+
+	var msgs []string
+	for range 3 {
+		func() {
+			defer func() {
+				r := recover()
+				if r == nil {
+					msgs = append(msgs, "accepted")
+					return
+				}
+				msgs = append(msgs, r.(string))
+			}()
+			_, _ = s.Resolve[*DB]()
+		}()
+	}
+	for i, m := range msgs {
+		if !strings.Contains(m, "mutually exclusive") {
+			t.Fatalf("attempt %d: %s", i, m)
+		}
+	}
+	if msgs[0] != msgs[1] || msgs[1] != msgs[2] {
+		t.Fatalf("rejection was not identical across attempts: %v", msgs)
+	}
+}
+
+// 32. An alias key counts as resolved once something has been served through
+// it, so it cannot be re-registered either.
+func TestRegressionAliasKeyCannotBeRebound(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) *Repo { return &Repo{db: &DB{dsn: "first"}} })
+	s.Bind[Reader, *Repo]()
+	if got := s.Get[Reader]().Read(); got != "first" {
+		t.Fatalf("got %q", got)
+	}
+	s.Provide(func(*di.Scope) Reader { return &Repo{db: &DB{dsn: "second"}} })
+	mustPanic(t, "cannot be overridden", func() { _ = s.Get[Reader]() })
+}
