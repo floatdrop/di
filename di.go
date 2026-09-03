@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -53,6 +54,7 @@ func typeName(t reflect.Type) string {
 var (
 	ErrNotProvided = errors.New("not provided")
 	ErrCycle       = errors.New("dependency cycle")
+	ErrUnhealthy   = errors.New("unhealthy")
 )
 
 type abort struct{ err error }
@@ -68,10 +70,66 @@ type binding struct {
 	build     func(*Scope) any
 	onStart   func(context.Context, any) error
 	onStop    func(context.Context, any) error
+	run       func(context.Context, any) error
+	health    func(context.Context, any) error
 
 	once  sync.Once
 	value any
 	err   error
+
+	// Run hook bookkeeping, set by start and consumed by stop.
+	cancel context.CancelFunc
+	done   chan struct{}
+	runErr error
+}
+
+// start runs OnStart and launches the Run hook. The Run context is detached
+// from ctx so the worker is cancelled by Stop, in dependency order, rather
+// than the moment the application context is cancelled.
+func (b *binding) start(ctx context.Context, owner *state) error {
+	if b.onStart != nil {
+		if err := b.onStart(ctx, b.value); err != nil {
+			return err
+		}
+	}
+	if b.run != nil {
+		rctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		b.cancel, b.done = cancel, make(chan struct{})
+		go func() {
+			defer close(b.done)
+			err := b.run(rctx, b.value)
+			switch {
+			case err == nil:
+			case rctx.Err() == nil: // died on its own: stop the application
+				(&Scope{state: owner}).Shutdown(fmt.Errorf("di: %s: %w", b.key, err))
+			case !errors.Is(err, context.Canceled):
+				b.runErr = err
+			}
+		}()
+	}
+	return nil
+}
+
+// stop cancels the Run hook, waits for it within ctx, then runs OnStop.
+func (b *binding) stop(ctx context.Context) error {
+	var errs []error
+	if b.cancel != nil {
+		b.cancel()
+		select {
+		case <-b.done:
+			if b.runErr != nil {
+				errs = append(errs, fmt.Errorf("di: %s: %w", b.key, b.runErr))
+			}
+		case <-ctx.Done():
+			errs = append(errs, fmt.Errorf("di: stopping %s: Run hook did not return: %w", b.key, ctx.Err()))
+		}
+	}
+	if b.onStop != nil {
+		if err := b.onStop(ctx, b.value); err != nil {
+			errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 type state struct {
@@ -220,6 +278,21 @@ func (b Binding[T]) OnStop(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.onStop = func(ctx context.Context, v any) error { return f(ctx, v.(T)) } })
 }
 
+// Run registers a long-running function for T, such as a worker loop. It is
+// started in its own goroutine once the service starts and its context is
+// cancelled when the service stops; Stop waits for it to return. Returning a
+// non-nil error before that calls Shutdown with it, stopping the
+// application.
+func (b Binding[T]) Run(f func(context.Context, T) error) Binding[T] {
+	return b.edit(func(b *binding) { b.run = func(ctx context.Context, v any) error { return f(ctx, v.(T)) } })
+}
+
+// Health registers a health check for T, run by HealthCheck once the
+// service has been built.
+func (b Binding[T]) Health(f func(context.Context, T) error) Binding[T] {
+	return b.edit(func(b *binding) { b.health = func(ctx context.Context, v any) error { return f(ctx, v.(T)) } })
+}
+
 // ---- resolution ------------------------------------------------------------
 
 func (s *Scope) lookup(k key) (*binding, *state) {
@@ -285,8 +358,8 @@ func (s *Scope) get(k key) any {
 			}
 		}()
 		b.value = b.build(ownerView)
-		if ctx, running := owner.runContext(); running && b.onStart != nil {
-			if err := b.onStart(ctx, b.value); err != nil {
+		if ctx, running := owner.runContext(); running {
+			if err := b.start(ctx, owner); err != nil {
 				b.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
 				return
 			}
@@ -450,10 +523,7 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	s.mu.Unlock()
 
 	for _, b := range started {
-		if b.onStart == nil {
-			continue
-		}
-		if err := b.onStart(ctx, b.value); err != nil {
+		if err := b.start(ctx, s.state); err != nil {
 			err = fmt.Errorf("di: starting %s: %w", b.key, err)
 			s.mu.Lock()
 			built := s.started
@@ -494,13 +564,71 @@ func (s *Scope) Stop(ctx context.Context) error {
 func stopAll(ctx context.Context, started []*binding) error {
 	var errs []error
 	for _, b := range slices.Backward(started) {
-		if b.onStop != nil {
-			if err := b.onStop(ctx, b.value); err != nil {
-				errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
-			}
-		}
+		errs = append(errs, b.stop(ctx))
 	}
 	return errors.Join(errs...)
+}
+
+// HealthCheck runs every Health hook of the services built in this scope and
+// its descendants, concurrently, and returns the failures joined. Each
+// failure wraps ErrUnhealthy and names the service.
+func (s *Scope) HealthCheck(ctx context.Context) error {
+	var bs []*binding
+	var collect func(st *state)
+	collect = func(st *state) {
+		st.mu.Lock()
+		for _, b := range st.started {
+			if b.health != nil {
+				bs = append(bs, b)
+			}
+		}
+		children := slices.Clone(st.children)
+		st.mu.Unlock()
+		for _, c := range children {
+			collect(c)
+		}
+	}
+	collect(s.state)
+
+	errs := make([]error, len(bs))
+	var wg sync.WaitGroup
+	for i, b := range bs {
+		wg.Go(func() {
+			if err := b.health(ctx, b.value); err != nil {
+				errs[i] = fmt.Errorf("di: %s %w: %w", b.key, ErrUnhealthy, err)
+			}
+		})
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// ---- request scopes --------------------------------------------------------
+
+type ctxKey struct{}
+
+// WithScope attaches s to ctx so handlers and their callees can reach it
+// with FromContext.
+func WithScope(ctx context.Context, s *Scope) context.Context {
+	return context.WithValue(ctx, ctxKey{}, s)
+}
+
+// FromContext returns the scope attached with WithScope, if any.
+func FromContext(ctx context.Context) (*Scope, bool) {
+	s, ok := ctx.Value(ctxKey{}).(*Scope)
+	return s, ok
+}
+
+// Middleware gives every request its own child scope: the *http.Request is
+// registered in it, the scope is attached to the request context, and it is
+// stopped (and detached) when the handler returns.
+func (s *Scope) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := s.Child("request")
+		req.Value(r)
+		defer req.Stop(context.WithoutCancel(r.Context()))
+		next.ServeHTTP(w, r.WithContext(WithScope(r.Context(), req)))
+	})
 }
 
 // Shutdown asks a running Run to stop, optionally recording why. It never

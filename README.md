@@ -109,6 +109,8 @@ Call them before the scope is first resolved; afterwards they panic.
 | `.Transient()` | Build a fresh instance on every resolution. |
 | `.Eager()` | Build during `Start`. |
 | `.OnStart(f)` / `.OnStop(f)` | Typed lifecycle hooks, `f` is `func(context.Context, T) error`. |
+| `.Run(f)` | Long-running function for `T`, run in its own goroutine and cancelled on stop. |
+| `.Health(f)` | Health check for `T`, run by `HealthCheck`. |
 
 Later registrations of the same key override earlier ones, which is how a
 child scope shadows its parent.
@@ -218,6 +220,67 @@ its parent, which is what releases a per-request scope.
 
 Start hooks must not block. A server binds its listener synchronously so a
 busy port fails `Start`, then serves in a goroutine.
+
+## Background workers
+
+A binding's `Run` hook is for anything that loops until told to stop:
+consumers, pollers, schedulers.
+
+```go
+app.Provide(newMailer).Eager().Run(func(ctx context.Context, m *Mailer) error {
+    return m.Loop(ctx) // returns when ctx is cancelled
+})
+```
+
+The function starts in its own goroutine when the service starts. Its
+context is cancelled when the service stops, in reverse build order, and
+`Stop` waits for it to return within the stop deadline. Returning a non-nil
+error before that calls `Shutdown` with it, so a worker that dies takes the
+application down instead of leaving it half alive. `http.Server` does not
+take a context, so it keeps using `OnStart` and `OnStop`.
+
+## Health checks
+
+```go
+app.Provide(newDB).Health(func(ctx context.Context, db *DB) error { return db.Ping(ctx) })
+
+mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+    if err := app.HealthCheck(r.Context()); err != nil {
+        http.Error(w, err.Error(), http.StatusServiceUnavailable)
+        return
+    }
+    fmt.Fprintln(w, "ok")
+})
+```
+
+`HealthCheck` runs every `Health` hook of the services already built in the
+scope and its descendants, concurrently, bounded by the context, and returns
+the failures joined. Each failure wraps `di.ErrUnhealthy` and names the
+service. Services that were never built are not checked.
+
+## Request scopes
+
+`Middleware` creates a child scope per request, registers the
+`*http.Request` in it, attaches it to the request context, and stops it when
+the handler returns.
+
+```go
+srv := &http.Server{Handler: app.Middleware(mux)}
+
+mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
+    req, _ := di.FromContext(r.Context())
+    user := req.Get[*User]() // built against this request's *http.Request
+})
+```
+
+A service registered in the root that depends on `*http.Request` cannot be
+built there, since the request only exists in the child. Resolve it through
+the request scope and it is built once per request and released with it.
+`di.WithScope` and `di.FromContext` are the primitives if you are not using
+`net/http`.
+
+The complete pattern, with a worker, a health endpoint, request scopes, and
+graceful shutdown, is in [`examples/app`](examples/app/main.go).
 
 ## Graceful shutdown
 
