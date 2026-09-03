@@ -2,54 +2,47 @@
 
 [![CI](https://github.com/floatdrop/di/actions/workflows/ci.yml/badge.svg)](https://github.com/floatdrop/di/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/floatdrop/di.svg)](https://pkg.go.dev/github.com/floatdrop/di)
+[![Go Report Card](https://goreportcard.com/badge/github.com/floatdrop/di)](https://goreportcard.com/report/github.com/floatdrop/di)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A small dependency-injection container for Go 1.27+, built on generic methods.
-Services are registered with `s.Provide(...)` and resolved with `s.Get[T]()`.
-No reflection over your constructors, no code generation, no dependencies.
-
-> Status: early. The API is small on purpose and may still change.
-
-## Why another one
-
-Go 1.27 added [generic methods](https://go.dev/blog/generic-methods). Before
-that, a typed container had to expose package-level functions such as
-`do.Invoke[T](injector)`, and every variation (named, transient, must,
-with-context) became another function. With generic methods the whole API fits
-on one concrete type and reads left to right:
+A dependency-injection container for Go 1.27+, built on
+[generic methods](https://go.dev/blog/generic-methods). Register services with
+`s.Provide(...)`, resolve them with `s.Get[T]()`. No reflection over your
+constructors, no code generation, no dependencies.
 
 ```go
+app := di.New()
+app.Provide(func(s *di.Scope) *DB { return s.Must(sql.Open("postgres", dsn)) }).
+    OnStop(func(ctx context.Context, db *DB) error { return db.Close() })
 app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
-repo := app.Get[*Repo]()
+
+repo, err := app.Resolve[*Repo]()
 ```
 
-Beyond the syntax, the design makes a few deliberate choices:
+- **Keys are Go types.** No naming scheme, no string collisions between packages.
+- **Constructors return `T`, not `(T, error)`.** A missing dependency or a
+  failed constructor unwinds to the enclosing `Resolve` or `Start` as an
+  `error` that names the full dependency path and the registration site.
+- **Typed lifecycle.** `OnStart`, `OnStop`, `Run` and `Health` hooks are typed
+  on the service. Nothing is discovered by sniffing interfaces.
+- **Deterministic shutdown.** Reverse build order, child scopes first, every
+  error reported.
+- **Scopes for requests and tests.** Child scopes shadow their parent; the
+  last registration of a key wins until that key has served a value.
 
-- **Keys are Go types, not strings.** Services are keyed by `reflect.Type`
-  identity plus an optional name, so same-named types in different packages
-  never collide and there is no naming scheme to learn.
-- **Constructors return `T`, not `(T, error)`.** Inside a constructor,
-  `s.Get[X]()` either returns the dependency or unwinds to the enclosing
-  `Resolve`/`Start` call, which reports a normal `error` with the full path and
-  the file:line where the failing service was registered.
-- **Typed lifecycle hooks.** `OnStart`/`OnStop` take `func(context.Context, T)
-  error` on the binding. Nothing is discovered by sniffing interfaces.
-- **Deterministic shutdown.** `Stop` runs hooks in reverse build order,
-  sequentially, and joins every error.
-- **Overrides are the test seam.** The last registration of a key wins, so a
-  test wires the production graph into a fresh scope and re-registers the one
-  thing it wants faked. No mocks of the container are needed.
-
-## Install
+## Installation
 
 ```sh
 go get github.com/floatdrop/di
 ```
 
-Requires Go 1.27 or newer.
+Requires Go 1.27 or newer. Editor support for generic methods needs gopls
+v0.23 or newer.
 
 ## Quick start
 
-Every snippet below lives under [`examples/`](examples/) and is compiled in CI.
+Every example in this document is a compiled program under
+[`examples/`](examples/) and is run in CI.
 
 [embedmd]:# (examples/quickstart/main.go go)
 ```go
@@ -98,59 +91,66 @@ func main() {
 }
 ```
 
-## Registration
+## Guide
 
-Every registration returns a typed `Binding[T]` whose methods refine it.
-Call them before the scope is first resolved; afterwards they panic.
+### Registration
 
-| Call | Meaning |
+Each registration returns a typed `Binding[T]`. Its methods refine the
+registration and must be called before the scope is first resolved.
+
+| Call | Registers |
 |---|---|
-| `s.Provide(func(*di.Scope) T)` | Lazily built singleton. `T` is inferred from the constructor. |
+| `s.Provide(func(*di.Scope) T)` | A lazily built singleton. `T` is inferred. |
 | `s.Value(v)` | An instance you already have. |
-| `s.Bind[I, T]()` | Serve requests for interface `I` from `T`'s binding, with `T`'s lifetime, instance and hooks. Checked at registration. |
-| `s.Add(func(*di.Scope) T)` | Append to the multi-binding group for `T`. |
-| `.Named("replica")` | Register under a name in addition to the type. |
-| `.Transient()` | Build a fresh instance on every resolution, in the resolving scope. Instances are not tracked, so lifecycle hooks and `Eager` are rejected on a transient; it must own its own cleanup. |
-| `.Scoped()` | One instance per resolving scope, built and stopped there. Not allowed on `Value`. |
-| `.Eager()` | Build during `Start`, in registration order. |
-| `.OnStart(f)` / `.OnStop(f)` | Typed lifecycle hooks, `f` is `func(context.Context, T) error`. |
-| `.Run(f)` | Long-running function for `T`, run in its own goroutine and cancelled on stop. |
-| `.Health(f)` | Health check for `T`, run by `HealthCheck`. |
+| `s.Bind[I, T]()` | An alias: `I` is served by `T`'s binding, lifetime and hooks included. |
+| `s.Add(func(*di.Scope) T)` | A member of the group for `T`. |
 
-Later registrations of the same key override earlier ones, which is how a
-child scope shadows its parent and how a test substitutes a fake. Once a key
-has served a value it can no longer be overridden, in the scope that owns
-it or in any scope that resolved through it: replacing it then would leave
-one key with two live values, so it panics instead. Shadowing a key a scope
-has not yet resolved stays legal, which is what child scopes and tests rely
-on. A resolution that failed built nothing, so it leaves the key
-re-registerable, which is the only way to recover a key whose constructor
-failed. Combinations
-that cannot be honoured, such as a lifecycle hook on a transient, are
-rejected the first time the scope is resolved, whatever order the builder
-methods were called in.
-
-## Resolution
-
-| Call | Meaning |
+| Method | Effect |
 |---|---|
-| `s.Get[T]()` | Resolve `T`. Inside a constructor a failure unwinds to the caller; at top level it panics with the error. |
-| `s.Resolve[T]()` | Same, returning `(T, error)`. |
-| `s.Lookup(di.Named[T]("replica"))` | Resolve a named binding through a typed key. |
-| `s.Maybe[T]()` | `(T, bool)` for optional dependencies. |
-| `s.All[T]()` | Every member of the group for `T`, across the scope chain. |
-| `s.Must(v, err)` | Inside a constructor: unwrap a `(T, error)` pair, aborting on error. `db := s.Must(sql.Open(...))` |
-| `s.Context()` | The context passed to `Start`/`Run`, so constructors can dial with a deadline. |
-| `s.Observe(fn)` | Receive lifecycle events from this scope and its descendants. |
+| `.Named("replica")` | Also register under a name. |
+| `.Scoped()` | One instance per resolving scope, built and stopped there. |
+| `.Transient()` | A new, untracked instance on every resolution. |
+| `.Eager()` | Build during `Start`, in registration order. |
+| `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
+| `.Run(f)` | A long-running function, cancelled on stop. |
+| `.Health(f)` | A health check, run by `HealthCheck`. |
 
-Errors wrap `di.ErrNotProvided` or `di.ErrCycle` and read like:
+Rules the container enforces:
+
+- The last registration of a key wins. That is how a child scope shadows its
+  parent and how a test substitutes a fake.
+- Once a key has served a value it can no longer be replaced, in the scope
+  that owns it or in any scope that resolved through it. Replacing it would
+  leave one key with two live values, so it panics instead. A resolution that
+  failed built nothing and leaves the key re-registerable.
+- Combinations that cannot be honoured are rejected when the scope is first
+  resolved, whatever order the methods were called in: hooks or `Eager` on a
+  transient, `Eager` on a scoped binding, a lifetime on a `Value`, and
+  lifetimes or hooks on an alias.
+
+### Resolution
+
+| Call | Returns |
+|---|---|
+| `s.Get[T]()` | `T`. Inside a constructor a failure unwinds to the caller; at top level it panics with the error. |
+| `s.Resolve[T]()` | `(T, error)`. Never panics on a wiring problem. |
+| `s.Lookup(di.Named[T]("replica"))` | A named binding, through a typed key. |
+| `s.Maybe[T]()` | `(T, bool)`, for optional dependencies. |
+| `s.All[T]()` | Every member of the group for `T`, across the scope chain. |
+| `s.Must(v, err)` | `v`, or aborts the constructor with `err`. |
+| `s.Context()` | The context passed to `Start`, so constructors can dial with a deadline. |
+
+Errors wrap `di.ErrNotProvided`, `di.ErrCycle` or `di.ErrStopped`:
 
 ```
-di: building *app.Repo (provided at /src/app/wire.go:31): *app.DB: not provided (needed by [*app.Repo])
+di: building *app.Repo (provided at app/wire.go:31): *app.DB: not provided (needed by [*app.Repo])
 di: building *app.A (provided at ...): di: building *app.B (provided at ...): di: dependency cycle: [*app.A *app.B] -> *app.A
 ```
 
-## Scopes
+### Scopes
+
+A child scope resolves through its parent, reuses the parent's singletons, and
+owns the lifecycle of what it builds itself.
 
 [embedmd]:# (examples/scopes/main.go go)
 ```go
@@ -188,64 +188,31 @@ func main() {
 }
 ```
 
-A child resolves through its parent, reuses the parent's singletons, and owns
-the lifecycle of whatever it builds itself. A singleton always builds its
-dependencies in the scope that registered it, so a child cannot rewire a
-parent singleton. A service that must see child-scoped values is declared
+A singleton is built in the scope that registered it, so a child cannot rewire
+a parent's singleton. A service that must see child-scoped values is declared
 `Scoped()`: one instance per resolving scope, built there.
 
-For tests, `di.Test` wires the production graph into a fresh scope and stops
-it when the test ends, failing the test if a stop hook errors. Override
-before anything is resolved:
-
-[embedmd]:# (examples/testing/repo_test.go go)
-```go
-package app
-
-import (
-	"testing"
-
-	"github.com/floatdrop/di"
-)
-
-func TestRepo(t *testing.T) {
-	s := di.Test(t, Wire)                // production graph, stopped when the test ends
-	s.Value(&DB{DSN: "sqlite://memory"}) // later registration wins: replaces the production *DB
-
-	repo := s.Get[*Repo]() // built against the fake DB
-	if repo.DB.DSN != "sqlite://memory" {
-		t.Fatalf("got %q", repo.DB.DSN)
-	}
-}
-```
-
-## Lifecycle
+### Lifecycle
 
 `Start` builds every `Eager` binding, then runs `OnStart` hooks in build order.
-If a hook fails, `Start` stops the scope and returns both errors, which rolls
-back exactly the services that did start, child scopes included. A service built after `Start`, lazily or in a
-child scope, runs its `OnStart` as part of being built, so nothing is ever
-handed out unstarted; if that hook fails the resolution fails.
+If a constructor or hook fails, `Start` stops the scope and returns both
+errors; that rolls back exactly the services that started, child scopes
+included. A service built after `Start` runs its `OnStart` as part of being
+built, so nothing is handed out unstarted.
 
 `Stop` stops child scopes first, then runs `OnStop` hooks in reverse build
-order and returns all failures joined with `errors.Join`. A service is
-stopped only when its stop is owed: its `OnStart` succeeded, or it has no
-`OnStart` to pair with, in which case `OnStop` is a plain destructor for what
-the constructor acquired. Stopping a child scope also detaches it from
-its parent, which is what releases a per-request scope. A stopped scope, and
-any scope under it, refuses to resolve anything with `di.ErrStopped`, so a
-closed service is never handed out.
+order, and returns every failure joined. A service is stopped only when its
+stop is owed: its `OnStart` succeeded, or it has no `OnStart` to pair with, in
+which case `OnStop` is a plain destructor. Afterwards the scope and everything
+under it refuses to resolve, with `di.ErrStopped`.
 
-Group members registered with `Add` are ordinary bindings: singletons by
-default, built once, started and stopped like everything else.
-
-Start hooks must not block. A server binds its listener synchronously so a
+Start hooks must not block. A server binds its listener synchronously, so a
 busy port fails `Start`, then serves in a goroutine.
 
-## Background workers
+### Workers
 
-A binding's `Run` hook is for anything that loops until told to stop:
-consumers, pollers, schedulers.
+`Run` is for anything that loops until told to stop: consumers, pollers,
+schedulers.
 
 ```go
 app.Provide(newMailer).Eager().Run(func(ctx context.Context, m *Mailer) error {
@@ -253,14 +220,13 @@ app.Provide(newMailer).Eager().Run(func(ctx context.Context, m *Mailer) error {
 })
 ```
 
-The function starts in its own goroutine when the service starts. Its
-context is cancelled when the service stops, in reverse build order, and
-`Stop` waits for it to return within the stop deadline. Returning a non-nil
-error before that calls `Shutdown` with it, so a worker that dies takes the
-application down instead of leaving it half alive. `http.Server` does not
-take a context, so it keeps using `OnStart` and `OnStop`.
+The function runs in its own goroutine from the moment the service starts.
+Its context is cancelled when the service stops, and `Stop` waits for it
+within the stop deadline. Returning an error before that calls `Shutdown`, so
+a worker that dies takes the application down rather than leaving it half
+alive.
 
-## Health checks
+### Health checks
 
 ```go
 app.Provide(newDB).Health(func(ctx context.Context, db *DB) error { return db.Ping(ctx) })
@@ -274,28 +240,27 @@ mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
-`HealthCheck` runs every `Health` hook of the services already built in the
-scope and its descendants, concurrently, bounded by the context, and returns
-the failures joined. Each failure wraps `di.ErrUnhealthy` and names the
-service. Services that were never built are not checked.
+`HealthCheck` runs the `Health` hook of every service already built in the
+scope and its descendants, concurrently and bounded by the context. Each
+failure wraps `di.ErrUnhealthy` and names the service.
 
-## Request scopes
+### Request scopes
 
-`Middleware` creates a child scope per request, registers the
-`*http.Request` in it, attaches it to the request context, and stops it when
-the handler returns.
+`Middleware` gives each request a child scope holding the `*http.Request`,
+attaches it to the request context, and stops it when the handler returns.
 
 ```go
 srv := &http.Server{Handler: app.Middleware(mux)}
 
 mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
     req, _ := di.FromContext(r.Context())
-    user := req.Get[*User]() // built against this request's *http.Request
+    user := req.Get[*User]()
 })
 ```
 
-Services that depend on the request are declared once, in the root, with
-`Scoped()`:
+Services that depend on the request are declared once, in the root, as
+`Scoped()`; they are built per request, cached for its duration, and stopped
+with it:
 
 ```go
 app.Provide(func(s *di.Scope) *User {
@@ -303,45 +268,16 @@ app.Provide(func(s *di.Scope) *User {
 }).Scoped()
 ```
 
-A scoped binding is built in the scope that resolves it, so it sees that
-request's `*http.Request`, is cached for the rest of the request, and is
-stopped with it. Resolving it from the root fails with `ErrNotProvided`
-rather than producing an instance built with the wrong data. `di.WithScope`
-and `di.FromContext` are the primitives if you are not using `net/http`.
+`di.WithScope` and `di.FromContext` are the primitives if you are not using
+`net/http`. A complete service with a worker, a health endpoint, request scopes
+and graceful shutdown is in [`examples/app`](examples/app/main.go).
 
-The complete pattern, with a worker, a health endpoint, request scopes, and
-graceful shutdown, is in [`examples/app`](examples/app/main.go).
+### Graceful shutdown
 
-## Observability
-
-```go
-app.Observe(di.SlogObserver(slog.Default()))
-
-app.Observe(func(ev di.Event) {
-    if ev.Kind == di.EventBuild {
-        buildDuration.WithLabelValues(ev.Service).Observe(ev.Duration.Seconds())
-    }
-})
-```
-
-Observers registered on a scope receive an `Event` for every constructor,
-`OnStart`, `OnStop`, and `Health` hook that runs in that scope or any scope
-under it, plus one for each `Shutdown` call. Each event names the service,
-its scope, the registration site, the duration, and the error if the step
-failed. This is also how a request scope's stop errors reach you: the
-middleware cannot return them, so it reports them here.
-
-## Graceful shutdown
-
-`Run` is the main-function helper: it starts the scope, blocks until the
-context is cancelled, `SIGINT`/`SIGTERM` arrives, or something calls
-`Shutdown`, then stops everything with a bounded context (15 seconds by
-default, see `di.StopTimeout`). A second signal during the stop cancels that
-context so a hung hook cannot keep the process alive.
-
-`Shutdown(err)` can be called from any goroutine, never blocks, and the first
-call wins. Use it when a long-running service dies on its own; `Run` returns
-the error you passed.
+`Run` is the main-function helper. It starts the scope, blocks until the
+context is cancelled, `SIGINT` or `SIGTERM` arrives, or `Shutdown` is called,
+then stops everything with a bounded context. A second signal during the stop
+cancels that context, so a hung hook cannot keep the process alive.
 
 [embedmd]:# (examples/server/main.go go)
 ```go
@@ -412,70 +348,109 @@ func main() {
 }
 ```
 
-## Concurrency
+### Observability
 
-Resolution is safe to call from many goroutines. Each singleton is built at
-most once; the per-call resolution path is kept off the scope so concurrent
-resolutions never share state.
+```go
+app.Observe(di.SlogObserver(slog.Default()))
 
-## Benchmarks
+app.Observe(func(ev di.Event) {
+    if ev.Kind == di.EventBuild {
+        buildDuration.WithLabelValues(ev.Service).Observe(ev.Duration.Seconds())
+    }
+})
+```
 
-The `benchmarks/` directory is a separate module comparing this package with
-[samber/do](https://github.com/samber/do) on the same four-service graph.
-Indicative numbers on Apple Silicon:
+Observers receive an `Event` for every constructor and every `OnStart`,
+`OnStop` and `Health` hook in the scope and its descendants, plus one per
+`Shutdown`. Each event names the service, its scope, the registration site,
+the duration and the error, if any.
 
-| | Warm resolve | Allocs | Cold register + build |
-|---|---|---|---|
-| `di` | 42 ns | 3 | 2.5 µs, 46 allocs |
-| `do` v2.1 | 119 ns | 6 | 6.1 µs, 120 allocs |
+### Testing your application
+
+`di.Test` wires the production graph into a fresh scope and stops it when the
+test ends, failing the test if a stop hook errors. Override what you need
+before anything is resolved.
+
+[embedmd]:# (examples/testing/repo_test.go go)
+```go
+package app
+
+import (
+	"testing"
+
+	"github.com/floatdrop/di"
+)
+
+func TestRepo(t *testing.T) {
+	s := di.Test(t, Wire)                // production graph, stopped when the test ends
+	s.Value(&DB{DSN: "sqlite://memory"}) // later registration wins: replaces the production *DB
+
+	repo := s.Get[*Repo]() // built against the fake DB
+	if repo.DB.DSN != "sqlite://memory" {
+		t.Fatalf("got %q", repo.DB.DSN)
+	}
+}
+```
+
+## Design notes
+
+**Why generic methods.** Before Go 1.27 a typed container had to expose
+package-level functions such as `do.Invoke[T](injector)`, and every variation
+became another function. With generic methods the whole API lives on one
+concrete type and reads left to right. The trade-off is that generic methods
+cannot appear on interfaces, so `*di.Scope` is concrete; substitute
+dependencies through scopes rather than by mocking the container.
+
+**Concurrency.** Resolution is safe from many goroutines. Each singleton is
+built at most once, and the per-call resolution path is kept off the scope so
+concurrent resolutions never share state.
+
+**Known limitations.** The dependency graph is only known once constructors
+run, so a missing dependency of a lazy service surfaces on first resolution,
+or at `Start` if the service is eager; there is no whole-graph validation.
+Transient instances are not tracked and get no lifecycle hooks.
+
+## Performance
+
+[`benchmarks/`](benchmarks/) is a separate module comparing this package with
+[samber/do](https://github.com/samber/do) on the same four-service graph, so
+the library itself stays dependency-free. On Apple Silicon:
+
+| | Warm resolve | Cold register and build |
+|---|---|---|
+| `di` | 53 ns, 2 allocs | 3.5 µs, 64 allocs |
+| `do` v2.1 | 127 ns, 6 allocs | 6.2 µs, 120 allocs |
 
 ```sh
 cd benchmarks && go test -bench . -benchmem
 ```
 
-## Testing
+## Versioning
 
-Alongside ordinary tests, two generative suites guard the parts that proved
-easiest to get wrong. `TestPropertyEagerSet` generates random registration
-sequences and checks the derived eager set against a model of the
-documented rules. `TestMachineSeeded` and `FuzzMachine` drive random
-sequences of *operations* — register, resolve, start, stop, health — and
-check invariants rather than predicted outcomes: `Resolve` never panics, a
-rejected configuration is rejected identically when repeated, a stopped
-scope resolves to `ErrStopped`, a singleton is stable, nothing is stopped
-more often than it was built, and every `Run` hook has returned once the
-root is stopped.
-
-```sh
-go test -run '^$' -fuzz FuzzMachine -fuzztime 2m
-```
+While the major version is 0, a minor bump may change behaviour. Every entry
+in [CHANGELOG.md](CHANGELOG.md) and on the
+[releases page](https://github.com/floatdrop/di/releases) says whether an
+upgrade can break a caller.
 
 ## Contributing
 
-README code blocks are generated from `examples/` with
-[embedmd](https://github.com/campoy/embedmd). After editing an example run:
+Alongside ordinary tests, three generative suites guard the parts that proved
+easiest to get wrong: a property test over random registration sequences, a
+model-based test over random sequences of operations checked against
+documented invariants, and a fuzz target over the same invariants.
 
 ```sh
-go run github.com/campoy/embedmd@v1.0.0 -w README.md
+go test -race ./...
+go test -run '^$' -fuzz FuzzMachine -fuzztime 2m .
 ```
 
-## Limitations
+The code blocks in this README are embedded from `examples/` with
+[embedmd](https://github.com/campoy/embedmd). After editing an example:
 
-- The dependency graph is only known once constructors run, so a missing
-  dependency of a lazy service surfaces on first resolution or at `Start` if
-  the service is eager. There is no whole-graph validation yet.
-- Generic methods cannot live on interfaces, so `*di.Scope` is a concrete
-  type. Use child scopes rather than mocks to substitute dependencies.
-- Generic methods are invisible to `reflect`; the container does not rely on
-  that, but tooling that discovers methods reflectively will not see them.
-
-## Changelog
-
-Release notes live in [CHANGELOG.md](CHANGELOG.md) and on the
-[releases page](https://github.com/floatdrop/di/releases). While the major
-version is 0, a minor bump may change behaviour; each entry says whether an
-upgrade can break a caller.
+```sh
+gofmt -w examples/ && go run github.com/campoy/embedmd@v1.0.0 -w README.md
+```
 
 ## License
 
-MIT
+[MIT](LICENSE)
