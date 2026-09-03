@@ -222,7 +222,7 @@ type instance struct {
 	value any
 	err   error
 
-	startDone chan struct{} // closed when the claimed start step finishes
+	stopWanted bool // Stop arrived mid-start; the claimer tears it down
 
 	// Run hook bookkeeping, set by start and consumed by stop.
 	cancel context.CancelFunc
@@ -288,13 +288,12 @@ func (in *instance) claim(owner *state) bool {
 		return false
 	}
 	in.ph = phaseStarting
-	in.startDone = make(chan struct{})
 	return true
 }
 
 // startClaimed runs the start step of an instance already in phaseStarting.
-// The phase is settled and startDone closed even if the hook panics, so a
-// concurrent Stop waiting on it can never hang.
+// The phase is settled even if the hook panics, and a Stop that arrived
+// while the step was in flight is honoured here, on this goroutine.
 func (in *instance) startClaimed(ctx context.Context, owner *state) error {
 	ok := false
 	defer func() {
@@ -304,12 +303,27 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) error {
 		} else {
 			in.ph = phaseFailed
 		}
-		close(in.startDone)
+		wanted := in.stopWanted
 		owner.mu.Unlock()
+		if wanted {
+			_ = in.stopIfNeeded(owner.stopContext(), owner)
+		}
 	}()
 	err := in.start(ctx, owner)
 	ok = err == nil
 	return err
+}
+
+// stopContext returns the context Stop was called with, or a background one
+// if the scope was stopped without recording it.
+func (st *state) stopContext() context.Context {
+	st.mu.Lock()
+	ctx := st.stopCtx
+	st.mu.Unlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // stopIfNeeded runs the stop step once, and only when it is owed. It is owed
@@ -322,16 +336,12 @@ func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
 	paired := in.b.onStart != nil && owner.everStarted()
 	owner.mu.Lock()
 	if in.ph == phaseStarting {
-		// Another goroutine is mid-start. Wait for it rather than skipping,
-		// or the instance would escape Stop entirely.
-		done := in.startDone
+		// The start step is in flight. Hand the teardown to the goroutine
+		// running it rather than waiting here: that goroutine may be this
+		// one, if a start hook called Stop, and waiting would deadlock.
+		in.stopWanted = true
 		owner.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return fmt.Errorf("di: stopping %s: start step did not finish: %w", in.b.key, ctx.Err())
-		}
-		owner.mu.Lock()
+		return nil
 	}
 	owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired)
 	in.ph = phaseStopped
@@ -707,7 +717,7 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 			return
 		}
 		holder.mu.Lock()
-		if holder.stopped.Load() {
+		if holder.isStopped() {
 			// Stop ran while we were building, so its snapshot did not
 			// include us: undo with the context Stop was given, and fail.
 			stopCtx := holder.stopCtx
@@ -734,7 +744,7 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
 			}
 		}
-		if in.err == nil && holder.stopped.Load() {
+		if in.err == nil && holder.isStopped() {
 			// Stop ran while we were starting; it waits for the start step,
 			// so the instance is torn down. Do not hand it out.
 			in.err = fmt.Errorf("di: %s: %w", k, ErrStopped)
@@ -892,13 +902,24 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 		return errors.New("di: Start called twice")
 	}
 	s.startCtx = ctx
+	// Eagerness belongs to the key, not to one registration: an overridden
+	// binding must not be built as well, but its replacement still is.
+	// Registration order, deduplicated.
 	var eager []*binding
+	seen := map[*binding]bool{}
 	for _, b := range s.all {
-		// Registration order, but only bindings that still own their key:
-		// an overridden eager registration must not be built as well.
-		if b.eager && (b.group || s.index[b.key] == b) {
-			eager = append(eager, b)
+		if !b.eager {
+			continue
 		}
+		winner := b
+		if !b.group {
+			winner = s.index[b.key]
+		}
+		if winner == nil || seen[winner] {
+			continue
+		}
+		seen[winner] = true
+		eager = append(eager, winner)
 	}
 	s.mu.Unlock()
 
@@ -942,7 +963,6 @@ func (st *state) claimNext() (*instance, *state) {
 	for _, in := range st.started {
 		if in.ph == phaseBuilt {
 			in.ph = phaseStarting
-			in.startDone = make(chan struct{})
 			st.mu.Unlock()
 			return in, st
 		}
@@ -960,7 +980,9 @@ func (st *state) claimNext() (*instance, *state) {
 // Stop stops child scopes first, then runs OnStop hooks in reverse build
 // order (dependents first). A service is stopped only if it actually
 // started, or if it declares no OnStart, in which case OnStop is a plain
-// destructor. Every failure is reported; Stop is idempotent.
+// destructor. A service whose start step is in flight is torn down by the
+// goroutine running it, which may finish just after Stop returns.
+// Every failure is reported; Stop is idempotent.
 // Afterwards the scope and its descendants refuse to resolve anything, with
 // ErrStopped, so a closed service can never be handed out.
 // Stopping a child scope also detaches it from its parent, so per-request

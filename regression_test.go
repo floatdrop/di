@@ -328,16 +328,17 @@ func TestRegressionShadowedEagerNotBuilt(t *testing.T) {
 	}
 }
 
-// 14. An instance whose start step is in flight when Stop runs must be
-// stopped, and must not be handed to the caller.
-func TestRegressionStopWaitsForInFlightStart(t *testing.T) {
+// 14. An instance whose start step is in flight when Stop runs must still be
+// torn down. Stop hands that teardown to the goroutine running the step, so
+// it completes just after Stop returns rather than being skipped.
+func TestRegressionStopHandsOffInFlightStart(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	stopped := false
+	stopped := make(chan struct{})
 	s := di.New()
 	s.Provide(func(*di.Scope) *DB { return &DB{} }).
 		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
-		OnStop(func(context.Context, *DB) error { stopped = true; return nil })
+		OnStop(func(context.Context, *DB) error { close(stopped); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -345,16 +346,15 @@ func TestRegressionStopWaitsForInFlightStart(t *testing.T) {
 	go func() { _, err := s.Resolve[*DB](); res <- err }()
 	<-entered
 
-	stopDone := make(chan error, 1)
-	go func() { stopDone <- s.Stop(context.Background()) }()
-	time.Sleep(20 * time.Millisecond)
-	close(release)
-
-	if err := <-stopDone; err != nil {
+	if err := s.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !stopped {
-		t.Fatal("Stop skipped an instance that was mid-start")
+	close(release)
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight instance was never torn down")
 	}
 	if err := <-res; !errors.Is(err, di.ErrStopped) {
 		t.Fatalf("a stopped scope handed out the value: %v", err)
@@ -400,5 +400,102 @@ func TestRegressionRunErrorWrappingCanceled(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a dead worker did not stop the application")
+	}
+}
+
+// The four below are regressions introduced by the previous fixes and caught
+// by a third review pass.
+
+// 17. Stop called from inside a start step must not deadlock. The teardown
+// is handed to the goroutine running the step, which is this one.
+func TestRegressionStopInsideStartHookDoesNotDeadlock(t *testing.T) {
+	stopped := false
+	s := di.New()
+	s.Value(&DB{}).Eager().
+		OnStart(func(ctx context.Context, _ *DB) error { return s.Stop(context.Background()) }).
+		OnStop(func(context.Context, *DB) error { stopped = true; return nil })
+
+	done := make(chan error, 1)
+	go func() { done <- s.Start(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start deadlocked")
+	}
+	if !stopped {
+		t.Fatal("the service was never torn down")
+	}
+	if _, err := s.Resolve[*DB](); !errors.Is(err, di.ErrStopped) {
+		t.Fatalf("scope should be stopped: %v", err)
+	}
+}
+
+// 18. A Stop whose deadline expires while a start step is in flight must not
+// orphan the instance: its Run hook is cancelled and its OnStop runs.
+func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
+	entered := make(chan struct{})
+	runCancelled := make(chan struct{})
+	stopped := make(chan struct{})
+	s := di.New()
+	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).
+		OnStart(func(context.Context, *Worker) error { close(entered); time.Sleep(150 * time.Millisecond); return nil }).
+		Run(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); close(runCancelled); return nil }).
+		OnStop(func(context.Context, *Worker) error { close(stopped); return nil })
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = s.Resolve[*Worker]() }()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_ = s.Stop(ctx)
+
+	for _, ch := range []chan struct{}{runCancelled, stopped} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the instance was orphaned: its Run hook or OnStop never ran")
+		}
+	}
+}
+
+// 19. Overriding an Eager binding keeps the key eager: the replacement is
+// built at Start, which is what the test seam relies on.
+func TestRegressionOverrideKeepsKeyEager(t *testing.T) {
+	var log []string
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { log = append(log, "real"); return &DB{dsn: "real"} }).Eager().
+		OnStart(func(context.Context, *DB) error { log = append(log, "startReal"); return nil })
+	s.Value(&DB{dsn: "fake"}).
+		OnStart(func(context.Context, *DB) error { log = append(log, "startFake"); return nil })
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(log, ","); got != "startFake" {
+		t.Fatalf("got %q, want the replacement started and the original never built", got)
+	}
+	if got := s.Get[*DB]().dsn; got != "fake" {
+		t.Fatalf("Get returned %q", got)
+	}
+}
+
+// 20. A scope whose ancestor is already stopped must refuse to resolve, even
+// before its own stopped flag is set.
+func TestRegressionAncestorStoppedRejectsChild(t *testing.T) {
+	root := di.New()
+	root.Provide(func(*di.Scope) *Repo { return &Repo{} }).Scoped()
+	child := root.Child("child")
+	if _, err := child.Resolve[*Repo](); err != nil {
+		t.Fatal(err)
+	}
+	grand := child.Child("grand")
+	if err := root.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for name, sc := range map[string]*di.Scope{"child": child, "grandchild": grand} {
+		if _, err := sc.Resolve[*Repo](); !errors.Is(err, di.ErrStopped) {
+			t.Fatalf("%s resolved from a stopped tree: %v", name, err)
+		}
 	}
 }
