@@ -131,6 +131,7 @@ child scope shadows its parent.
 | `s.All[T]()` | Every member of the group for `T`, across the scope chain. |
 | `s.Must(v, err)` | Inside a constructor: unwrap a `(T, error)` pair, aborting on error. `db := s.Must(sql.Open(...))` |
 | `s.Context()` | The context passed to `Start`/`Run`, so constructors can dial with a deadline. |
+| `s.Observe(fn)` | Receive lifecycle events from this scope and its descendants. |
 
 Errors wrap `di.ErrNotProvided` or `di.ErrCycle` and read like:
 
@@ -300,6 +301,25 @@ and `di.FromContext` are the primitives if you are not using `net/http`.
 
 The complete pattern, with a worker, a health endpoint, request scopes, and
 graceful shutdown, is in [`examples/app`](examples/app/main.go).
+
+## Observability
+
+```go
+app.Observe(di.SlogObserver(slog.Default()))
+
+app.Observe(func(ev di.Event) {
+    if ev.Kind == di.EventBuild {
+        buildDuration.WithLabelValues(ev.Service).Observe(ev.Duration.Seconds())
+    }
+})
+```
+
+Observers registered on a scope receive an `Event` for every constructor,
+`OnStart`, `OnStop`, and `Health` hook that runs in that scope or any scope
+under it, plus one for each `Shutdown` call. Each event names the service,
+its scope, the registration site, the duration, and the error if the step
+failed. This is also how a request scope's stop errors reach you: the
+middleware cannot return them, so it reports them here.
 
 ## Graceful shutdown
 

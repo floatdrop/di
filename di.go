@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -59,6 +60,49 @@ var (
 	ErrStopped     = errors.New("scope stopped")
 )
 
+// ---- observability ---------------------------------------------------------
+
+// EventKind classifies an Event.
+type EventKind string
+
+const (
+	EventBuild    EventKind = "build"    // a constructor ran
+	EventStart    EventKind = "start"    // an OnStart hook ran
+	EventStop     EventKind = "stop"     // a Run hook was cancelled and/or an OnStop hook ran
+	EventHealth   EventKind = "health"   // a Health hook ran
+	EventShutdown EventKind = "shutdown" // Shutdown was called
+)
+
+// Event describes one lifecycle step. Observers receive it after the step
+// completes, with its duration and error if any.
+type Event struct {
+	Kind     EventKind
+	Service  string // the service, e.g. "*github.com/acme/app.DB" or "...DB#replica"; empty for shutdown
+	Scope    string // name of the scope that owns the instance
+	Site     string // file:line of the registration; empty for shutdown
+	Duration time.Duration
+	Err      error
+}
+
+// SlogObserver returns an observer that logs every event to l: failures at
+// Error level, everything else at Debug.
+func SlogObserver(l *slog.Logger) func(Event) {
+	return func(ev Event) {
+		attrs := []any{"kind", string(ev.Kind), "scope", ev.Scope}
+		if ev.Service != "" {
+			attrs = append(attrs, "service", ev.Service)
+		}
+		if ev.Duration > 0 {
+			attrs = append(attrs, "duration", ev.Duration)
+		}
+		if ev.Err != nil {
+			l.Error("di: "+string(ev.Kind)+" failed", append(attrs, "err", ev.Err)...)
+			return
+		}
+		l.Debug("di: "+string(ev.Kind), attrs...)
+	}
+}
+
 type abort struct{ err error }
 
 // ---- state -----------------------------------------------------------------
@@ -99,7 +143,10 @@ type instance struct {
 func (in *instance) start(ctx context.Context, owner *state) error {
 	b := in.b
 	if b.onStart != nil {
-		if err := b.onStart(ctx, in.value); err != nil {
+		t0 := time.Now()
+		err := b.onStart(ctx, in.value)
+		owner.emit(Event{Kind: EventStart, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
+		if err != nil {
 			return err
 		}
 	}
@@ -122,8 +169,12 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 }
 
 // stop cancels the Run hook, waits for it within ctx, then runs OnStop.
-func (in *instance) stop(ctx context.Context) error {
+func (in *instance) stop(ctx context.Context, owner *state) error {
 	b := in.b
+	if in.cancel == nil && b.onStop == nil {
+		return nil
+	}
+	t0 := time.Now()
 	var errs []error
 	if in.cancel != nil {
 		in.cancel()
@@ -141,21 +192,24 @@ func (in *instance) stop(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
 		}
 	}
-	return errors.Join(errs...)
+	err := errors.Join(errs...)
+	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
+	return err
 }
 
 type state struct {
 	name   string
 	parent *state
 
-	mu       sync.Mutex
-	pending  []*binding // registrations not yet indexed
-	index    map[key]*binding
-	groups   map[reflect.Type][]*binding
-	frozen   bool
-	started  []*instance            // build order; stopped in reverse
-	scoped   map[*binding]*instance // per-scope instances of Scoped bindings
-	children []*state
+	mu        sync.Mutex
+	pending   []*binding // registrations not yet indexed
+	index     map[key]*binding
+	groups    map[reflect.Type][]*binding
+	frozen    bool
+	started   []*instance            // build order; stopped in reverse
+	scoped    map[*binding]*instance // per-scope instances of Scoped bindings
+	children  []*state
+	observers []func(Event)
 
 	stopped  atomic.Bool     // set by Stop or a failed Start; resolution then fails with ErrStopped
 	startCtx context.Context // set by Start; read by Context()
@@ -218,6 +272,26 @@ func (s *Scope) Child(name string) *Scope {
 }
 
 func (s *Scope) view(r *resolver) *Scope { return &Scope{state: s.state, r: r} }
+
+// Observe registers fn to receive lifecycle events from this scope and every
+// scope under it. Use it for logging and metrics; see SlogObserver.
+func (s *Scope) Observe(fn func(Event)) {
+	s.mu.Lock()
+	s.observers = append(s.observers, fn)
+	s.mu.Unlock()
+}
+
+// emit delivers ev to the observers of st and its ancestors.
+func (st *state) emit(ev Event) {
+	for ; st != nil; st = st.parent {
+		st.mu.Lock()
+		obs := slices.Clone(st.observers)
+		st.mu.Unlock()
+		for _, fn := range obs {
+			fn(ev)
+		}
+	}
+}
 
 func callsite() string {
 	_, file, line, _ := runtime.Caller(3)
@@ -406,16 +480,23 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 	buildView := (&Scope{state: holder}).view(r)
 
 	in.once.Do(func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				if a, ok := rec.(abort); ok {
-					in.err = fmt.Errorf("di: building %s (provided at %s): %w", k, b.site, a.err)
-					return
+		t0 := time.Now()
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					if a, ok := rec.(abort); ok {
+						in.err = fmt.Errorf("di: building %s (provided at %s): %w", k, b.site, a.err)
+						return
+					}
+					in.err = fmt.Errorf("di: building %s (provided at %s): panic: %v", k, b.site, rec)
 				}
-				in.err = fmt.Errorf("di: building %s (provided at %s): panic: %v", k, b.site, rec)
-			}
+			}()
+			in.value = b.build(buildView)
 		}()
-		in.value = b.build(buildView)
+		holder.emit(Event{Kind: EventBuild, Service: k.String(), Scope: holder.name, Site: b.site, Duration: time.Since(t0), Err: in.err})
+		if in.err != nil {
+			return
+		}
 		if ctx, running := holder.runContext(); running {
 			if err := in.start(ctx, holder); err != nil {
 				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", k, b.site, err)
@@ -423,6 +504,14 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 			}
 		}
 		holder.mu.Lock()
+		if holder.stopped.Load() {
+			// Stop ran between our stopped check and this append, so its
+			// snapshot did not include us: undo the start here and fail.
+			holder.mu.Unlock()
+			_ = in.stop(context.Background(), holder)
+			in.err = fmt.Errorf("di: %s: %w", k, ErrStopped)
+			return
+		}
 		holder.started = append(holder.started, in)
 		holder.mu.Unlock()
 	})
@@ -601,7 +690,7 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 			s.running = false
 			s.stopped.Store(true)
 			s.mu.Unlock()
-			return errors.Join(err, stopAll(ctx, slices.DeleteFunc(built, func(x *instance) bool { return x == in })))
+			return errors.Join(err, stopAll(ctx, s.state, slices.DeleteFunc(built, func(x *instance) bool { return x == in })))
 		}
 	}
 	return nil
@@ -625,7 +714,7 @@ func (s *Scope) Stop(ctx context.Context) error {
 	for _, c := range children {
 		errs = append(errs, (&Scope{state: c}).Stop(ctx))
 	}
-	errs = append(errs, stopAll(ctx, started))
+	errs = append(errs, stopAll(ctx, s.state, started))
 
 	if p := s.parent; p != nil {
 		p.mu.Lock()
@@ -635,10 +724,10 @@ func (s *Scope) Stop(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func stopAll(ctx context.Context, started []*instance) error {
+func stopAll(ctx context.Context, owner *state, started []*instance) error {
 	var errs []error
 	for _, in := range slices.Backward(started) {
-		errs = append(errs, in.stop(ctx))
+		errs = append(errs, in.stop(ctx, owner))
 	}
 	return errors.Join(errs...)
 }
@@ -647,13 +736,17 @@ func stopAll(ctx context.Context, started []*instance) error {
 // its descendants, concurrently, and returns the failures joined. Each
 // failure wraps ErrUnhealthy and names the service.
 func (s *Scope) HealthCheck(ctx context.Context) error {
-	var ins []*instance
+	type checked struct {
+		in    *instance
+		owner *state
+	}
+	var ins []checked
 	var collect func(st *state)
 	collect = func(st *state) {
 		st.mu.Lock()
 		for _, in := range st.started {
 			if in.b.health != nil {
-				ins = append(ins, in)
+				ins = append(ins, checked{in, st})
 			}
 		}
 		children := slices.Clone(st.children)
@@ -666,10 +759,14 @@ func (s *Scope) HealthCheck(ctx context.Context) error {
 
 	errs := make([]error, len(ins))
 	var wg sync.WaitGroup
-	for i, in := range ins {
+	for i, c := range ins {
 		wg.Go(func() {
-			if err := in.b.health(ctx, in.value); err != nil {
-				errs[i] = fmt.Errorf("di: %s %w: %w", in.b.key, ErrUnhealthy, err)
+			in, b := c.in, c.in.b
+			t0 := time.Now()
+			err := b.health(ctx, in.value)
+			c.owner.emit(Event{Kind: EventHealth, Service: b.key.String(), Scope: c.owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
+			if err != nil {
+				errs[i] = fmt.Errorf("di: %s %w: %w", b.key, ErrUnhealthy, err)
 			}
 		})
 	}
@@ -700,7 +797,8 @@ func (s *Scope) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req := s.Child("request")
 		req.Value(r)
-		defer func() { _ = req.Stop(context.WithoutCancel(r.Context())) }() // TODO: surface via observability hooks
+		// Stop failures are reported to observers as EventStop with Err set.
+		defer func() { _ = req.Stop(context.WithoutCancel(r.Context())) }()
 		next.ServeHTTP(w, r.WithContext(WithScope(r.Context(), req)))
 	})
 }
@@ -710,11 +808,16 @@ func (s *Scope) Middleware(next http.Handler) http.Handler {
 // request propagates to ancestor scopes, so a service in a child scope can
 // stop the application.
 func (s *Scope) Shutdown(err error) {
+	first := false
 	for st := s.state; st != nil; st = st.parent {
 		st.shutdownOnce.Do(func() {
 			st.shutdownErr = err
 			close(st.shutdownCh)
+			first = first || st == s.state
 		})
+	}
+	if first {
+		s.emit(Event{Kind: EventShutdown, Scope: s.name, Err: err})
 	}
 }
 
