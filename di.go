@@ -199,6 +199,17 @@ func (b *binding) validate() {
 	}
 }
 
+// lifetimeName names a binding's per-scope lifetime, or "" for a singleton.
+func lifetimeName(b *binding) string {
+	switch {
+	case b.scoped:
+		return "Scoped"
+	case b.transient:
+		return "Transient"
+	}
+	return ""
+}
+
 // phase is an instance's position in the build/start/stop sequence. It is
 // read and written only under the owning state's mutex, so the decision of
 // who starts or stops an instance is never split across two critical
@@ -430,6 +441,23 @@ func (st *state) freeze() {
 		st.all = append(st.all, b)
 	}
 	st.pending = nil
+
+	// Eagerness transfers to whichever binding owns the key, so the winner
+	// must be able to honour it. Declared Eager+Scoped/Transient is caught
+	// by validate; this catches the same thing arriving via an override.
+	for _, b := range st.all {
+		if !b.eager || b.group {
+			continue
+		}
+		w := st.index[b.key]
+		if w == nil || w == b {
+			continue
+		}
+		if kind := lifetimeName(w); kind != "" {
+			panic(fmt.Sprintf("di: %s is Eager (provided at %s), but the %s registration at %s overrides it: eagerness cannot transfer to a per-scope lifetime",
+				b.key, b.site, kind, w.site))
+		}
+	}
 }
 
 // resolver is the per-resolution context: the path being built, for cycle
@@ -937,6 +965,10 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 	for {
 		in, owner := s.claimNext()
 		if in == nil {
+			if s.isStopped() {
+				// A start hook stopped the scope; nothing is running.
+				return fmt.Errorf("di: Start: %w", ErrStopped)
+			}
 			return nil
 		}
 		if err := in.startClaimed(ctx, owner); err != nil {
@@ -981,7 +1013,8 @@ func (st *state) claimNext() (*instance, *state) {
 // order (dependents first). A service is stopped only if it actually
 // started, or if it declares no OnStart, in which case OnStop is a plain
 // destructor. A service whose start step is in flight is torn down by the
-// goroutine running it, which may finish just after Stop returns.
+// goroutine running it, which may finish just after Stop returns; that
+// teardown's error is reported to observers rather than returned here.
 // Every failure is reported; Stop is idempotent.
 // Afterwards the scope and its descendants refuse to resolve anything, with
 // ErrStopped, so a closed service can never be handed out.

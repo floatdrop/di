@@ -499,3 +499,72 @@ func TestRegressionAncestorStoppedRejectsChild(t *testing.T) {
 		}
 	}
 }
+
+// The three below were found by a fourth review pass over the third pass's
+// own fixes.
+
+// 21. Eagerness transfers to whichever binding owns the key, so a per-scope
+// winner must be rejected rather than built once in the declaring scope.
+func TestRegressionEagerCannotTransferToPerScopeLifetime(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(di.Binding[*DB]) di.Binding[*DB]
+	}{
+		{"Scoped", func(b di.Binding[*DB]) di.Binding[*DB] { return b.Scoped() }},
+		{"Transient", func(b di.Binding[*DB]) di.Binding[*DB] { return b.Transient() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			built := false
+			s := di.New()
+			s.Provide(func(*di.Scope) *DB { return &DB{dsn: "real"} }).Eager()
+			tc.apply(s.Provide(func(*di.Scope) *DB { built = true; return &DB{dsn: "fake"} }))
+			mustPanic(t, "eagerness cannot transfer", func() { _ = s.Start(context.Background()) })
+			if built {
+				t.Fatalf("a %s binding was built at Start", tc.name)
+			}
+		})
+	}
+}
+
+// 22. Start must not report success for a scope that a start hook stopped.
+func TestRegressionStartReportsSelfStop(t *testing.T) {
+	s := di.New()
+	s.Value(&DB{}).Eager().OnStart(func(context.Context, *DB) error { return s.Stop(context.Background()) })
+	if err := s.Start(context.Background()); !errors.Is(err, di.ErrStopped) {
+		t.Fatalf("got %v, want ErrStopped", err)
+	}
+}
+
+// 23. A teardown handed off after Stop returned still reaches observers.
+func TestRegressionHandoffStopErrorReachesObservers(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	seen := make(chan error, 4)
+	flush := errors.New("flush failed")
+	s := di.New()
+	s.Observe(func(ev di.Event) {
+		if ev.Kind == di.EventStop {
+			seen <- ev.Err
+		}
+	})
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).
+		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
+		OnStop(func(context.Context, *DB) error { return flush })
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = s.Resolve[*DB]() }()
+	<-entered
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case err := <-seen:
+		if !errors.Is(err, flush) {
+			t.Fatalf("observer saw %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the late teardown was never reported")
+	}
+}
