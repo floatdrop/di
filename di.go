@@ -195,7 +195,9 @@ func (b *binding) validate() {
 		// registration overrides it. Whether an override can inherit
 		// eagerness is a separate question, settled in recomputeEager.
 		bad("Eager", "does not apply to a "+lifetimeName(b)+" binding: it is not built once")
-	case b.alias != nil && (b.transient || b.scoped || b.eager || hooks):
+	case b.alias != nil && (b.transient || b.scoped || hooks):
+		// Eager is allowed: it says the key exists by the time Start
+		// returns, which an alias honours by building its target.
 		bad("lifetimes and lifecycle hooks", "belong on the target binding, not on a Bind alias")
 	}
 }
@@ -588,11 +590,15 @@ func (s *Scope) Value[T any](v T) Binding[T] {
 // s.Bind[Reader, *Repo](). Lifetimes and lifecycle hooks belong on the
 // target binding, not on the alias.
 func (s *Scope) Bind[I, T any]() Binding[I] {
-	if !reflect.TypeFor[T]().Implements(reflect.TypeFor[I]()) {
-		panic(fmt.Sprintf("di: %s does not implement %s", typeName(reflect.TypeFor[T]()), typeName(reflect.TypeFor[I]())))
+	it, tt := reflect.TypeFor[I](), reflect.TypeFor[T]()
+	if it.Kind() != reflect.Interface {
+		panic(fmt.Sprintf("di: Bind's first type parameter must be an interface, got %s", typeName(it)))
 	}
-	b := s.register(key{t: reflect.TypeFor[I]()}, nil)
-	target := key{t: reflect.TypeFor[T]()}
+	if !tt.Implements(it) {
+		panic(fmt.Sprintf("di: %s does not implement %s", typeName(tt), typeName(it)))
+	}
+	b := s.register(key{t: it}, nil)
+	target := key{t: tt}
 	b.alias = &target
 	return Binding[I]{s, b}
 }
@@ -674,7 +680,21 @@ func (b Binding[T]) Health(f func(context.Context, T) error) Binding[T] {
 
 // ---- resolution ------------------------------------------------------------
 
-func (s *Scope) lookup(k key) (*binding, *state) {
+// found is what lookup located for a key: the binding that actually serves
+// it, the scope that owns that binding, the key it is registered under, and
+// the alias keys traversed on the way. An alias binding is never reported,
+// so resolve cannot receive one.
+type found struct {
+	b     *binding
+	owner *state
+	at    key   // the key b is registered under, after following aliases
+	via   []key // alias keys traversed, for cycle detection and error paths
+	cycle bool  // the alias chain looped back on itself
+}
+
+// lookupKey finds the binding registered for k in this scope or an ancestor,
+// without following aliases.
+func (s *Scope) lookupKey(k key) (*binding, *state) {
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
 		st.mu.Lock()
@@ -685,6 +705,29 @@ func (s *Scope) lookup(k key) (*binding, *state) {
 		}
 	}
 	return nil, nil
+}
+
+// lookup resolves k through any Bind aliases to the binding that serves it.
+// A nil b means either nothing is registered for at, or cycle is set.
+func (s *Scope) lookup(k key) found {
+	f := found{at: k}
+	for {
+		b, st := s.lookupKey(f.at)
+		if b == nil {
+			return f
+		}
+		if b.alias == nil {
+			f.b, f.owner = b, st
+			return f
+		}
+		f.via = append(f.via, f.at)
+		next := *b.alias
+		if slices.Contains(f.via, next) {
+			f.cycle, f.at = true, next
+			return f
+		}
+		f.at = next
+	}
 }
 
 // enter returns a view carrying a resolver, starting a new resolution when
@@ -711,27 +754,36 @@ func (s *Scope) get(k key) any {
 		}()
 		return s.enter().get(k)
 	}
-	b, owner := s.lookup(k)
-	if b == nil {
-		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, s.r.path())})
-	}
-	if b.alias != nil {
-		// Resolve the target instead, so its lifetime and hooks apply; the
-		// alias key stays on the stack for cycle detection and error paths.
-		r := s.r
-		if slices.Contains(r.stack, k) {
-			panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), k)})
+	r := s.r
+	f := s.lookup(k)
+
+	// Alias keys stay on the stack so a cycle through an alias is detected
+	// and the error path names the whole route.
+	for _, ak := range f.via {
+		if slices.Contains(r.stack, ak) {
+			panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), ak)})
 		}
-		r.stack = append(r.stack, k)
-		defer func() { r.stack = r.stack[:len(r.stack)-1] }()
-		return s.get(*b.alias)
+		r.stack = append(r.stack, ak)
 	}
-	return s.resolve(b, owner, k)
+	defer func() { r.stack = r.stack[:len(r.stack)-len(f.via)] }()
+
+	switch {
+	case f.cycle:
+		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), f.at)})
+	case f.b == nil:
+		panic(abort{fmt.Errorf("di: %s: %w%s", f.at, ErrNotProvided, r.path())})
+	}
+	return s.resolve(f.b, f.owner, f.at)
 }
 
 // resolve produces b's value for the resolving scope s, honouring the
 // binding's lifetime and starting the instance when the scope is running.
 func (s *Scope) resolve(b *binding, owner *state, k key) any {
+	if b.alias != nil {
+		// lookup never reports an alias and groups never are one, so this
+		// is a programming error in the container, not in the caller's wiring.
+		panic("di: internal: alias binding reached resolve")
+	}
 	r := s.r
 	if s.isStopped() {
 		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrStopped, r.path())})
@@ -853,7 +905,10 @@ func (s *Scope) Lookup[T any](k Key[T]) T {
 
 // Maybe resolves T if it is provided anywhere in the scope chain.
 func (s *Scope) Maybe[T any]() (T, bool) {
-	if b, _ := s.lookup(key{t: reflect.TypeFor[T]()}); b == nil {
+	// lookup follows aliases, so an alias whose target is missing, or whose
+	// chain loops, reports absent rather than reporting present and then
+	// failing inside Get.
+	if f := s.lookup(key{t: reflect.TypeFor[T]()}); f.b == nil {
 		var zero T
 		return zero, false
 	}
@@ -1006,7 +1061,12 @@ func (s *Scope) buildEager(eager []*binding) (err error) {
 			continue
 		}
 		// By key, so a Bind alias that owns the key builds its target
-		// rather than its own absent constructor.
+		// rather than its own absent constructor. The target must be able
+		// to honour eagerness, exactly as a direct winner must.
+		if f := s.lookup(b.key); f.b != nil && lifetimeName(f.b) != "" {
+			panic(fmt.Sprintf("di: %s is Eager (provided at %s), but it resolves through an alias to the %s binding at %s: eagerness cannot transfer to a per-scope lifetime",
+				b.key, b.site, lifetimeName(f.b), f.b.site))
+		}
 		s.enter().get(b.key)
 	}
 	return nil

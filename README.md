@@ -107,7 +107,7 @@ Call them before the scope is first resolved; afterwards they panic.
 |---|---|
 | `s.Provide(func(*di.Scope) T)` | Lazily built singleton. `T` is inferred from the constructor. |
 | `s.Value(v)` | An instance you already have. |
-| `s.Bind[I, T]()` | Serve requests for interface `I` from `T`'s binding, with `T`'s lifetime and hooks. Checked at registration. |
+| `s.Bind[I, T]()` | Serve requests for interface `I` from `T`'s binding, with `T`'s lifetime, instance and hooks. Checked at registration. |
 | `s.Add(func(*di.Scope) T)` | Append to the multi-binding group for `T`. |
 | `.Named("replica")` | Register under a name in addition to the type. |
 | `.Transient()` | Build a fresh instance on every resolution, in the resolving scope. Instances are not tracked, so lifecycle hooks and `Eager` are rejected on a transient; it must own its own cleanup. |

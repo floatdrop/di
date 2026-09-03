@@ -633,3 +633,76 @@ func TestRegressionHandoffKeepsQueueingStopsContext(t *testing.T) {
 		t.Fatal("OnStop ran with a later Stop's cancelled context")
 	}
 }
+
+// The four below cover the alias refactor: lookup now follows Bind aliases,
+// so resolve can never receive one and callers cannot forget the redirect.
+
+// 26. Maybe must report absent for an alias whose target is missing, rather
+// than reporting present and then failing inside Get.
+func TestRegressionMaybeFollowsAliases(t *testing.T) {
+	s := di.New()
+	s.Bind[Reader, *Repo]() // target never registered
+	if _, ok := s.Maybe[Reader](); ok {
+		t.Fatal("Maybe reported an alias to a missing target as present")
+	}
+	s.Provide(func(*di.Scope) *Repo { return &Repo{db: &DB{dsn: "x"}} })
+	if v, ok := s.Maybe[Reader](); !ok || v.Read() != "x" {
+		t.Fatalf("Maybe = %v, %v once the target exists", v, ok)
+	}
+}
+
+// 27. An alias chain that loops is a cycle, not a hang or a stack overflow.
+// Two interfaces with the same method set each satisfy the other, so they
+// can be bound to one another.
+func TestRegressionAliasCycle(t *testing.T) {
+	s := di.New()
+	s.Bind[readerA, readerB]()
+	s.Bind[readerB, readerA]() // readerA -> readerB -> readerA
+	if _, err := s.Resolve[readerA](); !errors.Is(err, di.ErrCycle) {
+		t.Fatalf("got %v, want ErrCycle", err)
+	}
+	if _, ok := s.Maybe[readerA](); ok {
+		t.Fatal("Maybe reported a looping alias chain as present")
+	}
+}
+
+type readerA interface{ Read() string }
+type readerB interface{ Read() string }
+
+// 27b. Bind's first type parameter must be an interface, and saying so
+// beats surfacing a raw reflect panic.
+func TestRegressionBindRejectsNonInterface(t *testing.T) {
+	mustPanic(t, "must be an interface", func() { di.New().Bind[*Repo, *Repo]() })
+}
+
+// 28. An eager key served through an alias to a per-scope target cannot
+// honour eagerness, exactly as a direct per-scope winner cannot.
+func TestRegressionEagerAliasToPerScopeTargetRejected(t *testing.T) {
+	built := false
+	s := di.New()
+	s.Provide(func(*di.Scope) Reader { return &Repo{db: &DB{}} }).Eager()
+	s.Provide(func(*di.Scope) *Repo { built = true; return &Repo{db: &DB{}} }).Scoped()
+	s.Bind[Reader, *Repo]()
+	mustPanic(t, "eagerness cannot transfer", func() { _ = s.Start(context.Background()) })
+	if built {
+		t.Fatal("the scoped target was built at Start")
+	}
+}
+
+// 29. Eagerness is a property of the key, so an alias may declare it: the
+// target is built at Start.
+func TestRegressionEagerDeclaredOnAlias(t *testing.T) {
+	var builds int
+	s := di.New()
+	s.Provide(func(*di.Scope) *Repo { builds++; return &Repo{db: &DB{dsn: "t"}} })
+	s.Bind[Reader, *Repo]().Eager()
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if builds != 1 {
+		t.Fatalf("target built %d times, want 1", builds)
+	}
+	if got := s.Get[Reader]().Read(); got != "t" {
+		t.Fatalf("got %q", got)
+	}
+}
