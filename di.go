@@ -1,6 +1,54 @@
 // Package di is a dependency-injection container for Go 1.27+ built on
-// generic methods: services are registered with s.Provide(...) and resolved
-// with s.Get[T]().
+// generic methods.
+//
+// Services are registered on a [Scope] and resolved from it by type:
+//
+//	app := di.New()
+//	app.Value(Config{DSN: "postgres://localhost/app"})
+//	app.Provide(func(s *di.Scope) *DB { return s.Must(sql.Open("postgres", s.Get[Config]().DSN)) }).
+//		OnStop(func(ctx context.Context, db *DB) error { return db.Close() })
+//	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+//
+//	repo, err := app.Resolve[*Repo]()
+//
+// Keys are Go types, so there is no naming scheme and no collisions between
+// packages. Constructors return T rather than (T, error): inside a
+// constructor, [Scope.Get] and [Scope.Must] abort on failure and the error
+// surfaces from the enclosing [Scope.Resolve], [Scope.Start] or [Scope.Run]
+// with the dependency path and the registration site.
+//
+// # Lifetimes
+//
+// A binding is a singleton by default, cached in the scope that registered
+// it. [Binding.Scoped] makes it one instance per resolving scope, built
+// there so it can see that scope's values, which is how request-scoped
+// services are declared once in the root. [Binding.Transient] builds a new
+// instance on every resolution. [Scope.Add] and [Scope.All] handle groups,
+// [Scope.Bind] aliases an interface to an implementation, and
+// [Scope.Maybe] resolves optional dependencies.
+//
+// # Scopes
+//
+// [Scope.Child] creates a scope that resolves through its parent, reuses
+// the parent's singletons and owns the lifecycle of what it builds. The
+// last registration of a key wins, which is the test seam: wire the
+// production graph into a fresh scope, then re-register what you want faked
+// before anything is resolved ([Test] does the bookkeeping). For HTTP,
+// [Scope.Middleware] gives each request a child scope holding the
+// *http.Request, reachable through [FromContext].
+//
+// # Lifecycle
+//
+// [Binding.OnStart] and [Binding.OnStop] are typed hooks. [Scope.Start]
+// builds [Binding.Eager] bindings and runs start hooks in build order,
+// rolling back on failure; services built later start as part of being
+// built. [Scope.Stop] stops child scopes first, then services in reverse
+// build order, and afterwards the scope refuses to resolve anything.
+// [Binding.Run] runs a long-lived function that is cancelled on stop, and
+// [Binding.Health] feeds [Scope.HealthCheck]. [Scope.Run] ties it together
+// for a main function: start, wait for a signal or [Scope.Shutdown], stop
+// with a deadline. [Scope.Observe] reports every step for logging and
+// metrics.
 package di
 
 import (
@@ -772,6 +820,37 @@ func (s *Scope) HealthCheck(ctx context.Context) error {
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// ---- testing ---------------------------------------------------------------
+
+// TB is the subset of testing.TB that Test needs.
+type TB interface {
+	Helper()
+	Cleanup(func())
+	Errorf(format string, args ...any)
+}
+
+// Test returns a scope for a test: the wire functions register the graph
+// under test, and the scope is stopped when the test ends, failing it if
+// a stop hook errors. Override what you need faked after wiring and before
+// resolving; the last registration wins.
+//
+//	s := di.Test(t, app.Wire)
+//	s.Value(&DB{DSN: "sqlite://memory"})
+//	repo := s.Get[*Repo]()
+func Test(tb TB, wire ...func(*Scope)) *Scope {
+	tb.Helper()
+	s := New()
+	for _, w := range wire {
+		w(s)
+	}
+	tb.Cleanup(func() {
+		if err := s.Stop(context.Background()); err != nil {
+			tb.Errorf("di: stopping test scope: %v", err)
+		}
+	})
+	return s
 }
 
 // ---- request scopes --------------------------------------------------------

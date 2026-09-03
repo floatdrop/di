@@ -1,17 +1,14 @@
 package app
 
 import (
-	"context"
 	"testing"
 
 	"github.com/floatdrop/di"
 )
 
 func TestRepo(t *testing.T) {
-	s := di.New()
-	Wire(s)
+	s := di.Test(t, Wire)                // production graph, stopped when the test ends
 	s.Value(&DB{DSN: "sqlite://memory"}) // later registration wins: replaces the production *DB
-	t.Cleanup(func() { _ = s.Stop(context.Background()) })
 
 	repo := s.Get[*Repo]() // built against the fake DB
 	if repo.DB.DSN != "sqlite://memory" {

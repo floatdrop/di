@@ -184,25 +184,23 @@ dependencies in the scope that registered it, so a child cannot rewire a
 parent singleton. A service that must see child-scoped values is declared
 `Scoped()`: one instance per resolving scope, built there.
 
-For tests, wire the production graph into a fresh scope and override before
-anything is resolved:
+For tests, `di.Test` wires the production graph into a fresh scope and stops
+it when the test ends, failing the test if a stop hook errors. Override
+before anything is resolved:
 
 [embedmd]:# (examples/testing/repo_test.go go)
 ```go
 package app
 
 import (
-	"context"
 	"testing"
 
 	"github.com/floatdrop/di"
 )
 
 func TestRepo(t *testing.T) {
-	s := di.New()
-	Wire(s)
+	s := di.Test(t, Wire)              // production graph, stopped when the test ends
 	s.Value(&DB{DSN: "sqlite://memory"}) // later registration wins: replaces the production *DB
-	t.Cleanup(func() { _ = s.Stop(context.Background()) })
 
 	repo := s.Get[*Repo]() // built against the fake DB
 	if repo.DB.DSN != "sqlite://memory" {
