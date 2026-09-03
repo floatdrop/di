@@ -33,7 +33,11 @@ func main() {
 	if err := app.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
-	defer app.Stop(ctx)
+	defer func() {
+		if err := app.Stop(ctx); err != nil {
+			log.Println(err)
+		}
+	}()
 
 	fmt.Println("serving", app.Get[*Server]().repo.db.dsn)
 }

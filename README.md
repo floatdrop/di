@@ -88,7 +88,11 @@ func main() {
 	if err := app.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
-	defer app.Stop(ctx)
+	defer func() {
+		if err := app.Stop(ctx); err != nil {
+			log.Println(err)
+		}
+	}()
 
 	fmt.Println("serving", app.Get[*Server]().repo.db.dsn)
 }
@@ -107,7 +111,7 @@ Call them before the scope is first resolved; afterwards they panic.
 | `s.Add(func(*di.Scope) T)` | Append to the multi-binding group for `T`. |
 | `.Named("replica")` | Register under a name in addition to the type. |
 | `.Transient()` | Build a fresh instance on every resolution. |
-| `.Scoped()` | One instance per resolving scope, built and stopped there. |
+| `.Scoped()` | One instance per resolving scope, built and stopped there. Not allowed on `Value`. |
 | `.Eager()` | Build during `Start`. |
 | `.OnStart(f)` / `.OnStop(f)` | Typed lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.Run(f)` | Long-running function for `T`, run in its own goroutine and cancelled on stop. |
@@ -217,7 +221,12 @@ handed out unstarted; if that hook fails the resolution fails.
 `Stop` stops child scopes first, then runs `OnStop` hooks in reverse build
 order and returns all failures joined with `errors.Join`. Only services that
 were actually built are stopped. Stopping a child scope also detaches it from
-its parent, which is what releases a per-request scope.
+its parent, which is what releases a per-request scope. A stopped scope, and
+any scope under it, refuses to resolve anything with `di.ErrStopped`, so a
+closed service is never handed out.
+
+Group members registered with `Add` are ordinary bindings: singletons by
+default, built once, started and stopped like everything else.
 
 Start hooks must not block. A server binds its listener synchronously so a
 busy port fails `Start`, then serves in a goroutine.

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -55,6 +56,7 @@ var (
 	ErrNotProvided = errors.New("not provided")
 	ErrCycle       = errors.New("dependency cycle")
 	ErrUnhealthy   = errors.New("unhealthy")
+	ErrStopped     = errors.New("scope stopped")
 )
 
 type abort struct{ err error }
@@ -68,6 +70,7 @@ type binding struct {
 	transient bool
 	scoped    bool
 	eager     bool
+	isValue   bool // registered with Value: lifetimes do not apply
 	build     func(*Scope) any
 	onStart   func(context.Context, any) error
 	onStop    func(context.Context, any) error
@@ -154,6 +157,7 @@ type state struct {
 	scoped   map[*binding]*instance // per-scope instances of Scoped bindings
 	children []*state
 
+	stopped  atomic.Bool     // set by Stop or a failed Start; resolution then fails with ErrStopped
 	startCtx context.Context // set by Start; read by Context()
 	running  bool            // set once Start reaches the hook phase; enables late OnStart
 
@@ -247,7 +251,9 @@ func (s *Scope) Provide[T any](ctor func(*Scope) T) Binding[T] {
 
 // Value registers an already-built instance.
 func (s *Scope) Value[T any](v T) Binding[T] {
-	return Binding[T]{s, s.register(key{t: reflect.TypeFor[T]()}, func(*Scope) any { return v })}
+	b := s.register(key{t: reflect.TypeFor[T]()}, func(*Scope) any { return v })
+	b.isValue = true
+	return Binding[T]{s, b}
 }
 
 // Bind registers an alias: requests for I are served by T's binding.
@@ -279,14 +285,24 @@ func (b Binding[T]) edit(f func(*binding)) Binding[T] {
 func (b Binding[T]) Named(name string) Binding[T] {
 	return b.edit(func(b *binding) { b.key.name = name })
 }
-func (b Binding[T]) Transient() Binding[T] { return b.edit(func(b *binding) { b.transient = true }) }
+func (b Binding[T]) Transient() Binding[T] {
+	return b.edit(func(b *binding) { b.lifetimeCheck("Transient"); b.transient = true })
+}
 
 // Scoped makes the binding one-per-scope: each scope that resolves it gets
 // its own instance, built in that scope (so it can see that scope's
 // values) and stopped with it. Declare request-scoped services once in the
 // root and resolve them through the request scope.
-func (b Binding[T]) Scoped() Binding[T] { return b.edit(func(b *binding) { b.scoped = true }) }
-func (b Binding[T]) Eager() Binding[T]  { return b.edit(func(b *binding) { b.eager = true }) }
+func (b Binding[T]) Scoped() Binding[T] {
+	return b.edit(func(b *binding) { b.lifetimeCheck("Scoped"); b.scoped = true })
+}
+
+func (b *binding) lifetimeCheck(what string) {
+	if b.isValue {
+		panic(fmt.Sprintf("di: %s is meaningless for a Value binding (%s, provided at %s)", what, b.key, b.site))
+	}
+}
+func (b Binding[T]) Eager() Binding[T] { return b.edit(func(b *binding) { b.eager = true }) }
 
 // Typed lifecycle hooks: no interface sniffing, no reflection.
 func (b Binding[T]) OnStart(f func(context.Context, T) error) Binding[T] {
@@ -350,10 +366,19 @@ func (s *Scope) get(k key) any {
 		}()
 		return s.enter().get(k)
 	}
-	r := s.r
 	b, owner := s.lookup(k)
 	if b == nil {
-		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, r.path())})
+		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, s.r.path())})
+	}
+	return s.resolve(b, owner, k)
+}
+
+// resolve produces b's value for the resolving scope s, honouring the
+// binding's lifetime and starting the instance when the scope is running.
+func (s *Scope) resolve(b *binding, owner *state, k key) any {
+	r := s.r
+	if s.isStopped() {
+		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrStopped, r.path())})
 	}
 	if slices.Contains(r.stack, k) {
 		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), k)})
@@ -407,6 +432,15 @@ func (s *Scope) get(k key) any {
 	return in.value
 }
 
+func (st *state) isStopped() bool {
+	for ; st != nil; st = st.parent {
+		if st.stopped.Load() {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *resolver) path() string {
 	if len(r.stack) == 0 {
 		return ""
@@ -439,7 +473,9 @@ func (s *Scope) Maybe[T any]() (T, bool) {
 	return s.Get[T](), true
 }
 
-// All resolves the multi-binding group for T across the scope chain.
+// All resolves the multi-binding group for T across the scope chain. Members
+// are singletons (or Scoped/Transient if so marked) with the same lifecycle
+// as any other binding.
 func (s *Scope) All[T any]() []T {
 	if s.r == nil {
 		defer func() {
@@ -452,14 +488,15 @@ func (s *Scope) All[T any]() []T {
 		}()
 		return s.enter().All[T]()
 	}
+	k := key{t: reflect.TypeFor[T]()}
 	var out []T
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
 		st.mu.Lock()
-		bs := slices.Clone(st.groups[reflect.TypeFor[T]()])
+		bs := slices.Clone(st.groups[k.t])
 		st.mu.Unlock()
 		for _, b := range bs {
-			out = append(out, b.build((&Scope{state: st}).view(s.r)).(T))
+			out = append(out, s.resolve(b, st, k).(T))
 		}
 	}
 	return out
@@ -562,6 +599,7 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 			built := s.started
 			s.started = nil
 			s.running = false
+			s.stopped.Store(true)
 			s.mu.Unlock()
 			return errors.Join(err, stopAll(ctx, slices.DeleteFunc(built, func(x *instance) bool { return x == in })))
 		}
@@ -571,6 +609,8 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 
 // Stop stops child scopes first, then runs OnStop hooks in reverse build
 // order (dependents first). Every failure is reported; Stop is idempotent.
+// Afterwards the scope and its descendants refuse to resolve anything, with
+// ErrStopped, so a closed service can never be handed out.
 // Stopping a child scope also detaches it from its parent, so per-request
 // scopes are released once stopped.
 func (s *Scope) Stop(ctx context.Context) error {
@@ -578,6 +618,7 @@ func (s *Scope) Stop(ctx context.Context) error {
 	children := slices.Clone(s.children)
 	started := s.started
 	s.started = nil
+	s.stopped.Store(true)
 	s.mu.Unlock()
 
 	var errs []error
@@ -659,7 +700,7 @@ func (s *Scope) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req := s.Child("request")
 		req.Value(r)
-		defer req.Stop(context.WithoutCancel(r.Context()))
+		defer func() { _ = req.Stop(context.WithoutCancel(r.Context())) }() // TODO: surface via observability hooks
 		next.ServeHTTP(w, r.WithContext(WithScope(r.Context(), req)))
 	})
 }

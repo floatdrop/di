@@ -10,7 +10,7 @@ import (
 	"github.com/floatdrop/di"
 )
 
-type Worker struct{ ticks int }
+type Worker struct{}
 
 func TestRunHookLifecycle(t *testing.T) {
 	var log []string

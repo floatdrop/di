@@ -31,7 +31,8 @@ func TestScopedIsOnePerScope(t *testing.T) {
 		OnStop(func(context.Context, *Repo) error { stops++; return nil })
 
 	a, b := root.Child("a"), root.Child("b")
-	if a.Get[*Repo]() != a.Get[*Repo]() {
+	first, second := a.Get[*Repo](), a.Get[*Repo]()
+	if first != second {
 		t.Fatal("scoped instance must be cached within its scope")
 	}
 	if a.Get[*Repo]() == b.Get[*Repo]() {

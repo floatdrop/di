@@ -139,7 +139,7 @@ func TestRunDrainsHTTPServer(t *testing.T) {
 		return &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			close(entered)
 			<-release
-			io.WriteString(w, "done")
+			_, _ = io.WriteString(w, "done")
 		})}
 	}).Eager().
 		OnStart(func(ctx context.Context, srv *http.Server) error {
@@ -167,7 +167,7 @@ func TestRunDrainsHTTPServer(t *testing.T) {
 			body <- "error: " + err.Error()
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		b, _ := io.ReadAll(resp.Body)
 		body <- string(b)
 	}()

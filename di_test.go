@@ -181,7 +181,8 @@ func TestTransient(t *testing.T) {
 	s := di.New()
 	var n atomic.Int32
 	s.Provide(func(*di.Scope) *DB { n.Add(1); return &DB{} }).Transient()
-	if s.Get[*DB]() == s.Get[*DB]() || n.Load() != 2 {
+	a, b := s.Get[*DB](), s.Get[*DB]()
+	if a == b || n.Load() != 2 {
 		t.Fatal("transient must build a new instance per Get")
 	}
 }

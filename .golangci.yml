@@ -1,0 +1,16 @@
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+  exclusions:
+    rules:
+      # `var get func() *DB = s.Get` is not redundant: the declared type is
+      # what drives Go 1.27 inference for the generic method value.
+      - linters: [staticcheck]
+        text: "QF1011"

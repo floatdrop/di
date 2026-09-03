@@ -21,6 +21,10 @@ jobs:
         run: test -z "$(gofmt -l .)" || (gofmt -d . && exit 1)
       - name: vet
         run: go vet ./...
+      - name: lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.1
       - name: README examples are in sync
         run: go run github.com/campoy/embedmd@v1.0.0 -d README.md
       - name: run examples
