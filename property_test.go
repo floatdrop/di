@@ -8,6 +8,11 @@ package di_test
 //	if any registration for that key was marked Eager, at the position of
 //	the first such registration. A group member is its own entry. A binding
 //	that owns the key but has a per-scope lifetime is rejected.
+//
+// Bind aliases are deliberately outside the generator: an alias build
+// deduplicates against its target's own instance, which the model cannot
+// express cheaply. Eager and alias interactions are covered by the
+// regression tests instead.
 
 import (
 	"context"

@@ -568,3 +568,68 @@ func TestRegressionHandoffStopErrorReachesObservers(t *testing.T) {
 		t.Fatal("the late teardown was never reported")
 	}
 }
+
+// The two below were found by a fifth review pass, run as two independent
+// reviewers after the review agent repeatedly failed on server errors.
+
+// 24. A Bind alias may end up owning an eager key. Start must build the
+// target it redirects to, not the alias's own absent constructor.
+func TestRegressionEagerAliasBuildsTarget(t *testing.T) {
+	var builds int
+	s := di.New()
+	s.Provide(func(*di.Scope) Reader { return &Repo{db: &DB{dsn: "direct"}} }).Eager()
+	s.Provide(func(*di.Scope) *Repo { builds++; return &Repo{db: &DB{dsn: "target"}} })
+	s.Bind[Reader, *Repo]() // now owns the Reader key, and inherits its eagerness
+
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if builds != 1 {
+		t.Fatalf("target built %d times, want 1", builds)
+	}
+	if got := s.Get[Reader]().Read(); got != "target" {
+		t.Fatalf("Reader resolved to %q", got)
+	}
+	if any(s.Get[Reader]()) != any(s.Get[*Repo]()) {
+		t.Fatal("alias and target must share one instance")
+	}
+}
+
+// 25. The Stop call that queues a handoff owns that teardown's context. A
+// later Stop, which has nothing left to tear down, must not substitute its
+// own, possibly cancelled, context.
+func TestRegressionHandoffKeepsQueueingStopsContext(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	stopRan := make(chan struct{})
+	var sawCancelled atomic.Bool
+
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).Eager().
+		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
+		OnStop(func(ctx context.Context, _ *DB) error {
+			sawCancelled.Store(ctx.Err() != nil)
+			close(stopRan)
+			return nil
+		})
+
+	go func() { _ = s.Start(context.Background()) }()
+	<-entered
+
+	if err := s.Stop(context.Background()); err != nil { // queues the handoff
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = s.Stop(cancelled) // nothing left to stop, must not change the queued context
+
+	close(release)
+	select {
+	case <-stopRan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handed-off teardown never ran")
+	}
+	if sawCancelled.Load() {
+		t.Fatal("OnStop ran with a later Stop's cancelled context")
+	}
+}

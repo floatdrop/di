@@ -234,7 +234,8 @@ type instance struct {
 	value any
 	err   error
 
-	stopWanted bool // Stop arrived mid-start; the claimer tears it down
+	stopWanted bool            // Stop arrived mid-start; the claimer tears it down
+	stopCtx    context.Context // the context of the Stop that queued the handoff
 
 	// Run hook bookkeeping, set by start and consumed by stop.
 	cancel context.CancelFunc
@@ -315,10 +316,13 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) error {
 		} else {
 			in.ph = phaseFailed
 		}
-		wanted := in.stopWanted
+		wanted, stopCtx := in.stopWanted, in.stopCtx
 		owner.mu.Unlock()
 		if wanted {
-			_ = in.stopIfNeeded(owner.stopContext(), owner)
+			if stopCtx == nil {
+				stopCtx = owner.stopContext()
+			}
+			_ = in.stopIfNeeded(stopCtx, owner)
 		}
 	}()
 	err := in.start(ctx, owner)
@@ -329,13 +333,15 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) error {
 // stopContext returns the context Stop was called with, or a background one
 // if the scope was stopped without recording it.
 func (st *state) stopContext() context.Context {
-	st.mu.Lock()
-	ctx := st.stopCtx
-	st.mu.Unlock()
-	if ctx == nil {
-		return context.Background()
+	for ; st != nil; st = st.parent {
+		st.mu.Lock()
+		ctx := st.stopCtx
+		st.mu.Unlock()
+		if ctx != nil {
+			return ctx
+		}
 	}
-	return ctx
+	return context.Background()
 }
 
 // stopIfNeeded runs the stop step once, and only when it is owed. It is owed
@@ -352,6 +358,7 @@ func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
 		// running it rather than waiting here: that goroutine may be this
 		// one, if a start hook called Stop, and waiting would deadlock.
 		in.stopWanted = true
+		in.stopCtx = ctx // this Stop's context, not whichever is current later
 		owner.mu.Unlock()
 		return nil
 	}
@@ -455,7 +462,8 @@ func (st *state) freeze() {
 // first such registration. A group member is its own entry. A binding that
 // owns the key but has a per-scope lifetime cannot honour eagerness and is
 // rejected here, whether that combination was declared directly or arrived
-// through an override.
+// through an override. A Bind alias may own an eager key: Start then builds
+// the target it redirects to.
 func (st *state) recomputeEager() {
 	st.eager = st.eager[:0]
 	seen := make(map[*binding]bool, len(st.all))
@@ -779,13 +787,9 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 		if holder.isStopped() {
 			// Stop ran while we were building, so its snapshot did not
 			// include us: undo with the context Stop was given, and fail.
-			stopCtx := holder.stopCtx
 			in.ph = phaseBuilt
 			holder.mu.Unlock()
-			if stopCtx == nil {
-				stopCtx = context.Background()
-			}
-			in.err = errors.Join(fmt.Errorf("di: %s: %w", k, ErrStopped), in.stopIfNeeded(stopCtx, holder))
+			in.err = errors.Join(fmt.Errorf("di: %s: %w", k, ErrStopped), in.stopIfNeeded(holder.stopContext(), holder))
 			return
 		}
 		in.ph = phaseBuilt
@@ -996,7 +1000,14 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 func (s *Scope) buildEager(eager []*binding) (err error) {
 	defer recoverAbort(&err)
 	for _, b := range eager {
-		s.enter().resolve(b, s.state, b.key)
+		if b.group {
+			// A group member is not reachable by key: resolve it directly.
+			s.enter().resolve(b, s.state, b.key)
+			continue
+		}
+		// By key, so a Bind alias that owns the key builds its target
+		// rather than its own absent constructor.
+		s.enter().get(b.key)
 	}
 	return nil
 }
@@ -1038,7 +1049,9 @@ func (s *Scope) Stop(ctx context.Context) error {
 	children := slices.Clone(s.children)
 	started := s.started
 	s.started = nil
-	s.stopCtx = ctx
+	if s.stopCtx == nil {
+		s.stopCtx = ctx // the first Stop owns it; a later call must not clobber it
+	}
 	s.stopped.Store(true)
 	s.mu.Unlock()
 
