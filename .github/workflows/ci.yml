@@ -27,6 +27,13 @@ jobs:
         run: test -z "$(gofmt -l .)" || (gofmt -d . && exit 1)
       - name: vet
         run: go vet ./...
+      - name: README examples are in sync
+        if: runner.os == 'Linux'
+        run: go run github.com/campoy/embedmd@v1.0.0 -d README.md
+      - name: run examples
+        run: |
+          go run ./examples/quickstart
+          go run ./examples/scopes
       - name: test
         run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: benchmarks compile and run

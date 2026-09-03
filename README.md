@@ -35,8 +35,9 @@ Beyond the syntax, the design makes a few deliberate choices:
   error` on the binding. Nothing is discovered by sniffing interfaces.
 - **Deterministic shutdown.** `Stop` runs hooks in reverse build order,
   sequentially, and joins every error.
-- **Child scopes are the test seam.** Registering in a child shadows the
-  parent, so a fake is one `Value` call away.
+- **Overrides are the test seam.** The last registration of a key wins, so a
+  test wires the production graph into a fresh scope and re-registers the one
+  thing it wants faked. No mocks of the container are needed.
 
 ## Install
 
@@ -48,11 +49,16 @@ Requires Go 1.27 or newer.
 
 ## Quick start
 
+Every snippet below lives under [`examples/`](examples/) and is compiled in CI.
+
+[embedmd]:# (examples/quickstart/main.go go)
 ```go
+// Quick start: register a few services, start and stop the application.
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/floatdrop/di"
@@ -69,20 +75,22 @@ func main() {
 	app.Value(Config{DSN: "postgres://localhost/app"})
 
 	app.Provide(func(s *di.Scope) *DB { return &DB{dsn: s.Get[Config]().DSN} }).
-		OnStop(func(ctx context.Context, db *DB) error { return nil })
+		OnStop(func(ctx context.Context, db *DB) error { fmt.Println("db closed"); return nil })
 
 	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
 
 	app.Provide(func(s *di.Scope) *Server { return &Server{repo: s.Get[*Repo]()} }).
 		Eager().
-		OnStart(func(ctx context.Context, srv *Server) error { return nil }).
-		OnStop(func(ctx context.Context, srv *Server) error { return nil })
+		OnStart(func(ctx context.Context, srv *Server) error { fmt.Println("listening"); return nil }).
+		OnStop(func(ctx context.Context, srv *Server) error { fmt.Println("server stopped"); return nil })
 
 	ctx := context.Background()
 	if err := app.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
 	defer app.Stop(ctx)
+
+	fmt.Println("serving", app.Get[*Server]().repo.db.dsn)
 }
 ```
 
@@ -124,25 +132,72 @@ di: building *app.A (provided at ...): di: building *app.B (provided at ...): di
 
 ## Scopes
 
+[embedmd]:# (examples/scopes/main.go go)
 ```go
-req := app.Child("request")
-req.Value(currentUser)
-req.Provide(func(s *di.Scope) *Handler { return &Handler{user: s.Get[*User]()} })
+// Scopes: a child scope sees everything in its parent and can shadow it.
+package main
 
-h := req.Get[*Handler]()   // sees currentUser and everything in app
+import (
+	"fmt"
+
+	"github.com/floatdrop/di"
+)
+
+type DB struct{ dsn string }
+type User struct{ Name string }
+type Handler struct {
+	db   *DB
+	user *User
+}
+
+func main() {
+	app := di.New()
+	app.Provide(func(*di.Scope) *DB { return &DB{dsn: "postgres://localhost/app"} })
+
+	// One child per request: request-scoped values live here, shared
+	// singletons such as *DB are reused from app.
+	req := app.Child("request")
+	req.Value(&User{Name: "ada"})
+	req.Provide(func(s *di.Scope) *Handler {
+		return &Handler{db: s.Get[*DB](), user: s.Get[*User]()}
+	})
+
+	h := req.Get[*Handler]()
+	fmt.Println(h.user.Name, "->", h.db.dsn)
+	fmt.Println("same db:", h.db == app.Get[*DB]())
+}
 ```
 
 A child resolves through its parent, reuses the parent's singletons, and owns
-the lifecycle of whatever it builds itself. The same mechanism gives you test
-overrides:
+the lifecycle of whatever it builds itself. A singleton always builds its
+dependencies in the scope that registered it, so a child cannot rewire a
+parent singleton; register the consumer in the child too if it must see
+child-scoped values.
 
+For tests, wire the production graph into a fresh scope and override before
+anything is resolved:
+
+[embedmd]:# (examples/testing/repo_test.go go)
 ```go
-func TestRepo(t *testing.T) {
-	s := app.Child("test")
-	s.Value(&DB{dsn: "sqlite://memory"})
-	t.Cleanup(func() { s.Stop(context.Background()) })
+package app
 
-	repo := s.Get[*Repo]()   // built against the fake DB
+import (
+	"context"
+	"testing"
+
+	"github.com/floatdrop/di"
+)
+
+func TestRepo(t *testing.T) {
+	s := di.New()
+	Wire(s)
+	s.Value(&DB{DSN: "sqlite://memory"}) // later registration wins: replaces the production *DB
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+
+	repo := s.Get[*Repo]() // built against the fake DB
+	if repo.DB.DSN != "sqlite://memory" {
+		t.Fatalf("got %q", repo.DB.DSN)
+	}
 }
 ```
 
@@ -171,6 +226,15 @@ Indicative numbers on Apple Silicon:
 
 ```sh
 cd benchmarks && go test -bench . -benchmem
+```
+
+## Contributing
+
+README code blocks are generated from `examples/` with
+[embedmd](https://github.com/campoy/embedmd). After editing an example run:
+
+```sh
+go run github.com/campoy/embedmd@v1.0.0 -w README.md
 ```
 
 ## Limitations
