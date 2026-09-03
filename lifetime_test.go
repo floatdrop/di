@@ -86,12 +86,12 @@ func TestLifetimeOnValueIsRejected(t *testing.T) {
 		{"Transient", func(b di.Binding[*DB]) { b.Transient() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r, _ := recover().(string); !strings.Contains(r, tc.name+" is meaningless") {
-					t.Fatalf("got %v", r)
-				}
-			}()
-			tc.apply(di.New().Value(&DB{}))
+			s := di.New()
+			tc.apply(s.Value(&DB{}))
+			// Validation happens when the registration batch is committed,
+			// so every combination is rejected in one place regardless of
+			// the order the builder methods were called in.
+			mustPanic(t, tc.name+" is meaningless", func() { _, _ = s.Resolve[*DB]() })
 		})
 	}
 }
