@@ -407,6 +407,7 @@ func (b Binding[T]) edit(f func(*binding)) Binding[T] {
 func (b Binding[T]) Named(name string) Binding[T] {
 	return b.edit(func(b *binding) { b.key.name = name })
 }
+
 // Transient builds a new instance on every resolution. Transients are not
 // tracked by the scope: OnStop, Run and Health never apply to them, so a
 // transient must own its own cleanup.
