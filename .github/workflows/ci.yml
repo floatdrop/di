@@ -39,3 +39,21 @@ jobs:
         run: |
           go vet ./...
           go test -run '^$' -bench . -benchtime=50ms ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache-dependency-path: benchmarks/go.sum
+      - name: fuzz the container against its invariants
+        run: go test -run '^$' -fuzz FuzzMachine -fuzztime 90s .
+      - name: upload any failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: testdata/fuzz/

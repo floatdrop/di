@@ -824,3 +824,28 @@ func TestRegressionFailedAliasTargetLeavesKeyReAliasable(t *testing.T) {
 type altReader struct{}
 
 func (*altReader) Read() string { return "alt" }
+
+// 35. Found by the model-based test: a scope that has already served a key
+// from an outer scope must not then shadow it, which would give one key two
+// live values within that scope. Shadowing before resolving stays legal,
+// since that is how child scopes and tests substitute dependencies.
+func TestRegressionCannotShadowAKeyAlreadyServed(t *testing.T) {
+	root := di.New()
+	root.Provide(func(*di.Scope) *DB { return &DB{dsn: "root"} })
+
+	child := root.Child("child")
+	if got := child.Get[*DB]().dsn; got != "root" {
+		t.Fatalf("got %q", got)
+	}
+	mustPanic(t, "already resolved it from an outer scope", func() {
+		child.Value(&DB{dsn: "shadow"})
+		_ = child.Get[*DB]()
+	})
+
+	// The same registration is fine in a scope that has not resolved it.
+	fresh := root.Child("fresh")
+	fresh.Value(&DB{dsn: "shadow"})
+	if got := fresh.Get[*DB]().dsn; got != "shadow" {
+		t.Fatalf("pre-resolution shadowing must work, got %q", got)
+	}
+}

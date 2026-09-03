@@ -419,6 +419,7 @@ type state struct {
 	eager     []*binding             // derived by deriveEager: what Start builds
 	started   []*instance            // build order; stopped in reverse
 	scoped    map[*binding]*instance // per-scope instances of Scoped bindings
+	served    map[key]bool           // keys this scope resolved from an outer scope; lazily made
 	children  []*state
 	observers []func(Event)
 
@@ -459,6 +460,13 @@ func (st *state) freeze() {
 			if prev, ok := index[b.key]; ok && prev.used.Load() {
 				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it has already been resolved",
 					b.key, prev.site, b.site))
+			}
+			if st.served[b.key] {
+				// This scope already handed out a value for the key from an
+				// outer scope, so shadowing it now would give one key two
+				// live values within this scope.
+				panic(fmt.Sprintf("di: %s cannot be registered at %s: this scope has already resolved it from an outer scope",
+					b.key, b.site))
 			}
 			index[b.key] = b
 		}
@@ -704,8 +712,7 @@ type found struct {
 	b       *binding
 	owner   *state
 	at      key        // the key b is registered under, after following aliases
-	via     []key      // alias keys traversed, for cycle detection and error paths
-	aliases []*binding // the alias bindings traversed, so they count as used
+	aliases []*binding // alias bindings traversed: their keys are the route
 	cycle   bool       // the alias chain looped back on itself
 }
 
@@ -737,10 +744,9 @@ func (s *Scope) lookup(k key) found {
 			f.b, f.owner = b, st
 			return f
 		}
-		f.via = append(f.via, f.at)
 		f.aliases = append(f.aliases, b)
 		next := *b.alias
-		if slices.Contains(f.via, next) {
+		if slices.ContainsFunc(f.aliases, func(a *binding) bool { return a.key == next }) {
 			f.cycle, f.at = true, next
 			return f
 		}
@@ -776,14 +782,17 @@ func (s *Scope) get(k key) any {
 	f := s.lookup(k)
 
 	// Alias keys stay on the stack so a cycle through an alias is detected
-	// and the error path names the whole route.
-	for _, ak := range f.via {
-		if slices.Contains(r.stack, ak) {
-			panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), ak)})
+	// and the error path names the whole route. Skipped entirely when the
+	// key is served directly, which is the common case.
+	if len(f.aliases) > 0 {
+		for _, ab := range f.aliases {
+			if slices.Contains(r.stack, ab.key) {
+				panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, r.pathStr(), ab.key)})
+			}
+			r.stack = append(r.stack, ab.key)
 		}
-		r.stack = append(r.stack, ak)
+		defer func() { r.stack = r.stack[:len(r.stack)-len(f.aliases)] }()
 	}
-	defer func() { r.stack = r.stack[:len(r.stack)-len(f.via)] }()
 
 	switch {
 	case f.cycle:
@@ -798,6 +807,19 @@ func (s *Scope) get(k key) any {
 	// interface to a working implementation.
 	for _, ab := range f.aliases {
 		ab.used.Store(true)
+	}
+	if f.owner != s.state {
+		// Served from an outer scope, where binding.used cannot protect this
+		// scope, so record the keys here instead.
+		s.mu.Lock()
+		if s.served == nil {
+			s.served = make(map[key]bool, 4)
+		}
+		s.served[k], s.served[f.at] = true, true
+		for _, ab := range f.aliases {
+			s.served[ab.key] = true
+		}
+		s.mu.Unlock()
 	}
 	return v
 }

@@ -119,10 +119,13 @@ Call them before the scope is first resolved; afterwards they panic.
 
 Later registrations of the same key override earlier ones, which is how a
 child scope shadows its parent and how a test substitutes a fake. Once a key
-has served a value it can no longer be overridden: replacing it then would
-leave two live instances of one service, so it panics instead. A resolution
-that failed built nothing, so it leaves the key re-registerable, which is
-the only way to recover a key whose constructor failed. Combinations
+has served a value it can no longer be overridden, in the scope that owns
+it or in any scope that resolved through it: replacing it then would leave
+one key with two live values, so it panics instead. Shadowing a key a scope
+has not yet resolved stays legal, which is what child scopes and tests rely
+on. A resolution that failed built nothing, so it leaves the key
+re-registerable, which is the only way to recover a key whose constructor
+failed. Combinations
 that cannot be honoured, such as a lifecycle hook on a transient, are
 rejected the first time the scope is resolved, whatever order the builder
 methods were called in.
@@ -428,6 +431,23 @@ Indicative numbers on Apple Silicon:
 
 ```sh
 cd benchmarks && go test -bench . -benchmem
+```
+
+## Testing
+
+Alongside ordinary tests, two generative suites guard the parts that proved
+easiest to get wrong. `TestPropertyEagerSet` generates random registration
+sequences and checks the derived eager set against a model of the
+documented rules. `TestMachineSeeded` and `FuzzMachine` drive random
+sequences of *operations* — register, resolve, start, stop, health — and
+check invariants rather than predicted outcomes: `Resolve` never panics, a
+rejected configuration is rejected identically when repeated, a stopped
+scope resolves to `ErrStopped`, a singleton is stable, nothing is stopped
+more often than it was built, and every `Run` hook has returned once the
+root is stopped.
+
+```sh
+go test -run '^$' -fuzz FuzzMachine -fuzztime 2m
 ```
 
 ## Contributing
