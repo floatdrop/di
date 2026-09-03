@@ -190,10 +190,11 @@ func (b *binding) validate() {
 		bad("Transient and Scoped", "are mutually exclusive")
 	case b.transient && hooks:
 		bad("lifecycle hooks", "do not apply to a Transient binding: its instances are not tracked")
-	case b.transient && b.eager:
-		bad("Eager", "does not apply to a Transient binding: the instance would be discarded")
-	case b.scoped && b.eager:
-		bad("Eager", "does not apply to a Scoped binding: it is built per resolving scope")
+	case b.eager && lifetimeName(b) != "":
+		// Contradictory on its own terms, so rejected even if a later
+		// registration overrides it. Whether an override can inherit
+		// eagerness is a separate question, settled in recomputeEager.
+		bad("Eager", "does not apply to a "+lifetimeName(b)+" binding: it is not built once")
 	case b.alias != nil && (b.transient || b.scoped || b.eager || hooks):
 		bad("lifetimes and lifecycle hooks", "belong on the target binding, not on a Bind alias")
 	}
@@ -402,6 +403,7 @@ type state struct {
 	groups    map[reflect.Type][]*binding
 	frozen    bool
 	all       []*binding             // every binding, in registration order
+	eager     []*binding             // derived by recomputeEager: what Start builds
 	started   []*instance            // build order; stopped in reverse
 	scoped    map[*binding]*instance // per-scope instances of Scoped bindings
 	children  []*state
@@ -441,22 +443,42 @@ func (st *state) freeze() {
 		st.all = append(st.all, b)
 	}
 	st.pending = nil
+	st.recomputeEager()
+}
 
-	// Eagerness transfers to whichever binding owns the key, so the winner
-	// must be able to honour it. Declared Eager+Scoped/Transient is caught
-	// by validate; this catches the same thing arriving via an override.
+// recomputeEager derives the ordered set of bindings Start builds. It runs
+// whenever registrations change, and is the only place that decides what
+// Eager means, so the set and the rules it must satisfy cannot drift apart:
+//
+// For every key, the set holds the binding that owns the key exactly once if
+// any registration for that key was marked Eager, at the position of the
+// first such registration. A group member is its own entry. A binding that
+// owns the key but has a per-scope lifetime cannot honour eagerness and is
+// rejected here, whether that combination was declared directly or arrived
+// through an override.
+func (st *state) recomputeEager() {
+	st.eager = st.eager[:0]
+	seen := make(map[*binding]bool, len(st.all))
 	for _, b := range st.all {
-		if !b.eager || b.group {
+		if !b.eager {
 			continue
 		}
-		w := st.index[b.key]
-		if w == nil || w == b {
+		w := b
+		if !b.group {
+			if w = st.index[b.key]; w == nil {
+				continue
+			}
+		}
+		if seen[w] {
 			continue
 		}
 		if kind := lifetimeName(w); kind != "" {
-			panic(fmt.Sprintf("di: %s is Eager (provided at %s), but the %s registration at %s overrides it: eagerness cannot transfer to a per-scope lifetime",
+			// b itself is caught by validate, so w is an override here.
+			panic(fmt.Sprintf("di: %s is Eager (provided at %s), but the %s registration at %s owns the key: eagerness cannot transfer to a per-scope lifetime",
 				b.key, b.site, kind, w.site))
 		}
+		seen[w] = true
+		st.eager = append(st.eager, w)
 	}
 }
 
@@ -608,6 +630,15 @@ func (b *binding) lifetimeCheck(what string) {
 		panic(fmt.Sprintf("di: %s is meaningless for a Value binding (%s, provided at %s)", what, b.key, b.site))
 	}
 }
+
+// Eager builds the service during Start rather than on first use.
+//
+// Lifetime and lifecycle hooks belong to a registration, because they are
+// typed on that particular value, but eagerness belongs to the key: it means
+// the service exists by the time Start returns. So overriding an eager
+// binding keeps the key eager and builds the replacement, while a
+// replacement with a per-scope lifetime, which cannot be built once at
+// Start, is rejected.
 func (b Binding[T]) Eager() Binding[T] { return b.edit(func(b *binding) { b.eager = true }) }
 
 // Typed lifecycle hooks: no interface sniffing, no reflection.
@@ -930,25 +961,7 @@ func (s *Scope) Start(ctx context.Context) (err error) {
 		return errors.New("di: Start called twice")
 	}
 	s.startCtx = ctx
-	// Eagerness belongs to the key, not to one registration: an overridden
-	// binding must not be built as well, but its replacement still is.
-	// Registration order, deduplicated.
-	var eager []*binding
-	seen := map[*binding]bool{}
-	for _, b := range s.all {
-		if !b.eager {
-			continue
-		}
-		winner := b
-		if !b.group {
-			winner = s.index[b.key]
-		}
-		if winner == nil || seen[winner] {
-			continue
-		}
-		seen[winner] = true
-		eager = append(eager, winner)
-	}
+	eager := slices.Clone(s.eager) // derived at freeze; clone so a later freeze cannot truncate it
 	s.mu.Unlock()
 
 	// F3: a failing eager constructor must roll back like a failing hook.
