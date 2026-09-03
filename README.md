@@ -110,7 +110,7 @@ Call them before the scope is first resolved; afterwards they panic.
 | `s.Bind[I, T]()` | Serve requests for interface `I` from `T`'s binding. Checked at registration. |
 | `s.Add(func(*di.Scope) T)` | Append to the multi-binding group for `T`. |
 | `.Named("replica")` | Register under a name in addition to the type. |
-| `.Transient()` | Build a fresh instance on every resolution. |
+| `.Transient()` | Build a fresh instance on every resolution. Transients are not tracked, so `OnStop` never runs for them; a transient must own its own cleanup. |
 | `.Scoped()` | One instance per resolving scope, built and stopped there. Not allowed on `Value`. |
 | `.Eager()` | Build during `Start`. |
 | `.OnStart(f)` / `.OnStop(f)` | Typed lifecycle hooks, `f` is `func(context.Context, T) error`. |
