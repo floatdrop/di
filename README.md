@@ -469,6 +469,13 @@ go run github.com/campoy/embedmd@v1.0.0 -w README.md
 - Generic methods are invisible to `reflect`; the container does not rely on
   that, but tooling that discovers methods reflectively will not see them.
 
+## Changelog
+
+Release notes live in [CHANGELOG.md](CHANGELOG.md) and on the
+[releases page](https://github.com/floatdrop/di/releases). While the major
+version is 0, a minor bump may change behaviour; each entry says whether an
+upgrade can break a caller.
+
 ## License
 
 MIT

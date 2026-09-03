@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: CHANGELOG has an entry for this tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -qE "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section for tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+          echo "found a CHANGELOG entry for $version"
