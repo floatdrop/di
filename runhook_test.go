@@ -106,3 +106,57 @@ func TestRunHookStartsForLateBuiltService(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A worker may fail on its own, keep flushing until it is told to stop, and
+// only then report what went wrong. That error owes nothing to the
+// cancellation it arrived after, so Run must still learn the cause -- which
+// no reading of the run context can establish, since by then it is cancelled
+// either way. The flaky sibling of this test,
+// TestReviewDetachedChildWorkerFailureReachesRun, only ever failed because
+// the answer was read from the context twice.
+func TestRunHookFailureDecidedBeforeCancelReachesRun(t *testing.T) {
+	boom := errors.New("queue disconnected")
+	failed := make(chan struct{})
+
+	root := di.New()
+	child := root.Child("c")
+	child.Provide(func(*di.Scope) *Worker { return &Worker{} }).Eager().
+		Run(func(ctx context.Context, _ *Worker) error {
+			close(failed) // the failure is decided here
+			<-ctx.Done()  // the worker flushes while the scope winds down
+			return boom   // and is reported here
+		})
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- root.Run(context.Background(), di.StopTimeout(time.Second)) }()
+	if err := child.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-failed
+	_ = child.Stop(context.Background()) // detaches, and discards what it reports
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, boom) {
+			t.Fatalf("root.Run returned %v, want the worker failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("root.Run did not return")
+	}
+}
+
+// A worker cancelled by an orderly Stop, reporting only that, is not a
+// failure: nothing calls Shutdown and Stop returns cleanly. This is the case
+// the surviving guard is for, and the one an unconditional Shutdown would get
+// wrong.
+func TestRunHookCancellationIsNotAFailure(t *testing.T) {
+	root := di.New()
+	root.Value(&Worker{}).Eager().
+		Run(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); return ctx.Err() })
+	if err := root.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Stop(context.Background()); err != nil {
+		t.Fatalf("a cancelled worker was reported as a failure: %v", err)
+	}
+}

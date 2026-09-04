@@ -66,6 +66,17 @@ under Changed.
   it. Service code that only followed the lifecycle API could be reading
   what `OnStop` was closing.
 
+- A `Run` hook's failure always reaches `Shutdown`. Whether it did used to
+  depend on a race: the worker goroutine asked the run context whether *we*
+  had cancelled it, and a `Stop` landing between two readings of that context
+  flipped the verdict, so a worker that died of its own error could be written
+  off as one we had stopped. Its failure then reached only the `Stop` that
+  cancelled it, and a caller who discarded that -- or a child scope that had
+  already detached -- left `Scope.Run` waiting for a signal that never came.
+  This is the half of the September 2026 review's ninth defect that its fix
+  left open, and it is why
+  `TestReviewDetachedChildWorkerFailureReachesRun` could fail on timing alone.
+
 ### Testing
 
 - The concurrent driver checks the drain phase instead of merely running it,
@@ -85,6 +96,15 @@ under Changed.
 
 ### Changed
 
+- A `Run` hook that returns a non-nil error now calls `Shutdown` even when the
+  scope was already stopping. Only `context.Canceled` from a hook we had
+  cancelled is still treated as no failure at all. When an error surfaces says
+  nothing about what caused it -- a worker may fail, flush what it has while
+  the scope winds down, and only then report -- so the timing test that used to
+  gate this was unsound in both directions. A caller who does not want a
+  worker's shutdown-time error to take the application down should return nil
+  from the hook: previously that error was silently confined to whichever
+  `Stop` cancelled it.
 - `Stop` can now be slower to return when a drain hook builds something: the
   phase keeps sweeping until nothing new appears, and both the sweep and the
   hooks are bounded by the context passed to `Stop`. A caller that passed a
@@ -156,6 +176,17 @@ a caller in the three ways listed under Changed.
   given, so the copy registered before was missing everything the route
   matched, and its context carried no scope.
 
+- A `Run` hook's failure always reaches `Shutdown`. Whether it did used to
+  depend on a race: the worker goroutine asked the run context whether *we*
+  had cancelled it, and a `Stop` landing between two readings of that context
+  flipped the verdict, so a worker that died of its own error could be written
+  off as one we had stopped. Its failure then reached only the `Stop` that
+  cancelled it, and a caller who discarded that -- or a child scope that had
+  already detached -- left `Scope.Run` waiting for a signal that never came.
+  This is the half of the September 2026 review's ninth defect that its fix
+  left open, and it is why
+  `TestReviewDetachedChildWorkerFailureReachesRun` could fail on timing alone.
+
 ### Testing
 
 - The concurrent driver checks the drain phase instead of merely running it,
@@ -190,6 +221,17 @@ a caller in the three ways listed under Changed.
 
 The public API is unchanged from 0.2.0: no signature was added, removed or
 altered. Everything here is behaviour.
+
+- A `Run` hook's failure always reaches `Shutdown`. Whether it did used to
+  depend on a race: the worker goroutine asked the run context whether *we*
+  had cancelled it, and a `Stop` landing between two readings of that context
+  flipped the verdict, so a worker that died of its own error could be written
+  off as one we had stopped. Its failure then reached only the `Stop` that
+  cancelled it, and a caller who discarded that -- or a child scope that had
+  already detached -- left `Scope.Run` waiting for a signal that never came.
+  This is the half of the September 2026 review's ninth defect that its fix
+  left open, and it is why
+  `TestReviewDetachedChildWorkerFailureReachesRun` could fail on timing alone.
 
 ### Testing
 
@@ -269,6 +311,17 @@ altered. Everything here is behaviour.
 - `di.Test`: a test scope wired from functions, stopped at cleanup, failing
   the test if a stop hook errors.
 - Package overview documentation.
+
+- A `Run` hook's failure always reaches `Shutdown`. Whether it did used to
+  depend on a race: the worker goroutine asked the run context whether *we*
+  had cancelled it, and a `Stop` landing between two readings of that context
+  flipped the verdict, so a worker that died of its own error could be written
+  off as one we had stopped. Its failure then reached only the `Stop` that
+  cancelled it, and a caller who discarded that -- or a child scope that had
+  already detached -- left `Scope.Run` waiting for a signal that never came.
+  This is the half of the September 2026 review's ninth defect that its fix
+  left open, and it is why
+  `TestReviewDetachedChildWorkerFailureReachesRun` could fail on timing alone.
 
 ### Testing
 

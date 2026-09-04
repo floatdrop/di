@@ -447,15 +447,26 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 			if rctx.Err() != nil && errors.Is(err, context.Canceled) {
 				return // we cancelled it and it reported just that
 			}
-			// Wrap once and keep that one value: Stop reports it, and a
-			// worker that died on its own also hands it to Run, which
-			// recognises the two as the same failure rather than listing
-			// it twice. Stop cannot be relied on alone, because the scope
-			// that owns the worker may be a child that detaches first.
+			// Any other error is the worker's own failure, and it is handed
+			// to Shutdown whether or not the scope had begun stopping. What
+			// the hook returned is the only sound evidence of that: an
+			// earlier version asked rctx.Err() whether we had cancelled and
+			// treated the answer as the cause, which no reading of it can
+			// be. A worker that fails, keeps flushing until it is told to
+			// stop, and then reports what went wrong returns after the
+			// cancellation and owes nothing to it; a Stop landing between
+			// two such readings flipped the verdict outright, which is why
+			// TestReviewDetachedChildWorkerFailureReachesRun could fail on
+			// timing alone.
+			//
+			// Wrap once and keep that one value: Stop reports it, and Run
+			// gets the same value, so the two recognise one failure rather
+			// than listing it twice. Stop cannot be relied on alone, because
+			// the scope that owns the worker may be a child that detaches
+			// before an ancestor's Stop reaches it, and because whoever
+			// called that Stop is free to discard what it returned.
 			in.runErr = fmt.Errorf("di: %s: %w", b.key, err)
-			if rctx.Err() == nil {
-				(&Scope{state: owner}).Shutdown(in.runErr)
-			}
+			(&Scope{state: owner}).Shutdown(in.runErr)
 		}()
 	}
 	return nil
@@ -1167,8 +1178,15 @@ func (b Binding[T]) OnStop(f func(context.Context, T) error) Binding[T] {
 // cancelled when the service stops; Stop waits for it to return, bounded by
 // its own context. A hook that outlasts that deadline is reported by Stop,
 // and OnStop then waits for it rather than releasing the value underneath a
-// worker still reading it. Returning a non-nil error before that calls
-// Shutdown with it, stopping the application.
+// worker still reading it.
+//
+// Returning a non-nil error calls Shutdown with it, stopping the application.
+// That holds whenever the scope was stopping, because when the failure
+// surfaced says nothing about what caused it: a worker may fail, flush what
+// it has while the scope winds down, and only then report. The one error that
+// does not count is context.Canceled from a hook we had already cancelled,
+// which is a worker reporting the cancellation and nothing else. A hook that
+// would rather stay quiet during shutdown should return nil.
 func (b Binding[T]) Run(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.run = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
 }
