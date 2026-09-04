@@ -284,18 +284,25 @@ type instance struct {
 
 	// Each step another goroutine can be responsible for finishing has a
 	// channel closed when it is finished, so a waiter blocks on that one step
-	// rather than on every phase change in the scope. All three are read under
-	// the owning state's mutex, in the same critical section as the phase that
-	// says which one to wait for, and closed by the goroutine that owns the
-	// step. Closing under the mutex too is what makes a lost wakeup
-	// impossible: a waiter that has the channel either sees it closed or is
-	// released by the close, whichever order the two happen in.
+	// rather than on every phase change in the scope. One rule covers all
+	// three: the first goroutine that actually has to wait makes the channel,
+	// and the goroutine that owns the step closes it if it is there. Both
+	// halves happen under the owning state's mutex, in the same critical
+	// section as the phase that says which step is outstanding, which is what
+	// makes the pair safe in either order. A waiter that got there first is
+	// released by the close; an owner that got there first leaves nil behind,
+	// and the phase the waiter then reads already says the step is done, so it
+	// never blocks on a wakeup that has been and gone.
 	//
-	// settledCh exists from the moment the instance does, because a waiter can
-	// arrive before anything has claimed the build. The other two are made by
-	// the transition that starts the step they report, since until then there
-	// is no step to wait for. A Transient instance has none of them: nothing
-	// is ever tracked, so nothing can wait.
+	// Nil is therefore the normal state, not an edge case. Nothing waits on an
+	// uncontended build, on a start step no resolution is racing, or on a
+	// drain no second Stop has reached, and none of those allocate. A
+	// Transient instance never allocates one at all, because it is not cached
+	// and no second resolution can find it.
+	// Never read one of these fields directly to block on it. Nil is the
+	// ordinary state, and a receive from a nil channel blocks for ever;
+	// waitOn is what turns "nobody has needed to wait yet" into a channel
+	// that the owner of the step will close.
 	settledCh  chan struct{} // closed by settle: value and err are final
 	startingCh chan struct{} // closed when the start step is no longer in flight
 	drainedCh  chan struct{} // closed when OnDrain has finished
@@ -314,12 +321,26 @@ type instance struct {
 	runErr  error
 }
 
-// newInstance makes a tracked instance: one whose build and start steps other
-// resolutions can wait for. A Transient instance is deliberately not made here
-// -- it is never cached, so no second resolution can ever find it to wait on,
-// and giving it the channels would allocate one per resolution for nobody.
-func newInstance(b *binding) *instance {
-	return &instance{b: b, settledCh: make(chan struct{})}
+// wake releases whoever is waiting for a step, if anyone is. A nil channel
+// means nobody ever had to wait, which is the ordinary case; both sides of the
+// pair run under the owning state's mutex, so nil here and "the phase already
+// says the step is done" are the same observation.
+func wake(ch chan struct{}) {
+	if ch != nil {
+		close(ch)
+	}
+}
+
+// waitOn returns the channel to block on for a step that is still outstanding,
+// making it if this is the first goroutine that has had to wait. Called with
+// the owning state's mutex held, in the same critical section as the phase
+// that decided the step is outstanding, so the owner cannot have closed and
+// discarded one in between.
+func waitOn(ch *chan struct{}) chan struct{} {
+	if *ch == nil {
+		*ch = make(chan struct{})
+	}
+	return *ch
 }
 
 // graph is one container's wait-for graph. It has two kinds of edge: an
@@ -411,7 +432,7 @@ func (in *instance) settle(holder *state) {
 	g.mu.Lock()
 	in.builder = nil
 	g.mu.Unlock()
-	close(in.settledCh)
+	wake(in.settledCh)
 	holder.mu.Unlock()
 }
 
@@ -472,15 +493,6 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 	return nil
 }
 
-// claimStart moves a built instance into phaseStarting and makes the channel
-// that reports when that step is over, in one critical section, so a waiter
-// that reads the phase always finds the channel that goes with it. Called with
-// the owner's mutex held, and paired with the close in startClaimed.
-func (in *instance) claimStart() {
-	in.ph = phaseStarting
-	in.startingCh = make(chan struct{})
-}
-
 // claim takes the start step for this goroutine, returning false if another
 // one already has it or the instance is past starting.
 func (in *instance) claim(owner *state) bool {
@@ -489,7 +501,7 @@ func (in *instance) claim(owner *state) bool {
 	if in.ph != phaseBuilt {
 		return false
 	}
-	in.claimStart()
+	in.ph = phaseStarting
 	return true
 }
 
@@ -524,7 +536,7 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) (err error) 
 			}
 		}
 		wanted, stopCtx := in.stopWanted, in.stopCtx
-		close(in.startingCh) // the start step is no longer in flight
+		wake(in.startingCh) // the start step is no longer in flight
 		owner.mu.Unlock()
 		if wanted {
 			if stopCtx == nil {
@@ -588,7 +600,7 @@ func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
 	paired := in.b.onStart != nil && owner.everStarted()
 	owner.mu.Lock()
 	if in.dr == draining {
-		done := in.drainedCh
+		done := waitOn(&in.drainedCh)
 		owner.mu.Unlock()
 		select {
 		case <-done:
@@ -633,7 +645,7 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 			owner.mu.Unlock()
 			return false, nil
 		}
-		done := in.drainedCh
+		done := waitOn(&in.drainedCh)
 		owner.mu.Unlock()
 		select {
 		case <-done:
@@ -669,7 +681,7 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 		owner.mu.Unlock()
 		return false, nil
 	}
-	in.dr, in.drainedCh = draining, make(chan struct{})
+	in.dr = draining
 	owner.mu.Unlock()
 
 	t0 := time.Now()
@@ -678,7 +690,7 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 
 	owner.mu.Lock()
 	in.dr = drained
-	close(in.drainedCh) // release a concurrent Stop waiting for this hook
+	wake(in.drainedCh) // release a concurrent Stop waiting for this hook
 	owner.mu.Unlock()
 
 	if err != nil {
@@ -1066,7 +1078,7 @@ type Binding[T any] struct {
 
 func (s *Scope) register(k key, build func(*Scope) any) *binding {
 	b := &binding{key: k, site: callsite(), build: build}
-	b.single = newInstance(b)
+	b.single = &instance{b: b}
 	s.mu.Lock()
 	s.pending = append(s.pending, b)
 	s.mu.Unlock()
@@ -1383,9 +1395,7 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 		// Nothing is cached, so it cannot become captive and it is never
 		// tracked for teardown. It still goes through construct, so a
 		// failing transient constructor is an error like any other and a
-		// successful one is reported to observers like any other, and it is
-		// made directly rather than by newInstance because nothing can ever
-		// find it to wait on.
+		// successful one is reported to observers like any other.
 		in := &instance{b: b}
 		if err := sc.construct(in, holder, k); err != nil {
 			panic(abort{err})
@@ -1412,7 +1422,7 @@ func (st *state) instanceFor(b *binding) *instance {
 	defer st.mu.Unlock()
 	in := st.scoped[b]
 	if in == nil {
-		in = newInstance(b)
+		in = &instance{b: b}
 		st.scoped[b] = in
 	}
 	return in
@@ -1433,14 +1443,18 @@ func (s *Scope) await(in *instance, holder *state, k key) (any, error) {
 			holder.mu.Lock()
 			continue
 		}
-		// Which step is outstanding decides which channel to block on, and
-		// both are read here, under the mutex, in the same critical section as
-		// the phase that chose. Whoever owns the step closes it under this
-		// mutex too, so it cannot close between the read and the block and
-		// leave this branch waiting for a wakeup that has already happened.
-		ready := in.settledCh
+		// Which step is outstanding decides which channel to block on, and the
+		// choice is made here, under the mutex, in the same critical section
+		// as the phase that decided there is a step to wait for at all. Only
+		// the channel for that one step is made, and whoever owns the step
+		// closes it under this mutex too, so it cannot close between the
+		// choice and the block and leave this branch waiting for a wakeup that
+		// has already happened.
+		var ready chan struct{}
 		if in.settled {
-			ready = in.startingCh // settled, so the outstanding step is OnStart
+			ready = waitOn(&in.startingCh) // settled, so OnStart is outstanding
+		} else {
+			ready = waitOn(&in.settledCh)
 		}
 		if !s.r.wait(holder.graph, in) {
 			holder.mu.Unlock()
@@ -1761,7 +1775,7 @@ func (st *state) claimNext() (*instance, *state) {
 	st.mu.Lock()
 	for _, in := range st.started {
 		if in.ph == phaseBuilt {
-			in.claimStart()
+			in.ph = phaseStarting
 			st.mu.Unlock()
 			return in, st
 		}
