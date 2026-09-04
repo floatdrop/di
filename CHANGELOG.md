@@ -7,6 +7,68 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+Fixes for the six defects of the third September 2026 review. Every one of
+them is an interaction between two things that are each correct alone: two
+scopes tearing down at once, a deadline and a hook still holding a value, a
+resolution and the constructor whose scope it borrowed. The public API is
+unchanged.
+
+### Fixed
+
+- A drain hook may stop a scope that is neither its own nor an ancestor of it
+  -- a sibling, or anything else outside its own line. The sweep used to claim
+  the drain phase of every descendant before running a single hook, so such a
+  `Stop` waited for a phase that only the walk it had just blocked could end:
+  with a deadline it failed, with `context.Background` it hung. The sweep now
+  claims a scope's phase immediately before it sweeps that scope, so the only
+  phases held while a hook runs belong to the hook's own scope and its
+  ancestors, which a hook may not stop anyway. Whether the old code deadlocked
+  depended on the order the two scopes were created in.
+- A `Stop` whose context runs out while another `Stop`'s `OnDrain` still holds
+  an instance no longer drops that instance's `OnStop`. It had already taken
+  the instance off its scope's list, so nothing else would ever reach it and
+  the service was never released -- a second `Stop` replayed the stored error
+  and released nothing either. The missed deadline is still reported, and the
+  release now follows the drain hook's own return, exactly as it already did
+  for a `Run` hook that outlasts the same deadline.
+- `Scope.Run` reports a failure published through `Shutdown` while the stop was
+  already running. `Run` read the cause once, before `Stop`, so a worker in a
+  child scope that died after a cancelled context -- with its own scope stopped
+  and detached by a hook that handled that error itself -- returned nothing to
+  the caller. `Run` now re-reads the cause on the way out, and the existing
+  de-duplication keeps a failure that arrived by both routes from being
+  reported twice.
+- A resolution made through the `*Scope` a finished constructor kept is no
+  longer a false `ErrCycle` when a constructor *above* it is still building.
+  0.5.0 stopped counting the finished frame itself; the frames above it were
+  still counted, so `A` building, `B` returning and keeping its scope, and an
+  independent resolution through that scope needing `A` was reported as a
+  cycle -- and the verdict was cached, so the service stayed poisoned after
+  `A` had long succeeded. A finished frame now ends the walk in both the path
+  check and the wait-for graph.
+
+  This is a trade, not a free fix, and it is the same one `Stop` makes for a
+  start step in flight: without goroutine-local state there is no way to tell
+  an independent late resolution from the constructor's own goroutine reaching
+  back through an escaped scope into its own unfinished construction. The
+  second now deadlocks where it used to be reported. It takes a service
+  reaching into itself through a scope that escaped a nested constructor; the
+  first is the documented pattern.
+- A child scope created *inside* a constructor keeps that constructor's
+  resolution, so a request through it that leads back to the service being
+  built is reported as `ErrCycle`. `Child` used to hand back a scope with no
+  path at all, which started a fresh resolution that then waited for the build
+  it was part of: neither the path check nor the wait-for graph could connect
+  the two halves. A child kept for later is unaffected -- its path is already
+  finished, so it resolves as its own branch, and failures from it panic with
+  a plain error as any top-level call does.
+- A `Transient` constructor that finishes after its scope has stopped reports
+  `ErrStopped` instead of handing the value back. Every other lifetime was
+  re-checked after its wait; the transient branch returned without one, so a
+  scope that had finished stopping could still serve a value it had no way to
+  tear down.
+
+
 ## [0.5.0] - 2026-09-04
 
 Fixes for the six defects of the second September 2026 review, the `Run`-hook

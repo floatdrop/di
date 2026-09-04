@@ -121,13 +121,37 @@ registered in, or one root alias to a `Scoped` target would be the same edge
 in every scope and collapse into a false cycle.
 
 `resolver.done` is the one thing about a node that changes: `resolve` sets it
-as it returns, and `onPath` skips a node that has it. The path stays whole for
-error messages; what goes away is the claim that the node is still a
-dependency. This exists because a constructor may keep the `*Scope` it was
-handed -- that is how a goroutine it starts resolves later -- and a resolution
-made through it afterwards would otherwise meet its own finished frame, be
-called a cycle, and have that verdict cached on whatever instance it was
-building.
+as it returns, and `onPath` and `descends` *stop the walk* at a node that has
+it. The path stays whole for error messages; what goes away is the claim that
+the node, or anything above it, is still a dependency. This exists because a
+constructor may keep the `*Scope` it was handed -- that is how a goroutine it
+starts resolves later -- and a resolution made through it afterwards would
+otherwise meet its own finished frame, be called a cycle, and have that
+verdict cached on whatever instance it was building.
+
+Stopping rather than skipping is the second half of that, and it matters
+because the frames *above* the finished one are usually still building: A
+resolves B, B keeps its scope and returns, A carries on, and a later
+resolution through B's scope that needs A met an active A and was called a
+cycle even though it had only to wait. A finished node breaks the chain in
+both directions -- nothing above it is waiting on what is opened below it
+afterwards -- so both edges of the wait-for graph read it the same way. The
+price is the one case that cannot be told apart without goroutine-local state,
+exactly as with `Stop`'s mid-start handoff: a constructor that blocks on a
+resolution made through a finished descendant's scope that leads back to
+itself now deadlocks where it used to be reported. It takes a service reaching
+back into its own unfinished construction through an escaped scope; the late
+resolution the change admits is the documented one.
+
+`Scope.Child` carries the resolver of the scope it is made from, so a child
+opened *inside* a constructor is part of that resolution and a cycle through
+it is reported instead of deadlocking. Nothing else needs to change for a
+child kept for later, because the node it carries is `done` by then and the
+rule above makes the path inert. `inFlight` is that question -- a path whose
+last node has not returned -- and it is also what decides whether `Get`,
+`All` and `Must` convert an `abort` into the plain error panic a top-level
+call gets: a scope kept past its resolution has no enclosing call to unwind
+to, so it is a top-level caller that happens to know where it came from.
 
 **Scopes have a stop machine too.** `state.stopOnce` is claimed by the first
 `Stop` and settled when its teardown finishes; every later or concurrent `Stop`
@@ -157,16 +181,28 @@ begin releasing what it was using; and it skipped a child whose `Stop` had
 begun, which let this scope mark itself stopped while that child's hooks were
 still resolving through it.
 
-`drainRun.sweepAll` sweeps repeatedly rather than once, and sweeps *every*
-scope the phase owns on every pass. Draining is the only teardown phase during
-which the scope still resolves, so a hook finishing in-flight work may build a
-service or open a child scope for the first time; those owe a drain too, and it
-has to happen before `stopped` is set or their own hooks find nothing to
-resolve. Visiting each descendant once was enough for a hook that builds into
-its own scope and not for one that builds a level along — the same defect,
-found by the drain oracle after the review that fixed the first half. A pass
-that does no work ends the phase, and `ctx` bounds the sweep as well as the
-hooks.
+`drainRun.sweepAll` sweeps repeatedly rather than once, and `drainRun.visit`
+sweeps *every* scope the phase owns on every pass. Draining is the only
+teardown phase during which the scope still resolves, so a hook finishing
+in-flight work may build a service or open a child scope for the first time;
+those owe a drain too, and it has to happen before `stopped` is set or their
+own hooks find nothing to resolve. Visiting each descendant once was enough
+for a hook that builds into its own scope and not for one that builds a level
+along — the same defect, found by the drain oracle after the review that fixed
+the first half. A pass that does no work ends the phase, and `ctx` bounds the
+sweep as well as the hooks.
+
+The sweep is a post-order walk that claims a descendant's phase immediately
+before descending into it, not a discovery pass that claims the whole subtree
+and a sweep that follows. That ordering is the invariant: while a hook runs,
+the only phases the run holds unended are the scope being swept and its
+ancestors, which is exactly the set a hook may not call `Stop` on anyway.
+Claiming ahead is tidier and it deadlocks a hook that stops a scope the walk
+has taken but not yet reached — a server draining in one child and stopping a
+request scope in another waits for a phase only its own blocked walk can end.
+That is the trap of the paragraph below, one branch along rather than one
+level up. A scope another `Stop` already owns is waited for and then left
+alone, subtree included: that `Stop`'s run drains it.
 
 A descendant's phase ends when its own sweep does, not when the run does.
 Holding it open to the end is tidier, since an ancestor's hook can still build
@@ -299,7 +335,14 @@ Four layers, each catching a different class:
   so two resolutions of a key never disagree about a cycle (C8).
 - `review_test.go` — one test per defect of the first September 2026 review;
   `review2_test.go` the same for the second, which found six more plus the
-  `Run`-hook overlap, and then one the tightened driver found on its own.
+  `Run`-hook overlap, and then one the tightened driver found on its own;
+  `review3_test.go` the same for the third, whose six were all cross-phase or
+  cross-branch: a drain hook stopping a sibling scope, a release dropped with
+  a missed deadline, a shutdown cause published after `Run` had read it, a
+  false cycle through a finished frame, a `Transient` skipping the stopped
+  check, and a child scope made in a constructor starting a fresh path. None
+  of the generators can reach any of them, which is the same lesson as last
+  time: they need shapes the driver does not build.
 
   Every defect in both reviews lived in a gap the generators could not see,
   and closing those gaps found a seventh. Two things had been missing, both
@@ -336,10 +379,14 @@ The sequential generators do not explore goroutine interleavings. That is what
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
-- **Three teardowns may finish after `Stop` returns**: one handed off because a
+- **Four teardowns may finish after `Stop` returns**: one handed off because a
   start step was in flight, one undoing a build that completed after the scope
-  stopped, and one releasing a service whose `Run` hook outlasted `Stop`'s
-  context. All three are deliberate. Any ordering oracle has to model them
+  stopped, one releasing a service whose `Run` hook outlasted `Stop`'s
+  context, and one releasing a service whose `OnDrain` -- run by another
+  `Stop` -- outlasted it. All four are deliberate. The last two share a rule:
+  a deadline bounds how long `Stop` waits, never whether the release is owed,
+  and `Stop` has already taken the instance off its scope's list, so no other
+  caller will reach it. Any ordering oracle has to model them
   or it will report them as defects; the concurrent driver does it by running
   every `Start` before any `Stop`, so no start step is ever in flight.
 - **CHANGELOG is enforced.** `.github/workflows/release.yml` fails a tag push

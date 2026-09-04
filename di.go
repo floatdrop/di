@@ -374,10 +374,19 @@ type graph struct {
 // blocks does so at a leaf of the path, several nodes below the one that
 // claimed the build it is holding up, so both directions of the graph have
 // to be read against whole paths rather than single nodes.
+//
+// The walk stops at a node whose own resolution has returned, for the reason
+// onPath skips one: what a constructor opens through the Scope it kept is not
+// work anything above that constructor is waiting for any more. Both edges of
+// the graph mean "is responsible for finishing", and a finished node is where
+// that responsibility ends.
 func descends(n, anc *resolver) bool {
 	for ; n != nil; n = n.parent {
 		if n == anc {
 			return true
+		}
+		if n.done.Load() {
+			return false
 		}
 	}
 	return false
@@ -603,18 +612,51 @@ func (st *state) stopContext() context.Context {
 // Stop's documentation carries the consequence: such a teardown can finish
 // just after Stop returns, and its error reaches observers, not the caller.
 func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
+	if err := in.awaitDrain(ctx, owner); err != nil {
+		return err
+	}
+	return in.release(ctx, owner)
+}
+
+// awaitDrain waits out a drain hook running for this instance, and reports
+// the failure to do so within ctx.
+//
+// The release is still owed after that failure, and this is the only caller
+// left that can make it happen: Stop took the instance off its scope's list
+// before this walk began. So the deadline that ran out ends the caller's
+// wait, not the teardown -- the release is finished off the hook's own
+// return, which is the trade stop already makes for a Run hook that outlasts
+// ctx. WithoutCancel keeps the context's values and drops the spent deadline:
+// what is left is best-effort release rather than something the caller can
+// still bound.
+func (in *instance) awaitDrain(ctx context.Context, owner *state) error {
+	owner.mu.Lock()
+	if in.dr != draining {
+		owner.mu.Unlock()
+		return nil
+	}
+	done := waitOn(&in.drainedCh)
+	owner.mu.Unlock()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		err := fmt.Errorf("di: stopping %s: OnDrain did not return: %w", in.b.key, ctx.Err())
+		go func(ctx context.Context) {
+			<-done
+			_ = in.release(ctx, owner) // reported to observers by stop
+		}(context.WithoutCancel(ctx))
+		return err
+	}
+}
+
+// release is the rest of stopIfNeeded once no drain hook holds the value: it
+// takes the phase decision and runs the stop step when one is owed. It is
+// reached exactly once per instance, by the Stop that took it off the list or
+// by the goroutine that Stop handed the release to.
+func (in *instance) release(ctx context.Context, owner *state) error {
 	paired := in.b.onStart != nil && owner.everStarted()
 	owner.mu.Lock()
-	if in.dr == draining {
-		done := waitOn(&in.drainedCh)
-		owner.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return fmt.Errorf("di: stopping %s: OnDrain did not return: %w", in.b.key, ctx.Err())
-		}
-		owner.mu.Lock()
-	}
 	if in.ph == phaseStarting {
 		in.stopWanted = true
 		in.stopCtx = ctx // this Stop's context, not whichever is current later
@@ -979,9 +1021,30 @@ func (r *resolver) child(k key, b *binding, holder *state) *resolver {
 
 // onPath reports whether this exact binding is still being resolved further
 // up the path, which is a dependency cycle within one branch.
+//
+// The walk stops at the first node whose resolution has returned rather than
+// skipping it and carrying on: a finished node breaks the chain, so nothing
+// above it is waiting on this resolution either. Only the constructor that
+// kept its Scope can put a finished node on a live path, and a resolution
+// made through that Scope afterwards is a new branch that happens to know
+// where it came from -- the ancestors it reads are still building, but not
+// for it. Treating them as its dependencies reported a cycle for a
+// resolution that had only to wait, and cached that verdict on whatever it
+// was building.
+//
+// The cost is the one case that cannot be told apart without goroutine-local
+// state, exactly as with Stop's mid-start handoff: a constructor that blocks,
+// itself or through a goroutine it waits for, on a resolution made through a
+// finished descendant's Scope that leads back to it. That was a reported
+// cycle and is now a deadlock. It needs a service to reach back into its own
+// unfinished construction through a Scope that escaped a nested constructor;
+// the independent late resolution this admits is the documented one.
 func (r *resolver) onPath(b *binding, holder *state) bool {
 	for n := r; n != nil; n = n.parent {
-		if n.b == b && n.holder == holder && !n.done.Load() {
+		if n.done.Load() {
+			return false
+		}
+		if n.b == b && n.holder == holder {
 			return true
 		}
 	}
@@ -1037,12 +1100,18 @@ func newState(name string, parent *state) *state {
 
 // Child creates a scope that resolves through s. Stopping s stops its
 // children first.
+//
+// A child made inside a constructor carries that constructor's resolution
+// path, so resolving through it is part of the same branch and a cycle
+// through it is reported as one rather than deadlocking. The path goes inert
+// as soon as the constructor returns (see resolver.done), so a child kept for
+// later -- a per-request scope, say -- resolves as an independent branch.
 func (s *Scope) Child(name string) *Scope {
 	st := newState(name, s.state)
 	s.mu.Lock()
 	s.children = append(s.children, st)
 	s.mu.Unlock()
-	return &Scope{state: st}
+	return &Scope{state: st, r: s.r}
 }
 
 func (s *Scope) view(r *resolver) *Scope { return &Scope{state: s.state, r: r} }
@@ -1287,10 +1356,18 @@ func (s *Scope) lookup(k key) found {
 	}
 }
 
+// inFlight reports whether this Scope is a live view of a resolution: it
+// carries a path whose last node has not returned yet. A Scope kept past the
+// resolution that was handed it -- by a constructor, or by a Child made in
+// one -- is not in flight, and calls through it are top-level calls that
+// happen to know where they came from.
+func (s *Scope) inFlight() bool { return s.r != nil && !s.r.done.Load() }
+
 // enter returns a view carrying a resolver, starting a new resolution when
-// called outside a constructor.
+// called outside a constructor or through a Scope whose resolution has
+// returned: a path that is over is not one this call belongs to.
 func (s *Scope) enter() *Scope {
-	if s.r != nil {
+	if s.inFlight() {
 		return s
 	}
 	return s.view(&resolver{})
@@ -1300,7 +1377,7 @@ func (s *Scope) enter() *Scope {
 // a panic carrying the plain error; inside one it unwinds to the enclosing
 // Resolve/Start call.
 func (s *Scope) get(k key) any {
-	if s.r == nil {
+	if !s.inFlight() {
 		defer func() {
 			if rec := recover(); rec != nil {
 				if a, ok := rec.(abort); ok {
@@ -1405,6 +1482,13 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 		in := &instance{b: b}
 		if err := sc.construct(in, holder, k); err != nil {
 			panic(abort{err})
+		}
+		if s.isStopped() {
+			// The check await makes after its wait, for the branch that does
+			// not go through await: the scope can stop while a transient
+			// constructor is running, and a scope that has stopped must not
+			// hand out something it has no way to tear down.
+			panic(abort{fmt.Errorf("di: %s: %w", k, ErrStopped)})
 		}
 		b.used.Store(true)
 		return in.value
@@ -1600,7 +1684,7 @@ func (s *Scope) Maybe[T any]() (T, bool) {
 // are singletons (or Scoped/Transient if so marked) with the same lifecycle
 // as any other binding.
 func (s *Scope) All[T any]() []T {
-	if s.r == nil {
+	if !s.inFlight() {
 		defer func() {
 			if rec := recover(); rec != nil {
 				if a, ok := rec.(abort); ok {
@@ -1635,7 +1719,7 @@ func (s *Scope) Must[T any](v T, err error) T {
 	if err == nil {
 		return v
 	}
-	if s.r != nil {
+	if s.inFlight() {
 		panic(abort{err})
 	}
 	panic(err)
@@ -1806,11 +1890,14 @@ func (st *state) claimNext() (*instance, *state) {
 //
 // A service is stopped only if it actually started, or if it declares no
 // OnStart, in which case OnStop is a plain destructor. Every failure is
-// reported. Two teardowns can outlive the call, both reported to observers
+// reported. Three teardowns can outlive the call, all reported to observers
 // rather than returned here: a service whose start step was in flight is torn
-// down by the goroutine running that step, and a service whose Run hook
-// outlasts ctx is released once that hook returns, rather than while it is
-// still using the value.
+// down by the goroutine running that step; a service whose Run hook outlasts
+// ctx is released once that hook returns, rather than while it is still using
+// the value; and a service held by a drain hook another Stop is running is
+// released once that hook returns, for the same reason. The last two report
+// the missed deadline here and finish the release afterwards, because a
+// deadline bounds how long this call waits, not whether the release is owed.
 //
 // Afterwards the scope and its descendants refuse to resolve anything, with
 // ErrStopped, so a closed service can never be handed out, and so can a
@@ -1887,97 +1974,104 @@ func (s *Scope) drain(ctx context.Context) error {
 		}
 		return nil
 	}
-	r := drainRun{
-		owned: []drainScope{{st: s.state}},
-		seen:  map[*state]bool{s.state: true},
-	}
+	root := &drainScope{st: s.state, ours: true}
+	r := drainRun{root: root, seen: map[*state]*drainScope{s.state: root}}
 	err := r.sweepAll(ctx)
 	s.drainOnce.settle(s.state, err) // this scope's phase is the last to end
 	return err
 }
 
-// drainRun is the bookkeeping of one drain phase: the scopes it took, in
-// discovery order, and where each of them has got to.
+// drainRun is the bookkeeping of one drain phase: the scopes it has reached,
+// and for each of them whether this run owns the phase and whether that phase
+// has ended.
 type drainRun struct {
-	owned []drainScope
-	seen  map[*state]bool
+	root *drainScope
+	seen map[*state]*drainScope
 }
 
 type drainScope struct {
 	st      *state
+	ours    bool // this run claimed the phase; a foreign one belongs to another Stop
 	settled bool // its phase has ended, which for a descendant is as soon as
 	// its own sweep does
 }
 
-// sweepAll is the body of the first drain. It sweeps the whole subtree
-// repeatedly rather than once, because draining is the one teardown phase
-// during which the scope still resolves: a hook finishing in-flight work may
-// build a service, or open a child scope, for the first time. Those owe a
-// drain too, and it has to happen before anything is marked stopped, or their
-// own hooks would run with nothing left to resolve.
+// sweepAll is the body of the first drain. It sweeps the subtree repeatedly
+// rather than once, because draining is the one teardown phase during which
+// the scope still resolves: a hook finishing in-flight work may build a
+// service, or open a child scope, for the first time. Those owe a drain too,
+// and it has to happen before anything is marked stopped, or their own hooks
+// would run with nothing left to resolve.
 //
-// Every scope the phase owns is swept on every pass, not just the ones that
-// appeared in it. Sweeping each descendant once was enough for a hook that
-// builds into its own scope and not for one that builds into a scope already
-// visited, which is the same defect one level along. A pass that finds no new
-// work ends the phase.
-//
-// A descendant's phase ends the moment its own sweep does, not when the whole
-// run does. Holding it open until the end would be tidier -- an ancestor's
-// hook can still build into it -- and it deadlocks the case the phase exists
-// for: an HTTP server draining in an outer scope waits for a handler that is
-// stopping its own request scope, and that Stop would be waiting for this run
-// to finish.
+// A pass that finds no new work ends the phase, and ctx bounds the sweep as
+// well as the hooks, so a hook that keeps building cannot hold the phase open
+// for ever.
 func (r *drainRun) sweepAll(ctx context.Context) error {
 	var errs []error
 	for {
 		progress := false
-		// Take, or wait for, the phase of every scope that has appeared under
-		// one this drain owns. The loop reads r.owned as it grows, so a scope
-		// discovered in this pass is descended into in the same pass.
-		for i := 0; i < len(r.owned); i++ {
-			st := r.owned[i].st
-			st.mu.Lock()
-			children := slices.Clone(st.children)
-			st.mu.Unlock()
-			for _, c := range children {
-				if r.seen[c] {
-					continue
-				}
-				r.seen[c] = true
-				progress = true
-				if c.drainOnce.claim(c, nil) {
-					r.owned = append(r.owned, drainScope{st: c})
-				} else if _, finished := c.drainOnce.wait(c, ctx); !finished {
-					errs = append(errs, fmt.Errorf("di: waiting for scope %s to drain: %w", c.name, ctx.Err()))
-				}
-			}
-		}
-		// Innermost first, and index 0 -- this scope -- last, which is the
-		// order Stop itself uses.
-		for i := len(r.owned) - 1; i >= 0; i-- {
-			ds := &r.owned[i]
-			ds.st.mu.Lock()
-			started := slices.Clone(ds.st.started)
-			ds.st.mu.Unlock()
-			for _, in := range slices.Backward(started) {
-				ran, err := in.drainIfNeeded(ctx, ds.st)
-				progress = progress || ran
-				errs = append(errs, err)
-			}
-			if i > 0 && !ds.settled {
-				// A descendant's failures are joined into this run's error,
-				// so its waiters need only the release.
-				ds.st.drainOnce.settle(ds.st, nil)
-				ds.settled = true
-			}
-		}
-		// ctx bounds the sweep as well as the hooks, so a hook that keeps
-		// building cannot hold the phase open for ever.
+		errs = append(errs, r.visit(ctx, r.root, &progress)...)
 		if !progress || ctx.Err() != nil {
 			return errors.Join(errs...)
 		}
 	}
+}
+
+// visit sweeps one scope this run owns and everything below it, innermost
+// first and in reverse creation order, which is the order Stop itself uses.
+// Every scope the run owns is swept on every pass, not just the ones that
+// appeared in it: sweeping each descendant once was enough for a hook that
+// builds into its own scope and not for one that builds into a scope already
+// visited, which is the same defect one level along.
+//
+// A descendant's phase is claimed immediately before its own subtree is swept
+// and ended as soon as that sweep finishes, so the only phases this run holds
+// unended while a hook runs are the scope being swept and its ancestors --
+// exactly the set a hook may not call Stop on anyway. Taking the whole
+// subtree up front is tidier and it deadlocks a hook that stops a scope the
+// walk has claimed but not yet reached: a server draining in one child and
+// stopping a request scope in another would wait for a phase only this
+// blocked walk can end. That is the trap of holding a descendant's phase open
+// to the end of the run, one branch along rather than one level up.
+//
+// A scope another Stop already owns is waited for and then left alone,
+// subtree included: that Stop's own run drains it.
+func (r *drainRun) visit(ctx context.Context, ds *drainScope, progress *bool) []error {
+	var errs []error
+	ds.st.mu.Lock()
+	children := slices.Clone(ds.st.children)
+	ds.st.mu.Unlock()
+	for _, c := range slices.Backward(children) {
+		cs := r.seen[c]
+		if cs == nil {
+			*progress = true
+			cs = &drainScope{st: c}
+			r.seen[c] = cs
+			if c.drainOnce.claim(c, nil) {
+				cs.ours = true
+			} else if _, finished := c.drainOnce.wait(c, ctx); !finished {
+				errs = append(errs, fmt.Errorf("di: waiting for scope %s to drain: %w", c.name, ctx.Err()))
+			}
+		}
+		if cs.ours {
+			errs = append(errs, r.visit(ctx, cs, progress)...)
+		}
+	}
+	ds.st.mu.Lock()
+	started := slices.Clone(ds.st.started)
+	ds.st.mu.Unlock()
+	for _, in := range slices.Backward(started) {
+		ran, err := in.drainIfNeeded(ctx, ds.st)
+		*progress = *progress || ran
+		errs = append(errs, err)
+	}
+	if ds != r.root && !ds.settled {
+		// A descendant's failures are joined into this run's error, so its
+		// waiters need only the release.
+		ds.st.drainOnce.settle(ds.st, nil)
+		ds.settled = true
+	}
+	return errs
 }
 
 func stopAll(ctx context.Context, owner *state, started []*instance) error {
@@ -2173,6 +2267,19 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 	defer cancel()
 
 	stopErr := s.Stop(stopCtx)
+	if cause == nil {
+		// A worker that died during the stop published its failure through
+		// Shutdown, after the select above had already woken for a signal or
+		// a cancelled ctx. Shutdown records the cause Run should return, so
+		// read it once more rather than let the exit route decide whether the
+		// failure is reported: the stop that observed it may have been a
+		// child's, whose error a drain hook is free to handle itself.
+		select {
+		case <-s.shutdownCh:
+			cause = s.shutdownErr
+		default:
+		}
+	}
 	if cause != nil && errors.Is(stopErr, cause) {
 		return stopErr // the same failure, reached by both routes
 	}
