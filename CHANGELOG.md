@@ -7,10 +7,13 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-04
+
 Fixes for the eleven defects of the September 2026 review, plus the
-resolution-during-`Start` gap it noted without counting. One method is added,
-`Binding.OnDrain`; every other change is behaviour. An upgrade can break a
-caller in the three ways listed under Changed.
+resolution-during-`Start` gap it noted without counting. The public API gains
+one method, `Binding.OnDrain`, and one `EventKind`, `EventDrain`; nothing was
+removed or altered. Every other change is behaviour, and an upgrade can break
+a caller in the three ways listed under Changed.
 
 ### Added
 
@@ -153,7 +156,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/floatdrop/di/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/floatdrop/di/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/floatdrop/di/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/floatdrop/di/releases/tag/v0.1.0
