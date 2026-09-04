@@ -64,13 +64,19 @@ wait.
 
 **A waiter blocks on one step, not on the scope.** Each step another goroutine
 can be responsible for finishing has a channel closed when it is done:
-`settledCh` (built with the instance, since a waiter can arrive before anything
-claims the build), `startingCh` (made by `claimStart`), `drainedCh` (made by
-the transition to `draining`). The phase still says *which* step is
-outstanding, and the phase and the channel are read in one critical section, so
-a waiter cannot pick up the channel from a later step. Closing happens under
-the same mutex, which is what makes a lost wakeup impossible: a waiter holding
-the channel either finds it closed or is released by the close.
+`settledCh`, `startingCh`, `drainedCh`. One rule covers all three -- the first
+goroutine that actually has to wait makes the channel (`waitOn`), and the owner
+of the step closes it only if it is there (`wake`). The phase still says
+*which* step is outstanding, and phase and channel are read in one critical
+section, so a waiter cannot pick up the channel from a later step.
+
+Both halves run under the owning state's mutex, which is what makes the pair
+safe in either order: a waiter that got there first is released by the close;
+an owner that got there first leaves nil behind, and the phase the waiter then
+reads already says the step is done, so it never blocks on a wakeup that has
+been and gone. Nil is the ordinary state, not an edge case -- an uncontended
+build, an unraced start step and an undisputed drain each allocate nothing, and
+a `Transient` instance never allocates one at all.
 
 This replaced a `sync.Cond` per scope, where every phase change woke every
 waiter in the scope to re-check a predicate that was almost never theirs, and
