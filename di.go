@@ -402,7 +402,7 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 			// that owns the worker may be a child that detaches first.
 			in.runErr = fmt.Errorf("di: %s: %w", b.key, err)
 			if rctx.Err() == nil {
-				(&Scope{state: owner}).shutdown(in.runErr)
+				(&Scope{state: owner}).Shutdown(in.runErr)
 			}
 		}()
 	}
@@ -1088,14 +1088,14 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 		// failing transient constructor is an error like any other and a
 		// successful one is reported to observers like any other.
 		in := &instance{b: b}
-		if err := sc.construct(in, holder, b, k); err != nil {
+		if err := sc.construct(in, holder, k); err != nil {
 			panic(abort{err})
 		}
 		b.used.Store(true)
 		return in.value
 	}
 
-	v, err := sc.await(holder.instanceFor(b), holder, b, k)
+	v, err := sc.await(holder.instanceFor(b), holder, k)
 	if err != nil {
 		panic(abort{err})
 	}
@@ -1124,13 +1124,13 @@ func (st *state) instanceFor(b *binding) *instance {
 // well, so a resolution of a running scope never hands out a service whose
 // OnStart is still in flight. A wait that would close a cycle between two
 // concurrent builds is reported as ErrCycle rather than deadlocking.
-func (s *Scope) await(in *instance, holder *state, b *binding, k key) (any, error) {
+func (s *Scope) await(in *instance, holder *state, k key) (any, error) {
 	holder.mu.Lock()
 	for in.ph == phaseNew || !in.settled || in.ph == phaseStarting {
 		if in.ph == phaseNew {
 			in.claimBuild(s.r)
 			holder.mu.Unlock()
-			s.materialise(in, holder, b, k)
+			s.materialise(in, holder, k)
 			holder.mu.Lock()
 			continue
 		}
@@ -1157,21 +1157,22 @@ func (s *Scope) await(in *instance, holder *state, b *binding, k key) (any, erro
 // failure on the instance rather than unwinding, so every later resolution
 // of the same instance reports it identically, and it settles the instance
 // on the way out so waiting resolutions are released whatever happened.
-func (s *Scope) materialise(in *instance, holder *state, b *binding, k key) {
+func (s *Scope) materialise(in *instance, holder *state, k key) {
 	defer in.settle(holder)
-	if err := s.construct(in, holder, b, k); err != nil {
+	if err := s.construct(in, holder, k); err != nil {
 		in.fail(holder, err)
 		return
 	}
-	if !s.publish(in, holder, k) {
+	if !in.publish(holder, k) {
 		return
 	}
-	s.startIfRunning(in, holder, b, k)
+	in.startIfRunning(holder, k)
 }
 
 // construct runs the constructor, turning a panic or an abort from a nested
 // resolution into an error, and reports the attempt to observers either way.
-func (s *Scope) construct(in *instance, holder *state, b *binding, k key) (err error) {
+func (s *Scope) construct(in *instance, holder *state, k key) (err error) {
+	b := in.b
 	t0 := time.Now()
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -1187,24 +1188,24 @@ func (s *Scope) construct(in *instance, holder *state, b *binding, k key) (err e
 	return nil
 }
 
-// publish adds the instance to the holder's stop list so it will be torn
+// publish adds the instance to its owner's stop list so it will be torn
 // down. If Stop ran while the constructor was in flight its snapshot did not
 // include this instance, so undo it here and report ErrStopped instead.
-func (s *Scope) publish(in *instance, holder *state, k key) bool {
-	holder.mu.Lock()
-	stopped := holder.isStopped()
+func (in *instance) publish(owner *state, k key) bool {
+	owner.mu.Lock()
+	stopped := owner.isStopped()
 	in.ph = phaseBuilt
 	if !stopped {
-		holder.started = append(holder.started, in)
+		owner.started = append(owner.started, in)
 	}
-	holder.mu.Unlock()
+	owner.mu.Unlock()
 	if !stopped {
 		return true
 	}
-	err := errors.Join(fmt.Errorf("di: %s: %w", k, ErrStopped), in.stopIfNeeded(holder.stopContext(), holder))
-	holder.mu.Lock()
+	err := errors.Join(fmt.Errorf("di: %s: %w", k, ErrStopped), in.stopIfNeeded(owner.stopContext(), owner))
+	owner.mu.Lock()
 	in.err = err
-	holder.mu.Unlock()
+	owner.mu.Unlock()
 	return false
 }
 
@@ -1213,21 +1214,21 @@ func (s *Scope) publish(in *instance, holder *state, k key) bool {
 // drains, so either this starts the instance or Start's drain finds it.
 // startClaimed records its own failure on the instance, so a resolution that
 // waited for the step reports it too.
-func (s *Scope) startIfRunning(in *instance, holder *state, b *binding, k key) {
-	if sctx, running := holder.runContext(); running && in.claim(holder) {
+func (in *instance) startIfRunning(owner *state, k key) {
+	if sctx, running := owner.runContext(); running && in.claim(owner) {
 		if sctx == nil {
 			sctx = context.Background()
 		}
-		_ = in.startClaimed(sctx, holder)
+		_ = in.startClaimed(sctx, owner)
 	}
-	stopped := holder.isStopped()
-	holder.mu.Lock()
+	stopped := owner.isStopped()
+	owner.mu.Lock()
 	if in.err == nil && stopped {
 		// Stop ran while we were starting; it waits for the start step, so
 		// the instance is torn down. Do not hand it out.
 		in.err = fmt.Errorf("di: %s: %w", k, ErrStopped)
 	}
-	holder.mu.Unlock()
+	owner.mu.Unlock()
 }
 
 func (st *state) isStopped() bool {
@@ -1687,13 +1688,11 @@ func (s *Scope) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// Shutdown asks a running Run to stop, recording why. It never blocks, may be
-// called from any goroutine, and the first call wins. The request propagates
-// to ancestor scopes, so a service in a child scope can stop the application.
-func (s *Scope) Shutdown(err error) { s.shutdown(err) }
-
-// shutdown wakes any waiting Run and records the cause it should return.
-func (s *Scope) shutdown(cause error) {
+// Shutdown asks a running Run to stop, recording why: it wakes any waiting
+// Run and records the cause it should return. It never blocks, may be called
+// from any goroutine, and the first call wins. The request propagates to
+// ancestor scopes, so a service in a child scope can stop the application.
+func (s *Scope) Shutdown(cause error) {
 	first := false
 	for st := s.state; st != nil; st = st.parent {
 		st.shutdownOnce.Do(func() {
