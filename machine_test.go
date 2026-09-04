@@ -23,6 +23,11 @@ package di_test
 //	I5  Nothing is stopped more often than it was built.
 //	I6  Once the root is stopped, every Run hook has returned.
 //
+// What happens to an instance once it exists is predicted rather than
+// checked against invariants, by the model in lifecyclemodel_test.go. That
+// half is a small state machine the package documents completely, and it is
+// the half every review found defects in.
+//
 // Alias identity, and recovering a key whose resolution failed, are pinned
 // by regression tests instead: they need a specific shape rather than a
 // random one.
@@ -110,7 +115,7 @@ func decode(data []byte) []op {
 			kind:  opKind(data[i] % uint8(numOpKinds)),
 			scope: data[i+1] % numScopes,
 			key:   data[i+2] % numKeys,
-			reg:   data[i+3] % 10,
+			reg:   data[i+3] % 12,
 			eager: data[i+4]&1 == 1,
 		})
 	}
@@ -135,6 +140,8 @@ type machine struct {
 
 	// values seen per (scope, key), to check singleton stability
 	seen map[string]any
+
+	lc *lifecycle
 
 	failedResolve map[string]bool
 	unstable      map[int]bool // keys that need not resolve to a stable value
@@ -174,7 +181,23 @@ func newMachine(t *testing.T, ops []op) *machine {
 	c1 := root.Child("c1")
 	m.scopes = []*di.Scope{root, c1, root.Child("c2"), c1.Child("gc")}
 	m.names = []string{"root", "c1", "c2", "gc"}
+	m.lc = newLifecycle(m)
+	for i, sc := range m.scopes {
+		sc.Value(scopeName{m.names[i]})
+	}
 	return m
+}
+
+// scopeOf names the scope a constructor is running in, which for every
+// lifetime is the scope that holds the instance and will stop it.
+func (m *machine) scopeOf(sc *di.Scope) int {
+	name := sc.Get[scopeName]().name
+	for i, n := range m.names {
+		if n == name {
+			return i
+		}
+	}
+	return 0
 }
 
 // outcome classifies what an operation did.
@@ -258,7 +281,10 @@ func (m *machine) step(i int, o op) {
 		m.checkRepeatable(label, m.call(label, f), f)
 
 	case opStart:
-		m.call(label, func() (any, error) { return nil, s.Start(context.Background()) })
+		out := m.call(label, func() (any, error) { return nil, s.Start(machineStartCtx) })
+		if out.rejected == "" {
+			m.lc.started(int(o.scope), out.err)
+		}
 
 	case opStop:
 		out := m.call(label, func() (any, error) {
@@ -268,6 +294,7 @@ func (m *machine) step(i int, o op) {
 		})
 		if out.rejected == "" {
 			m.markStopped(int(o.scope))
+			m.lc.stopping(int(o.scope))
 		}
 		_ = out
 
@@ -380,6 +407,8 @@ func (m *machine) finish() {
 		defer cancel()
 		return nil, m.scopes[0].Stop(ctx)
 	})
+	m.lc.stopping(0)
+	m.lc.report()
 	for id, n := range m.stops {
 		if n > m.builds[id] {
 			m.fail("%s: stopped %d times but built %d", id, n, m.builds[id])
@@ -400,27 +429,45 @@ func (m *machine) finish() {
 // sequence exercises lifetimes, hooks, groups, failures and dependencies.
 func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T) {
 	var b di.Binding[T]
+	// Every modelled shape reports its own build and its own hooks, so the
+	// model knows which instance is which without having to predict what
+	// serves a key. A Value binding has no constructor to report from, and a
+	// Transient one is never tracked, so those two stay outside the model:
+	// hook returns what the model knows about each shape.
+	built := func(sc *di.Scope, v T) T {
+		m.lc.built(m.scopeOf(sc), o.reg, any(v))
+		return v
+	}
+	hook := func(name string) func(context.Context, T) error {
+		return func(_ context.Context, v T) error {
+			m.lc.hookRan(any(v), name)
+			return nil
+		}
+	}
 	noop := func(context.Context, T) error { return nil }
 	switch o.reg {
 	case 0:
-		b = s.Provide(func(*di.Scope) T { return plain() }).OnStart(noop).OnStop(noop)
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
+			OnStart(hook("OnStart")).OnStop(hook("OnStop"))
 	case 1:
 		b = s.Value(plain()).OnStop(noop)
 	case 2:
-		b = s.Provide(func(*di.Scope) T { return plain() }).Scoped().OnStop(noop)
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).Scoped().
+			OnStop(hook("OnStop"))
 	case 3:
 		b = s.Provide(func(*di.Scope) T { return plain() }).Transient()
 		m.markTransient(int(o.key))
 	case 4:
-		b = s.Add(func(*di.Scope) T { return plain() }).OnStart(noop).OnStop(noop)
+		b = s.Add(func(sc *di.Scope) T { return built(sc, plain()) }).
+			OnStart(hook("OnStart")).OnStop(hook("OnStop"))
 	case 6:
-		b = s.Provide(func(*di.Scope) T { return plain() }).
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
 			Run(func(ctx context.Context, _ T) error {
 				m.runsLive.Add(1)
 				defer m.runsLive.Add(-1)
 				<-ctx.Done()
 				return nil
-			}).OnStop(noop)
+			}).OnStop(hook("OnStop"))
 	case 7:
 		b = s.Provide(func(*di.Scope) T { return plain() }).Health(noop)
 	case 8:
@@ -429,6 +476,15 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 		b = s.Provide(func(*di.Scope) T { panic("injected constructor failure") })
 	case 9:
 		b = s.Provide(dep) // depends on another key, so chains and cycles arise
+	case 10:
+		// Draining, which the sequential machine had no shape for at all: the
+		// phase was exercised only where two calls overlap, and never where
+		// its boundary is known.
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
+			OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
+	case 11:
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
+			OnStart(hook("OnStart")).OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
 	default:
 		b = s.Provide(func(*di.Scope) T { return plain() })
 	}

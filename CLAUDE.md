@@ -339,12 +339,35 @@ Four layers, each catching a different class:
   of the eager/alias rules. A predictive model can be wrong in the same way as
   the code, so treat it as needing its own scrutiny.
 - `machine_test.go` — random *operation* sequences (register, resolve, start,
-  stop, health) across a root, two children and a grandchild, checked against
-  invariants taken from documented guarantees rather than predicted values.
-  This is the layer that catches error-path and cross-scope bugs. Keep the
-  I4 exemptions narrow: exempting every aliased key from value stability,
-  rather than only one whose target is `Transient`, is what hid a scope
-  handing out two live values for one interface.
+  stop, health, shutdown) across a root, two children and a grandchild,
+  checked against invariants taken from documented guarantees rather than
+  predicted values. This is the layer that catches error-path and cross-scope
+  bugs. Keep the I4 exemptions narrow: exempting every aliased key from value
+  stability, rather than only one whose target is `Transient`, is what hid a
+  scope handing out two live values for one interface.
+- `lifecyclemodel_test.go` — the one place that *does* predict, because the
+  argument against predicting does not hold for it. What serves a key depends
+  on overrides, aliases and the eager rules, and modelling that would be
+  modelling the code twice; what happens to an instance *once it exists* is a
+  small state machine the package documents completely, and it is the half
+  every review found defects in. So the model takes builds as given -- the
+  constructors report themselves -- and predicts the rest: which hooks are
+  owed, in what order, exactly once (M1-M6). It is what lets the sequential
+  layer check the thing the concurrent driver says it cannot: that an instance
+  owing a drain gets one.
+
+  Two facts are observed rather than predicted, and both are marked in the
+  file. Whether a start step succeeded, because a rollback stops what had
+  started at the moment it failed. And whether `Start` was ever called on a
+  scope, read back through `Scope.Context`, because whether a rejected `Start`
+  had already recorded its context depends on which panic came first, which
+  is not a documented guarantee.
+
+  Mutation-tested, and the result is worth keeping in mind: stopping in build
+  order instead of reverse is caught by the fuzzer in 0.06s and *not* by the
+  400 seeded sequences. The seeded sweep is thinner than the accumulated fuzz
+  corpus; when a model check finds nothing, run the fuzzer before believing
+  it.
 - `concurrent_test.go` — the same operations run in parallel lanes under
   `-race`, in two phases (wire, then everything else). It checks only what
   survives concurrency: nothing panics unexpectedly, every operation returns,
