@@ -246,9 +246,12 @@ app.Provide(newMailer).Eager().Run(func(ctx context.Context, m *Mailer) error {
 
 The function runs in its own goroutine from the moment the service starts.
 Its context is cancelled when the service stops, and `Stop` waits for it
-within the stop deadline. Returning an error before that calls `Shutdown`, so
-a worker that dies takes the application down rather than leaving it half
-alive.
+within the stop deadline. Returning an error calls `Shutdown`, so a worker
+that dies takes the application down rather than leaving it half alive. That
+holds even if the worker only reports the failure once shutdown is under way,
+since when an error surfaces says nothing about what caused it; returning
+`context.Canceled` after cancellation is the one case that means nothing more
+than "I stopped".
 
 ### Health checks
 
