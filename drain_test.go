@@ -1,15 +1,24 @@
 package di_test
 
-// Regression tests for the six defects of the second September 2026 review,
-// plus the Run-hook overlap reported alongside them.
+// Regressions in the drain phase: the one teardown phase during which a scope
+// still resolves, and the only one two Stop calls can be inside at once.
 //
-// Every test here was checked against the commit before the fix (2b8915d) and
-// fails there. The drain ones fail either by reporting or by hanging, which is
-// why each bounds its own wait instead of relying on the package timeout.
+// One test per defect, named for the rule it pins. The tag at the end of a
+// comment says where the defect came from. (review 1, 3) is the third defect
+// of the first September 2026 review, checked against 12dba3c; review 2 was
+// checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
+// fourth of the seven narrower passes that preceded those reviews, each
+// checked against the code before the instance-phase refactor, and (alias
+// refactor) the sweep that made lookup follow Bind chains. An untagged test
+// comes from the first of those passes, or from the generators, which its own
+// comment says. Several fail by hanging rather than by reporting, which is why
+// each bounds its own wait instead of relying on the package timeout.
 
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -20,19 +29,133 @@ import (
 	"github.com/floatdrop/di"
 )
 
-type wA struct{ sc *di.Scope }
-type wB struct{ a *wA }
-type wT struct{}
-type wU struct{ i wI }
-type wQ struct{}
+// A request in flight when Stop begins keeps its scope until the server
+// has drained, which is what OnDrain is for.
+// (review 1, 11)
+func TestReviewRequestSurvivesDrain(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	resolved := make(chan error, 1)
 
-type wI interface{ tag() string }
+	app := di.New()
+	app.Provide(func(s *di.Scope) *Handler {
+		return &Handler{name: s.Get[*http.Request]().URL.Path}
+	}).Scoped()
 
-func (*wT) tag() string { return "T" }
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /slow", func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		sc, _ := di.FromContext(r.Context())
+		_, err := sc.Resolve[*Handler]()
+		resolved <- err
+	})
 
-// 1. A Stop that reaches a scope whose drain another Stop is running must wait
+	srv := httptest.NewUnstartedServer(app.Middleware(mux))
+	srv.Start()
+	defer srv.Close()
+	app.Value(srv.Config).
+		OnDrain(func(ctx context.Context, s *http.Server) error { return s.Shutdown(ctx) })
+	app.Get[*http.Server]()
+
+	go func() {
+		resp, err := http.Get(srv.URL + "/slow")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-entered
+
+	stopped := make(chan error, 1)
+	go func() {
+		close(release)
+		stopped <- app.Stop(context.Background())
+	}()
+
+	select {
+	case err := <-resolved:
+		if err != nil {
+			t.Fatalf("the in-flight request lost its scope during drain: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never finished")
+	}
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return")
+	}
+}
+
+// Drain runs before anything is stopped, innermost scope first, and only for
+// services that are live enough to owe a teardown.
+// (review 1)
+func TestReviewDrainOrder(t *testing.T) {
+	var log []string
+	root := di.New()
+	root.Value(&DB{}).
+		OnDrain(func(context.Context, *DB) error { log = append(log, "drain db"); return nil }).
+		OnStop(func(context.Context, *DB) error { log = append(log, "stop db"); return nil })
+	root.Get[*DB]()
+
+	child := root.Child("c")
+	child.Value(&Worker{}).
+		OnDrain(func(context.Context, *Worker) error { log = append(log, "drain worker"); return nil }).
+		OnStop(func(context.Context, *Worker) error { log = append(log, "stop worker"); return nil })
+	child.Get[*Worker]()
+
+	if err := root.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := "drain worker,drain db,stop worker,stop db"
+	if got := strings.Join(log, ","); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestReviewDrainSkipsUnbuiltAndRunsOnce(t *testing.T) {
+	drains := 0
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).
+		OnDrain(func(context.Context, *DB) error { drains++; return nil })
+	s.Provide(func(*di.Scope) *Worker { t.Fatal("an unbuilt service was drained"); return nil }).
+		OnDrain(func(context.Context, *Worker) error { return nil })
+	s.Get[*DB]()
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if drains != 1 {
+		t.Fatalf("OnDrain ran %d times", drains)
+	}
+}
+
+func TestReviewDrainFailureIsReported(t *testing.T) {
+	boom := errors.New("drain failed")
+	s := di.New()
+	s.Value(&DB{}).OnDrain(func(context.Context, *DB) error { return boom })
+	s.Get[*DB]()
+	if err := s.Stop(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestReviewDrainRejectedOnTransient(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).Transient().
+		OnDrain(func(context.Context, *DB) error { return nil })
+	mustPanic(t, "do not apply to a Transient binding", func() { s.Get[*DB]() })
+}
+
+// A Stop that reaches a scope whose drain another Stop is running must wait
 // for that drain, not see the flag, skip it and start releasing underneath the
 // hook still using the value.
+// (review 2, 1)
 func TestReview2ConcurrentStopWaitsForAncestorDrain(t *testing.T) {
 	inDrain := make(chan struct{})
 	release := make(chan struct{})
@@ -85,8 +208,9 @@ func TestReview2ConcurrentStopWaitsForAncestorDrain(t *testing.T) {
 	}
 }
 
-// 2. A scope must not mark itself stopped while a descendant's drain, owned by
+// A scope must not mark itself stopped while a descendant's drain, owned by
 // another Stop, is still running: those hooks resolve.
+// (review 2, 2)
 func TestReview2AncestorStopWaitsForIndependentChildDrain(t *testing.T) {
 	inDrain := make(chan struct{})
 	release := make(chan struct{})
@@ -134,8 +258,9 @@ func TestReview2AncestorStopWaitsForIndependentChildDrain(t *testing.T) {
 	}
 }
 
-// 3. Draining is the phase during which the scope still resolves, so a service
+// Draining is the phase during which the scope still resolves, so a service
 // first built by a drain hook has to be drained too, not stopped undrained.
+// (review 2, 3)
 func TestReview2LateBuildDuringDrainIsDrained(t *testing.T) {
 	var mu sync.Mutex
 	var log []string
@@ -173,9 +298,10 @@ func TestReview2LateBuildDuringDrainIsDrained(t *testing.T) {
 	}
 }
 
-// 4. A child scope opened by a drain hook -- an in-flight request taking its
+// A child scope opened by a drain hook -- an in-flight request taking its
 // request scope -- is drained before the parent goes stopped, so its own hooks
 // can still resolve.
+// (review 2, 4)
 func TestReview2LateChildDrainCanResolve(t *testing.T) {
 	var resolveErr error
 	var ran atomic.Bool
@@ -208,176 +334,12 @@ func TestReview2LateChildDrainCanResolve(t *testing.T) {
 	}
 }
 
-// 5. A constructor may keep the Scope it was handed, which is how a goroutine
-// it starts resolves later. A resolution made through that Scope after the
-// constructor returned is not a cycle, and must not poison the instance it
-// builds for every later resolution either.
-func TestReview2RetainedScopeIsNotACycle(t *testing.T) {
-	root := di.New()
-	root.Provide(func(sc *di.Scope) *wA { return &wA{sc: sc} })
-	root.Provide(func(sc *di.Scope) *wB { return &wB{a: sc.Get[*wA]()} })
-
-	a := root.Get[*wA]()
-	b, err := a.sc.Resolve[*wB]()
-	if err != nil {
-		t.Fatalf("deferred resolve through the retained Scope: %v", err)
-	}
-	if b.a != a {
-		t.Fatal("it did not see the finished instance")
-	}
-	if _, err := root.Resolve[*wB](); err != nil {
-		t.Fatalf("a later clean resolve inherited the failure: %v", err)
-	}
-}
-
-// 6. One alias to a Scoped target is a different edge in each scope that holds
-// an instance of that target, so reaching it twice at two holders is not a
-// cycle. wT takes an optional per-scope decoration, present only in the child,
-// which is what makes the root's own wT a leaf.
-func TestReview2AliasAcrossScopedHolders(t *testing.T) {
-	root := di.New()
-	root.Provide(func(sc *di.Scope) *wT {
-		if _, ok := sc.Maybe[*wQ](); ok {
-			_ = sc.Get[*wU]()
-		}
-		return &wT{}
-	}).Scoped()
-	root.Bind[wI, *wT]()
-	root.Provide(func(sc *di.Scope) *wU { return &wU{i: sc.Get[wI]()} })
-
-	kid := root.Child("kid")
-	kid.Value(&wQ{})
-
-	v, err := kid.Resolve[wI]()
-	if err != nil {
-		t.Fatalf("acyclic graph reported as a cycle: %v", err)
-	}
-	if v.tag() != "T" {
-		t.Fatalf("got %q", v.tag())
-	}
-}
-
-// 7. A scope that has stopped refuses to resolve, including a resolution that
-// was already waiting on a constructor running in a live ancestor.
-func TestReview2StoppedScopeServesNothingAfterWaiting(t *testing.T) {
-	inCtor := make(chan struct{})
-	release := make(chan struct{})
-
-	root := di.New()
-	root.Provide(func(*di.Scope) *DB { close(inCtor); <-release; return &DB{} })
-	kid := root.Child("kid")
-
-	res := make(chan error, 1)
-	go func() { _, err := kid.Resolve[*DB](); res <- err }()
-	<-inCtor
-
-	if err := kid.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	close(release)
-
-	select {
-	case err := <-res:
-		if !errors.Is(err, di.ErrStopped) {
-			t.Fatalf("a stopped scope handed out a value: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the waiting resolution never returned")
-	}
-	if _, err := root.Resolve[*DB](); err != nil {
-		t.Fatalf("the live root lost the instance too: %v", err)
-	}
-}
-
-// 8. A panicking start hook is a failed start: the service is not served, the
-// panic reaches Resolve as an error, and no OnStop is paired with the OnStart
-// that never finished.
-func TestReview2PanickingStartHookIsAFailure(t *testing.T) {
-	var starts, stops atomic.Int32
-
-	root := di.New()
-	root.Provide(func(*di.Scope) *DB { return &DB{} }).
-		OnStart(func(context.Context, *DB) error { starts.Add(1); panic("boom") }).
-		OnStop(func(context.Context, *DB) error { stops.Add(1); return nil })
-	if err := root.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := root.Resolve[*DB]()
-	if err == nil {
-		t.Fatal("a service whose OnStart panicked was served")
-	}
-	if !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("got %v", err)
-	}
-	if _, err := root.Resolve[*DB](); err == nil {
-		t.Fatal("a later resolve was served the unstarted service")
-	}
-	if err := root.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := stops.Load(); got != 0 {
-		t.Fatalf("OnStop ran %d times for a service that never started", got)
-	}
-	if got := starts.Load(); got != 1 {
-		t.Fatalf("OnStart ran %d times", got)
-	}
-}
-
-// 9. Reported alongside the six: OnStop must not run while a Run hook that
-// outlasted Stop's context is still using the value. Stop reports the missed
-// deadline and the release follows the worker's own return.
-func TestReview2OnStopWaitsForALiveRunHook(t *testing.T) {
-	runLive := make(chan struct{})
-	release := make(chan struct{})
-	stopped := make(chan struct{})
-	var overlap atomic.Bool
-
-	root := di.New()
-	root.Value(&Worker{}).Eager().
-		Run(func(context.Context, *Worker) error { close(runLive); <-release; return nil }).
-		OnStop(func(context.Context, *Worker) error {
-			select {
-			case <-release:
-			default:
-				overlap.Store(true)
-			}
-			close(stopped)
-			return nil
-		})
-	if err := root.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	<-runLive
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	err := root.Stop(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not return") {
-		t.Fatalf("got %v", err)
-	}
-	select {
-	case <-stopped:
-		t.Fatal("OnStop ran while the Run hook was still live")
-	default:
-	}
-	close(release)
-
-	select {
-	case <-stopped:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the release never happened")
-	}
-	if overlap.Load() {
-		t.Fatal("OnStop ran while the Run hook was still live")
-	}
-}
-
-// 10. Not from the review: found by the drain oracle added to the concurrent
+// Not from the review: found by the drain oracle added to the concurrent
 // driver afterwards. A drain hook may build into a scope the sweep has
 // already visited, and that instance owes a drain like any other. Sweeping
 // each descendant once was enough for a late build in the draining scope and
 // not for one a level along.
+// (review 2, 10)
 func TestReview2LateBuildIntoSweptChildIsDrained(t *testing.T) {
 	var mu sync.Mutex
 	var log []string
@@ -414,15 +376,13 @@ func TestReview2LateBuildIntoSweptChildIsDrained(t *testing.T) {
 	}
 }
 
-type oLate struct{}
-type oRoot struct{}
-
-// 11. The companion to 10, and a hazard 10's fix creates rather than one that
+// The companion to 10, and a hazard 10's fix creates rather than one that
 // was there before: once a sweep revisits a scope whose own phase has ended,
 // it can be draining a late instance there exactly as that scope's Stop
 // reaches it. The scope-wide phase cannot keep those apart -- it has already
 // ended, and it has to, or the drain in 4 would deadlock -- so Stop waits for
 // the hook per instance.
+// (review 2, 11)
 func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
 	bDraining := make(chan struct{})
 	releaseB := make(chan struct{})
@@ -490,5 +450,95 @@ func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
 	<-stopped
 	if overlap.Load() {
 		t.Fatal("OnStop ran while the instance's own OnDrain was still holding it")
+	}
+}
+
+// A drain hook may stop a scope that is neither its own nor an ancestor of
+// it. The sweep used to claim every descendant's drain phase before running a
+// single hook, so a hook that stopped a sibling waited for a phase only its
+// own blocked walk could end.
+// (review 3, 1)
+func TestReview3DrainHookCanStopASiblingScope(t *testing.T) {
+	root := di.New()
+	request := root.Child("request") // earlier than server, so swept later
+	server := root.Child("server")
+
+	var stopErr error
+	server.Value(&r3Server{}).
+		OnDrain(func(ctx context.Context, _ *r3Server) error {
+			stopErr = request.Stop(ctx)
+			return stopErr
+		})
+	if _, err := server.Resolve[*r3Server](); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- root.Stop(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("root.Stop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("root.Stop deadlocked on the sibling scope its drain hook stopped")
+	}
+	if stopErr != nil {
+		t.Errorf("stopping the sibling from the drain hook: %v", stopErr)
+	}
+}
+
+// A Stop whose context runs out while another Stop's drain hook holds the
+// instance still owes the release: it took the instance off the scope's list,
+// so nothing else will reach it. The release is finished off the hook's own
+// return, as it is for a Run hook that outlasts the same deadline.
+// (review 3, 2)
+func TestReview3LostDrainWaitStillReleases(t *testing.T) {
+	root := di.New()
+	child := root.Child("child")
+
+	inDrain := make(chan struct{})
+	release := make(chan struct{})
+	stopped := make(chan struct{})
+
+	child.Provide(func(*di.Scope) *r3Late { return &r3Late{} }).
+		OnDrain(func(context.Context, *r3Late) error { close(inDrain); <-release; return nil }).
+		OnStop(func(context.Context, *r3Late) error { close(stopped); return nil })
+
+	// Built into the child by a hook of the root's own drain, so it appears
+	// after the child's drain phase has already ended and is drained by a
+	// later sweep of the run above it.
+	root.Value(&r3Drainer{}).
+		OnDrain(func(context.Context, *r3Drainer) error {
+			_, err := child.Resolve[*r3Late]()
+			return err
+		})
+	if _, err := root.Resolve[*r3Drainer](); err != nil {
+		t.Fatal(err)
+	}
+
+	rootStop := make(chan error, 1)
+	go func() { rootStop <- root.Stop(context.Background()) }()
+
+	<-inDrain
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := child.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("child.Stop: want the missed deadline reported, got %v", err)
+	}
+	select {
+	case <-stopped:
+		t.Fatal("OnStop ran while the drain hook still held the value")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnStop was never run: the release was dropped with the missed deadline")
+	}
+	if err := <-rootStop; err != nil {
+		t.Errorf("root.Stop: %v", err)
 	}
 }

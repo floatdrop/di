@@ -309,11 +309,20 @@ with an `OnStop` for an `OnStart` that never finished.
 
 Four layers, each catching a different class:
 
-- `regression_test.go` — one test per historical defect. **Verify a new one
-  fails against the commit that preceded the fix**, e.g. by restoring the old
-  `di.go` from git and running just that test. Several tests written here
-  turned out to pass both before and after; say so rather than implying
-  coverage.
+- The regression files — one test per historical defect, grouped by the part
+  of the library the defect lived in rather than by the review that found it:
+  `cycles_test.go` (the resolution path), `wiring_test.go` (registration and
+  lookup), `teardown_test.go` (start, stop, rollback), `drain_test.go` and
+  `worker_test.go` (`Run` hooks and `Shutdown`), with the stand-in types they
+  share in `fixtures_test.go`. A new one goes wherever its rule lives.
+
+  Provenance moved into a tag on each test -- `(review 2, 5)`, `(pass 4)` --
+  because grouping by it put three files between two tests of the same
+  machine. Each file's header lists the tags and the commit each review was
+  checked against. **Verify a new test fails against the commit that preceded
+  the fix**, e.g. by restoring the old `di.go` from git and running just that
+  test, and tag it. Several tests here turned out to pass both before and
+  after; say so rather than implying coverage.
 - `property_test.go` — random *registration* sequences checked against a model
   of the eager/alias rules. A predictive model can be wrong in the same way as
   the code, so treat it as needing its own scrutiny.
@@ -333,16 +342,16 @@ Four layers, each catching a different class:
   hook of an instance begins inside or before that instance's drain hook (C6),
   a drain hook can still resolve (C7), and one fixed graph gives one verdict,
   so two resolutions of a key never disagree about a cycle (C8).
-- `review_test.go` — one test per defect of the first September 2026 review;
-  `review2_test.go` the same for the second, which found six more plus the
-  `Run`-hook overlap, and then one the tightened driver found on its own;
-  `review3_test.go` the same for the third, whose six were all cross-phase or
-  cross-branch: a drain hook stopping a sibling scope, a release dropped with
-  a missed deadline, a shutdown cause published after `Run` had read it, a
-  false cycle through a finished frame, a `Transient` skipping the stopped
-  check, and a child scope made in a constructor starting a fresh path. None
-  of the generators can reach any of them, which is the same lesson as last
-  time: they need shapes the driver does not build.
+- The three September 2026 reviews are the source of most of those tests: the
+  first found eleven defects plus a gap it did not count, the second six plus
+  the `Run`-hook overlap and then two the tightened driver found on its own,
+  and the third six that were all cross-phase or cross-branch -- a drain hook
+  stopping a sibling scope, a release dropped with a missed deadline, a
+  shutdown cause published after `Run` had read it, a false cycle through a
+  finished frame, a `Transient` skipping the stopped check, and a child scope
+  made in a constructor starting a fresh path. No generator reaches any of
+  the third review's six, which is the same lesson as the second: they need
+  shapes the driver does not build.
 
   Every defect in both reviews lived in a gap the generators could not see,
   and closing those gaps found a seventh. Two things had been missing, both

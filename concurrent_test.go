@@ -120,7 +120,7 @@ const (
 // during the phase, into a scope whose part of the phase has ended, owes no
 // drain, and one built into a scope already marked stopped is undone by
 // publish without one. Both are documented. The property that every instance
-// which owes a drain gets one is pinned deterministically in review2_test.go
+// which owes a drain gets one is pinned deterministically in drain_test.go
 // instead, where the phase boundary is known rather than guessed at.
 type drainWatch struct {
 	mu    sync.Mutex
