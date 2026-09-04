@@ -2,15 +2,34 @@ version: "2"
 
 linters:
   default: standard
+  enable:
+    - revive
   settings:
     errcheck:
       exclude-functions:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+    revive:
+      # Only these two rules, not revive's default set: they catch the
+      # parameters and receivers the standard linters do not look at.
+      rules:
+        - name: unused-receiver
+        - name: unused-parameter
   exclusions:
     rules:
       # `var get func() *DB = s.Get` is not redundant: the declared type is
       # what drives Go 1.27 inference for the generic method value.
       - linters: [staticcheck]
         text: "QF1011"
+      # A lifecycle hook's signature is fixed by the API, so a hook that
+      # ignores its context or its value cannot drop the parameter. Tests
+      # and examples are full of them.
+      - linters: [revive]
+        path: (_test\.go|^examples/)
+
+# An unused receiver and an unused parameter sit on the same signature line,
+# and only one issue per line is reported by default, which would hide the
+# second until the first was fixed.
+issues:
+  uniq-by-line: false
