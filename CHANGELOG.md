@@ -45,11 +45,43 @@ under Changed.
   served an initialisation that never finished, and `Stop` paired an `OnStop`
   with it. The panic now reaches `Resolve` as an error, like a panicking
   constructor, which also restores the rule that `Resolve` never panics.
+- A drain hook that builds into a scope the phase has already swept no longer
+  leaves that instance undrained. The sweep visited each descendant once,
+  which was enough for a service first built in the scope doing the draining
+  and not for one built a level along, so it could be stopped without ever
+  being drained. Found by the drain oracle added to the concurrent driver
+  after the review, not by the review.
+  Two things come with that fix rather than being separate defects, because
+  revisiting a scope is what makes them reachable at all. `Stop` waits for a
+  drain hook per instance, not only through the scope-wide phase: that phase
+  ends per scope -- it has to, or an outer scope draining an HTTP server would
+  deadlock against a handler stopping its request scope -- so a sweep can be
+  draining a late instance exactly as that scope's own `Stop` reaches it. And
+  an instance whose scope has already stopped is not drained at all, since
+  winding a service down for work it can no longer take on is the opposite of
+  what `OnDrain` is for.
 - `OnStop` no longer runs while a `Run` hook is still using the value. When a
   `Run` hook outlasts `Stop`'s context, `Stop` reports the missed deadline as
   before and the release now follows that hook's own return instead of racing
   it. Service code that only followed the lifecycle API could be reading
   what `OnStop` was closing.
+
+### Testing
+
+- The concurrent driver checks the drain phase instead of merely running it,
+  and classifies the errors an operation may panic with rather than accepting
+  any of them. Four of the six defects above were invisible to it: its drain
+  hooks returned nil and touched nothing, and a false `ErrCycle` out of `Get`
+  read as a legitimate failure. It also gained a registration shape that is
+  both `Scoped` and draining, without which a drain-owing instance could
+  never appear in a child scope, which is what made the seventh and eighth
+  defects reachable.
+
+  Two oracles were considered and rejected as unsound rather than added: that
+  an instance owing a drain always gets one, and that a resolution inside a
+  drain hook always succeeds. Both are true of a drain phase in isolation and
+  false once a second `Stop` is tearing the same scope down, so both are
+  pinned deterministically instead.
 
 ### Changed
 
@@ -124,6 +156,23 @@ a caller in the three ways listed under Changed.
   given, so the copy registered before was missing everything the route
   matched, and its context carried no scope.
 
+### Testing
+
+- The concurrent driver checks the drain phase instead of merely running it,
+  and classifies the errors an operation may panic with rather than accepting
+  any of them. Four of the six defects above were invisible to it: its drain
+  hooks returned nil and touched nothing, and a false `ErrCycle` out of `Get`
+  read as a legitimate failure. It also gained a registration shape that is
+  both `Scoped` and draining, without which a drain-owing instance could
+  never appear in a child scope, which is what made the seventh and eighth
+  defects reachable.
+
+  Two oracles were considered and rejected as unsound rather than added: that
+  an instance owing a drain always gets one, and that a resolution inside a
+  drain hook always succeeds. Both are true of a drain phase in isolation and
+  false once a second `Stop` is tearing the same scope down, so both are
+  pinned deterministically instead.
+
 ### Changed
 
 - Once a scope is running, a resolution waits for a start step another
@@ -141,6 +190,23 @@ a caller in the three ways listed under Changed.
 
 The public API is unchanged from 0.2.0: no signature was added, removed or
 altered. Everything here is behaviour.
+
+### Testing
+
+- The concurrent driver checks the drain phase instead of merely running it,
+  and classifies the errors an operation may panic with rather than accepting
+  any of them. Four of the six defects above were invisible to it: its drain
+  hooks returned nil and touched nothing, and a false `ErrCycle` out of `Get`
+  read as a legitimate failure. It also gained a registration shape that is
+  both `Scoped` and draining, without which a drain-owing instance could
+  never appear in a child scope, which is what made the seventh and eighth
+  defects reachable.
+
+  Two oracles were considered and rejected as unsound rather than added: that
+  an instance owing a drain always gets one, and that a resolution inside a
+  drain hook always succeeds. Both are true of a drain phase in isolation and
+  false once a second `Stop` is tearing the same scope down, so both are
+  pinned deterministically instead.
 
 ### Changed
 
@@ -203,6 +269,23 @@ altered. Everything here is behaviour.
 - `di.Test`: a test scope wired from functions, stopped at cleanup, failing
   the test if a stop hook errors.
 - Package overview documentation.
+
+### Testing
+
+- The concurrent driver checks the drain phase instead of merely running it,
+  and classifies the errors an operation may panic with rather than accepting
+  any of them. Four of the six defects above were invisible to it: its drain
+  hooks returned nil and touched nothing, and a false `ErrCycle` out of `Get`
+  read as a legitimate failure. It also gained a registration shape that is
+  both `Scoped` and draining, without which a drain-owing instance could
+  never appear in a child scope, which is what made the seventh and eighth
+  defects reachable.
+
+  Two oracles were considered and rejected as unsound rather than added: that
+  an instance owing a drain always gets one, and that a resolution inside a
+  drain hook always succeeds. Both are true of a drain phase in isolation and
+  false once a second `Stop` is tearing the same scope down, so both are
+  pinned deterministically instead.
 
 ### Changed
 

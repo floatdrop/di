@@ -151,14 +151,38 @@ begin releasing what it was using; and it skipped a child whose `Stop` had
 begun, which let this scope mark itself stopped while that child's hooks were
 still resolving through it.
 
-`drainAll` sweeps repeatedly rather than once. Draining is the only teardown
-phase during which the scope still resolves, so a hook finishing in-flight
-work may build a service or open a child scope for the first time; those owe a
-drain too, and it has to happen before `stopped` is set or their own hooks find
-nothing to resolve. A sweep that does no work ends the phase, and `ctx` bounds
-the sweep as well as the hooks. The narrow window left is an instance
-published between the last sweep and `stopped.Store(true)`: closing it would
-mean holding the state mutex across user hooks.
+`drainRun.sweepAll` sweeps repeatedly rather than once, and sweeps *every*
+scope the phase owns on every pass. Draining is the only teardown phase during
+which the scope still resolves, so a hook finishing in-flight work may build a
+service or open a child scope for the first time; those owe a drain too, and it
+has to happen before `stopped` is set or their own hooks find nothing to
+resolve. Visiting each descendant once was enough for a hook that builds into
+its own scope and not for one that builds a level along — the same defect,
+found by the drain oracle after the review that fixed the first half. A pass
+that does no work ends the phase, and `ctx` bounds the sweep as well as the
+hooks.
+
+A descendant's phase ends when its own sweep does, not when the run does.
+Holding it open to the end is tidier, since an ancestor's hook can still build
+into it, and it deadlocks the case the phase exists for: an HTTP server
+draining in an outer scope waits for a handler, and that handler is stopping
+its request scope, which would then be waiting for the run. That is why the
+scope-level guard is not enough on its own and `stopIfNeeded` waits out
+`draining` per instance: an instance built after its scope's phase ended can
+be drained by a sweep still running above it exactly as its own `Stop`
+arrives, and only the per-instance wait keeps the release off a value the hook
+still holds. `drainIfNeeded` also skips an instance whose scope is already
+stopped, because winding something down for work it can no longer take on is
+the opposite of what the hook is for.
+
+Three windows stay open, and each is cheaper to accept than to close: an
+instance published between the last sweep and `stopped.Store(true)` is not
+drained, and closing that would mean holding the state mutex across user
+hooks; the same for one built into a scope whose phase another `Stop` already
+ended; and a hook running on such a late instance can find its scope stopped
+mid-hook, because the scope became stopped after the decision to drain it.
+That last one is why the concurrent driver exercises resolution inside drain
+hooks but does not assert that it succeeds.
 
 Neither level waits out `phaseStarting`, for the same reason `stopIfNeeded`
 does not: the goroutine running that start step may be this one.
@@ -262,17 +286,29 @@ Four layers, each catching a different class:
   `-race`, in phases (wire, resolve, start, stop). It checks only what
   survives concurrency: nothing panics unexpectedly, every operation returns,
   nothing is stopped more often than built, and the stop-order oracle, which
-  is the layer that catches a parent running ahead of a child.
+  is the layer that catches a parent running ahead of a child. Three more
+  oracles cover the drain phase and the class of defect C1 cannot see: no stop
+  hook of an instance begins inside or before that instance's drain hook (C6),
+  a drain hook can still resolve (C7), and one fixed graph gives one verdict,
+  so two resolutions of a key never disagree about a cycle (C8).
 - `review_test.go` — one test per defect of the first September 2026 review;
   `review2_test.go` the same for the second, which found six more plus the
-  `Run`-hook overlap.
+  `Run`-hook overlap, and then one the tightened driver found on its own.
 
-  Every defect in both reviews lived in a gap the generators cannot see. The
-  concurrent driver's C1 oracle accepts *any* `panic(error)` as legitimate,
-  because that is how `Get` reports failure, so a false `ErrCycle` out of `Get`
-  reads as normal; and its `OnDrain` hooks do nothing, so the drain phase is
-  exercised without being checked. Tightening either is worth more than
-  another oracle.
+  Every defect in both reviews lived in a gap the generators could not see,
+  and closing those gaps found a seventh. Two things had been missing, both
+  now fixed: C1 accepted *any* `panic(error)` as legitimate, because that is
+  how `Get` reports failure, so a false `ErrCycle` read as normal; and the
+  drain hooks returned nil and touched nothing, so the phase was exercised
+  without being checked.
+
+  The lesson is about *shapes*, not oracles. Adding C6 changed nothing until
+  the driver gained a registration that is `Scoped` **and** draining: every
+  other draining shape is a plain singleton, so resolving one from a child
+  hands back the instance the owner already holds, and a drain-owing instance
+  could never appear in a child scope at all. One missing registration made a
+  whole class of defect unreachable. When an oracle finds nothing, suspect the
+  generator before believing the code.
 - `FuzzMachine` — the same invariants under coverage-guided search. Corpus in
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
 
