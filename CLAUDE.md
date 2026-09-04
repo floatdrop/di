@@ -18,6 +18,10 @@ test -z "$(gofmt -l .)"                       # formatting gate
 go run github.com/campoy/embedmd@v1.0.0 -d README.md   # README in sync?
 go run github.com/campoy/embedmd@v1.0.0 -w README.md   # re-embed after editing examples/
 cd benchmarks && go test -bench . -benchmem   # separate module, see below
+
+go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
+go test -count=1 -coverprofile=all.out .
+go run scripts/generatorgap.go -floor 80 gen.out all.out   # what only hand-written tests reach
 ```
 
 Run the full gate as a single `&&` chain before committing, the same way CI
@@ -226,8 +230,12 @@ mid-hook, because the scope became stopped after the decision to drain it.
 That last one is why the concurrent driver exercises resolution inside drain
 hooks but does not assert that it succeeds.
 
-Neither level waits out `phaseStarting`, for the same reason `stopIfNeeded`
-does not: the goroutine running that start step may be this one.
+Both levels now wait out `phaseStarting` rather than stepping around it,
+which is what the no-`Stop`-from-a-hook rule buys: the goroutine running that
+start step can no longer be this one. `drainIfNeeded` waits for it because a
+service that is starting owes a drain as soon as it has started, and leaving
+it undecided for a later pass meant a start step that outlasted the phase was
+never drained at all.
 
 **`freeze` is transactional.** Registrations queue in `pending` and commit in
 one batch. The batch is validated against *prospective copies* of
@@ -286,15 +294,19 @@ with an `OnStop` for an `OnStart` that never finished.
 
 - Never set a phase or read `running`/`stopped` for a decision outside the
   owning state's mutex.
-- `Stop` must not wait on anything the current goroutine could be responsible
-  for finishing. A start hook may call `Stop`; that is why a mid-start teardown
-  is handed off via `stopWanted` rather than waited on. This is the reason
-  `Stop` cannot be made fully synchronous, and it is forced, not a choice: Go
-  has no goroutine-local state, so there is no way to tell a start step running
-  on the caller's own goroutine from one running elsewhere. Every review so far
-  has reported the asymmetry as a bug; it is pinned by
-  `TestRegressionStopInsideStartHookDoesNotDeadlock` and answered in the
-  `Stop` godoc.
+- **`Stop` is synchronous, and that rests on one rule: no hook may call `Stop`
+  on its own scope or an ancestor.** `stopIfNeeded` waits out every step
+  another goroutine owns for the instance -- `phaseStarting`, then `draining`
+  -- so a teardown outlives `Stop` only when `ctx` expired. The old asymmetry
+  (a mid-start teardown handed off via `stopWanted`) existed because a start
+  hook was allowed to call `Stop` and Go cannot tell that goroutine from any
+  other; every review reported the asymmetry as a bug. The rule is now the
+  documented one, and `Stop` reports the misuse instead of waiting whenever it
+  can see it: hook contexts carry their scope (`inHook`/`hookOwner`), so a
+  hook that passes on the context it was given gets an error naming
+  `Shutdown`. A hook that passes a context of its own is invisible and waits,
+  which is why the fallback still has to be a bounded wait rather than a
+  promise.
 - Nothing in the teardown path may run a user hook against a value another
   hook still holds. That is one rule with three instances: `OnStop` after
   `OnDrain`, `OnStop` after a `Run` hook (deferred to `releaseAfterRun` when
@@ -327,21 +339,71 @@ Four layers, each catching a different class:
   of the eager/alias rules. A predictive model can be wrong in the same way as
   the code, so treat it as needing its own scrutiny.
 - `machine_test.go` — random *operation* sequences (register, resolve, start,
-  stop, health) across a root, two children and a grandchild, checked against
-  invariants taken from documented guarantees rather than predicted values.
-  This is the layer that catches error-path and cross-scope bugs. Keep the
-  I4 exemptions narrow: exempting every aliased key from value stability,
-  rather than only one whose target is `Transient`, is what hid a scope
-  handing out two live values for one interface.
+  stop, health, shutdown) across a root, two children and a grandchild,
+  checked against invariants taken from documented guarantees rather than
+  predicted values. This is the layer that catches error-path and cross-scope
+  bugs. Keep the I4 exemptions narrow: exempting every aliased key from value
+  stability, rather than only one whose target is `Transient`, is what hid a
+  scope handing out two live values for one interface.
+- `lifecyclemodel_test.go` — the one place that *does* predict, because the
+  argument against predicting does not hold for it. What serves a key depends
+  on overrides, aliases and the eager rules, and modelling that would be
+  modelling the code twice; what happens to an instance *once it exists* is a
+  small state machine the package documents completely, and it is the half
+  every review found defects in. So the model takes builds as given -- the
+  constructors report themselves -- and predicts the rest: which hooks are
+  owed, in what order, exactly once (M1-M6). It is what lets the sequential
+  layer check the thing the concurrent driver says it cannot: that an instance
+  owing a drain gets one.
+
+  Two facts are observed rather than predicted, and both are marked in the
+  file. Whether a start step succeeded, because a rollback stops what had
+  started at the moment it failed. And whether `Start` was ever called on a
+  scope, read back through `Scope.Context`, because whether a rejected `Start`
+  had already recorded its context depends on which panic came first, which
+  is not a documented guarantee.
+
+  Mutation-tested, and the result is worth keeping in mind: stopping in build
+  order instead of reverse is caught by the fuzzer in 0.06s and *not* by the
+  400 seeded sequences. The seeded sweep is thinner than the accumulated fuzz
+  corpus; when a model check finds nothing, run the fuzzer before believing
+  it.
 - `concurrent_test.go` — the same operations run in parallel lanes under
-  `-race`, in phases (wire, resolve, start, stop). It checks only what
+  `-race`, in two phases (wire, then everything else). It checks only what
   survives concurrency: nothing panics unexpectedly, every operation returns,
   nothing is stopped more often than built, and the stop-order oracle, which
-  is the layer that catches a parent running ahead of a child. Three more
-  oracles cover the drain phase and the class of defect C1 cannot see: no stop
-  hook of an instance begins inside or before that instance's drain hook (C6),
-  a drain hook can still resolve (C7), and one fixed graph gives one verdict,
-  so two resolutions of a key never disagree about a cycle (C8).
+  is the layer that catches a parent running ahead of a child. Five more
+  oracles cover the drain phase and the classes C1 cannot see: no stop hook of
+  an instance begins inside or before that instance's drain hook (C6), a drain
+  hook can still resolve (C7), one fixed graph gives one verdict, so two
+  resolutions of a key never disagree about a cycle (C8), every instance that
+  owes a stop step gets exactly one by quiescence (C9), and a resolution
+  *begun* after its scope's Stop returned fails (C10).
+
+  C9 is the one that needed a definition of quiescence, since a release
+  deferred past a missed deadline lands after every Stop has returned:
+  `settle` polls until no hook is running and nothing owed is unreleased.
+  Starts and stops share one phase now that `Stop` waits for a start step;
+  keeping them apart was a workaround for the handoff.
+
+  `scheduler_test.go` makes the interleaving an input. Every hook and every
+  operation parks at a scheduling point, and a seed decides which parked
+  goroutine goes next, so `TestMachineScheduled` replays one sequence under
+  many orderings with every oracle live. It explores rather than verifies: a
+  released goroutine can block inside the container where no test can see it,
+  and the next release then happens on a timer, so two runs of a seed can
+  still differ. The loop waits ~200µs for goroutines to gather before it
+  chooses, because releasing each one as it arrives leaves nothing to decide
+  and the seed decides nothing -- that single change took a sample sequence
+  from two distinct schedules across twelve seeds to six.
+
+  `TestMachineConcurrentShapes` builds op sequences directly rather than from
+  bytes. A byte seed has to survive four modulos to reach a particular
+  interleaving, and the three shapes there -- an impatient `Stop` under an
+  ancestor's drain, the same a level deeper, and an impatient `Stop` of a
+  running worker -- are what the coverage gap said no random sequence was
+  reaching. Both were checked by mutation: delete either deferred release in
+  `di.go` and C9 fails.
 - The three September 2026 reviews are the source of most of those tests: the
   first found eleven defects plus a gap it did not count, the second six plus
   the `Run`-hook overlap and then two the tightened driver found on its own,
@@ -352,6 +414,14 @@ Four layers, each catching a different class:
   made in a constructor starting a fresh path. No generator reaches any of
   the third review's six, which is the same lesson as the second: they need
   shapes the driver does not build.
+
+  The exemptions these oracles need are the most dangerous part of them. C3
+  cannot order a release that a missed deadline deferred, so it is switched
+  off for scopes where a `Stop` reported one -- and switching C6 off with it,
+  which looked like the same exemption, silently disabled the drain/stop
+  overlap check for the one shape that needs it. C6 holds however impatient
+  the `Stop` was: a missed deadline defers a release, it never runs one early.
+  Mutation-test an exemption before believing it.
 
   Every defect in both reviews lived in a gap the generators could not see,
   and closing those gaps found a seventh. Two things had been missing, both
@@ -369,6 +439,10 @@ Four layers, each catching a different class:
   generator before believing the code.
 - `FuzzMachine` — the same invariants under coverage-guided search. Corpus in
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
+- `scripts/generatorgap.go` — the map of what only the hand-written tests
+  reach, which is the map of where the next review will dig: every defect the
+  three September 2026 reviews found lived on such a line. CI runs it with a
+  floor of 80% generator coverage. When the floor moves, move it up.
 
 `FuzzMachineConcurrent` is the coverage-guided driver for the concurrent
 oracles; run it with `-race` or it checks almost nothing.
@@ -388,14 +462,14 @@ The sequential generators do not explore goroutine interleavings. That is what
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
-- **Four teardowns may finish after `Stop` returns**: one handed off because a
-  start step was in flight, one undoing a build that completed after the scope
-  stopped, one releasing a service whose `Run` hook outlasted `Stop`'s
-  context, and one releasing a service whose `OnDrain` -- run by another
-  `Stop` -- outlasted it. All four are deliberate. The last two share a rule:
-  a deadline bounds how long `Stop` waits, never whether the release is owed,
-  and `Stop` has already taken the instance off its scope's list, so no other
-  caller will reach it. Any ordering oracle has to model them
+- **A teardown finishes after `Stop` returns only when `Stop`'s context
+  expired** -- waiting for a `Run` hook, a start step or a drain hook -- plus
+  the one that undoes a build completing after the scope stopped, which no
+  `Stop` issued. The deadline bounds how long `Stop` waits, never whether the
+  release is owed, and `Stop` has already taken the instance off its scope's
+  list, so nothing else will reach it: the handoff goroutine re-enters
+  `stopIfNeeded` with `context.WithoutCancel`, whose `Done` is nil, so it
+  waits properly and cannot recurse again. Any ordering oracle has to model them
   or it will report them as defects; the concurrent driver does it by running
   every `Start` before any `Stop`, so no start step is ever in flight.
 - **CHANGELOG is enforced.** `.github/workflows/release.yml` fails a tag push

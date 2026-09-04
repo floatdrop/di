@@ -7,6 +7,58 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Stop` is synchronous.** It now waits out whatever another goroutine is
+  running for a service it is tearing down -- a start step in flight, a drain
+  hook another `Stop` began -- so when it returns, the teardown has happened
+  and its failures are in the error it returns rather than only in the event
+  stream. A teardown outlives the call in one case now, when `Stop`'s own
+  context expires first. Every review so far has reported the old asymmetry as
+  a defect.
+
+  The rule that buys it: **a lifecycle hook must not call `Stop` on its own
+  scope or an ancestor** -- call `Shutdown`, which never blocks. That was
+  already the documented contract, but `OnStart` was a working exception,
+  since the mid-start teardown was handed to the goroutine running the step
+  rather than waited for. It no longer is. Stopping a sibling scope, or one
+  below the hook's own, is still allowed.
+
+  A hook that passes on the context it was given now gets an error naming
+  `Shutdown` instead of waiting: hook contexts carry the scope they belong to.
+  A hook that calls `Stop` with a context of its own cannot be recognised, and
+  waits until that context expires, so an unbounded one hangs where it used to
+  work. This is the upgrade note: if a start hook stops its own scope, replace
+  it with `Shutdown`.
+
+### Testing
+
+Three reviews in a row found six or so defects each, all of them in the
+concurrent lifecycle, and none of them found by the generators. Measuring why
+gave a number: the generators reached 78% of statements against the suite's
+97%, and the whole gap was the lifecycle -- no `Run` hook, no `Shutdown`, no
+context expiring inside `Stop`, and every `Start` kept before every `Stop`.
+Every defect the reviews found lived in that gap.
+
+- The concurrent driver has all four now, and two new oracles: every instance
+  that owes a stop step gets exactly one by quiescence, and a resolution begun
+  after its scope's `Stop` returned fails. Generator coverage is 82.5%, and
+  `scripts/generatorgap.go` prints what only the hand-written tests reach --
+  the map of where the next review will dig. CI fails below 80%.
+- The instance lifecycle has a model (`lifecyclemodel_test.go`). Registration
+  is still checked against invariants rather than predictions, for the reason
+  the tests have always given; what happens to an instance once it exists is a
+  small documented state machine, and predicting it is what catches a hook
+  that should have run and did not.
+- The interleaving is an input (`scheduler_test.go`): hooks and operations
+  park at scheduling points and a seed decides who goes next.
+
+Each of these was mutation-tested rather than trusted. That is also how the
+one defect in the *oracles* turned up: an exemption written for the ordering
+oracle had switched off the drain/stop overlap check for exactly the shape it
+exists for.
+
+
 Fixes for the six defects of the third September 2026 review. Every one of
 them is an interaction between two things that are each correct alone: two
 scopes tearing down at once, a deadline and a hook still holding a value, a

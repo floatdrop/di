@@ -63,12 +63,14 @@
 // service whose start step has finished. A cycle is reported as [ErrCycle]
 // even when the two halves are being built concurrently.
 //
-// Two re-entrancy limits apply. A goroutine started by a constructor must use
-// [Scope.Resolve] rather than [Scope.Get], because Get reports failure by
+// Three re-entrancy limits apply. A goroutine started by a constructor must
+// use [Scope.Resolve] rather than [Scope.Get], because Get reports failure by
 // panicking and that panic cannot unwind to the enclosing call from another
 // goroutine. An [Binding.OnStart] hook must not resolve a service that
 // depends on the one being started: the hook already holds the value, and
-// waiting for itself cannot make progress.
+// waiting for itself cannot make progress. And no hook may call [Scope.Stop]
+// on its own scope or an ancestor, because Stop waits for the very step the
+// hook is running; call [Scope.Shutdown], which never blocks.
 package di
 
 import (
@@ -301,20 +303,44 @@ type instance struct {
 	// concurrent builds visible.
 	builder *resolver
 
-	stopWanted bool            // Stop arrived mid-start; the claimer tears it down
-	stopCtx    context.Context // the context of the Stop that queued the handoff
-
 	// Run hook bookkeeping, guarded by the phase machine rather than a mutex.
 	// cancel and runDone are written by start, on the goroutine that owns the
-	// start step, and read by stop, which release does not reach while the
-	// phase is phaseStarting; the phase leaves phaseStarting in startClaimed's
-	// deferred block, under the owning state's mutex, after start has
-	// returned, and that lock handoff is the happens-before. runErr is written
-	// by the Run goroutine before it closes runDone and read only after a
-	// receive from runDone.
+	// start step, and read by stop, which stopIfNeeded reaches only after the
+	// start step has left phaseStarting -- in startClaimed's deferred block,
+	// under the owning state's mutex, after start returned. That lock handoff
+	// is the happens-before. runErr is written by the Run goroutine before it
+	// closes runDone and read only after a receive from runDone.
 	cancel  context.CancelFunc
 	runDone chan struct{}
 	runErr  error
+}
+
+// hookKey marks a context as belonging to a lifecycle hook.
+type hookKey struct{}
+
+// inHook tags the context a hook is called with, so a Stop made with that
+// context can name the misuse instead of waiting for a step the caller is
+// itself responsible for finishing. A hook that passes some other context
+// keeps the plain bounded wait; this catches the case worth catching, which
+// is the hook passing on the context it was handed.
+func inHook(ctx context.Context, st *state) context.Context {
+	return context.WithValue(ctx, hookKey{}, st)
+}
+
+// hookOwner returns the scope whose hook ctx belongs to, or nil.
+func hookOwner(ctx context.Context) *state {
+	st, _ := ctx.Value(hookKey{}).(*state)
+	return st
+}
+
+// descendsFrom reports whether st is anc or a scope under it.
+func (st *state) descendsFrom(anc *state) bool {
+	for ; st != nil; st = st.parent {
+		if st == anc {
+			return true
+		}
+	}
+	return false
 }
 
 // wake releases whoever is waiting for a step. A nil channel means nobody had
@@ -445,7 +471,7 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 	b := in.b
 	if b.onStart != nil {
 		t0 := time.Now()
-		err := b.onStart(ctx, in.value)
+		err := b.onStart(inHook(ctx, owner), in.value)
 		owner.emit(Event{Kind: EventStart, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
 		if err != nil {
 			return err
@@ -454,9 +480,10 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 	if b.run != nil {
 		rctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		in.cancel, in.runDone = cancel, make(chan struct{})
+		hctx := inHook(rctx, owner)
 		go func() {
 			defer close(in.runDone)
-			err := b.run(rctx, in.value)
+			err := b.run(hctx, in.value)
 			if err == nil {
 				return
 			}
@@ -495,10 +522,10 @@ func (in *instance) claim(owner *state) bool {
 }
 
 // startClaimed runs the start step of an instance already in phaseStarting.
-// The phase is settled even if the hook panics, and a Stop that arrived during
-// the step is honoured here, on this goroutine. The failure is recorded on the
-// instance as well as returned, so a resolution that waited for the step
-// reports the same error.
+// The phase is settled even if the hook panics, which is what releases a Stop
+// or a resolution waiting for the step. The failure is recorded on the
+// instance as well as returned, so a resolution that waited reports the same
+// error.
 //
 // A panicking hook is a failed start, converted to an error like a panicking
 // constructor: only a hook that returned has started its service. Otherwise a
@@ -522,15 +549,8 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) (err error) 
 				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", in.b.key, in.b.site, err)
 			}
 		}
-		wanted, stopCtx := in.stopWanted, in.stopCtx
 		wake(in.startingCh) // the start step is no longer in flight
 		owner.mu.Unlock()
-		if wanted {
-			if stopCtx == nil {
-				stopCtx = owner.stopContext()
-			}
-			_ = in.stopIfNeeded(stopCtx, owner)
-		}
 	}()
 	return in.start(ctx, owner)
 }
@@ -563,75 +583,59 @@ func (st *state) stopContext() context.Context {
 // was never started, so OnStop is a plain destructor. An instance whose
 // OnStart failed or was skipped by a rollback is not stopped.
 //
-// A drain hook still running for this instance is waited for. The scope-wide
-// drain phase ends per scope (it must, or an outer scope draining an HTTP
-// server would deadlock against a handler stopping its request scope), so an
-// instance built after its scope's phase ended can be drained by a sweep
-// above it just as its own Stop arrives. Only the per-instance wait keeps the
-// release off a value the hook still holds.
+// It first waits out whichever step another goroutine is still running for
+// this instance, so the release never runs against a value one of them holds:
+// a start step in flight, and then a drain hook, since a drain waits for the
+// start step too and the two cannot overlap. Waiting for the start step is
+// what makes Stop synchronous. It is safe because a hook may not call Stop on
+// its own scope or an ancestor -- that wait would be on itself -- and Stop
+// rejects the case it can see rather than hanging.
 //
-// A start step in flight is handed to the goroutine running it, not waited
-// for. That goroutine may be this one, since a start hook may call Stop, and
-// Go cannot tell the two cases apart. Such a teardown can finish just after
-// Stop returns; its error reaches observers, not the caller. Stop's
-// documentation says so.
+// If ctx expires first the release is still owed, and this is the only caller
+// that can make it happen: Stop took the instance off its scope's list before
+// the walk began. So the deadline ends the caller's wait, not the teardown,
+// which finishes on a goroutine of its own once the step returns.
+// WithoutCancel keeps the context's values and drops the spent deadline, so
+// that goroutine waits properly and then releases.
 func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
-	if err := in.awaitDrain(ctx, owner); err != nil {
-		return err
-	}
-	return in.release(ctx, owner)
-}
-
-// awaitDrain waits for a drain hook running for this instance, and reports a
-// failure to do so within ctx.
-//
-// The release is still owed after that failure, and nothing else will reach
-// the instance: Stop took it off the scope's list before this walk began. So
-// the deadline ends the caller's wait but not the teardown, which is finished
-// once the hook returns, as stop does for a Run hook that outlasts ctx.
-// WithoutCancel keeps the context's values and drops the spent deadline; what
-// remains is best-effort release.
-func (in *instance) awaitDrain(ctx context.Context, owner *state) error {
-	owner.mu.Lock()
-	if in.dr != draining {
-		owner.mu.Unlock()
-		return nil
-	}
-	done := waitOn(&in.drainedCh)
-	owner.mu.Unlock()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		err := fmt.Errorf("di: stopping %s: OnDrain did not return: %w", in.b.key, ctx.Err())
-		go func(ctx context.Context) {
-			<-done
-			_ = in.release(ctx, owner) // reported to observers by stop
-		}(context.WithoutCancel(ctx))
-		return err
-	}
-}
-
-// release is the rest of stopIfNeeded once no drain hook holds the value: it
-// decides from the phase whether a stop step is owed and runs it. It runs once
-// per instance, from the Stop that took the instance off the list or from the
-// goroutine awaitDrain handed it to.
-func (in *instance) release(ctx context.Context, owner *state) error {
+	// everStarted walks the parent chain, so it is answered before the
+	// owner's mutex is taken rather than under it.
 	paired := in.b.onStart != nil && owner.everStarted()
-	owner.mu.Lock()
-	if in.ph == phaseStarting {
-		in.stopWanted = true
-		in.stopCtx = ctx // this Stop's context, not whichever is current later
+	for {
+		owner.mu.Lock()
+		step, what := in.outstanding()
+		if step == nil {
+			owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired)
+			in.ph = phaseStopped
+			owner.mu.Unlock()
+			if !owed {
+				return nil
+			}
+			return in.stop(ctx, owner)
+		}
 		owner.mu.Unlock()
-		return nil
+		select {
+		case <-step:
+			// One step done; the next may be outstanding now.
+		case <-ctx.Done():
+			go func() { _ = in.stopIfNeeded(context.WithoutCancel(ctx), owner) }()
+			return fmt.Errorf("di: stopping %s: %s did not return: %w", in.b.key, what, ctx.Err())
+		}
 	}
-	owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired)
-	in.ph = phaseStopped
-	owner.mu.Unlock()
-	if !owed {
-		return nil
+}
+
+// outstanding names the step another goroutine is running for this instance,
+// with the channel that goroutine will close, or nil if the instance is
+// nobody else's business. Called with the owning state's mutex held, so the
+// phase and the channel are read in one critical section.
+func (in *instance) outstanding() (chan struct{}, string) {
+	switch {
+	case in.ph == phaseStarting:
+		return waitOn(&in.startingCh), "OnStart"
+	case in.dr == draining:
+		return waitOn(&in.drainedCh), "OnDrain"
 	}
-	return in.stop(ctx, owner)
+	return nil, ""
 }
 
 // drainIfNeeded runs OnDrain once, under the same predicate as stopIfNeeded:
@@ -640,57 +644,68 @@ func (in *instance) release(ctx context.Context, owner *state) error {
 // that it did work.
 //
 // A drain another Stop has begun is waited for, not skipped, or this Stop
-// would go on to run OnStop while that hook still holds the value.
+// would go on to run OnStop while that hook still holds the value. A start
+// step in flight is waited for as well, for the same reason stopIfNeeded
+// waits for it.
 func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, error) {
 	b := in.b
 	if b.onDrain == nil {
 		return false, nil
 	}
 	paired := b.onStart != nil && owner.everStarted()
-	owner.mu.Lock()
-	if in.dr != drainNone {
+	for {
+		owner.mu.Lock()
 		if in.dr == drained {
 			owner.mu.Unlock()
 			return false, nil
 		}
-		done := waitOn(&in.drainedCh)
-		owner.mu.Unlock()
-		select {
-		case <-done:
-			return true, nil
-		case <-ctx.Done():
-			return true, fmt.Errorf("di: draining %s: another Stop did not finish OnDrain: %w", b.key, ctx.Err())
+		if in.dr == draining {
+			done := waitOn(&in.drainedCh)
+			owner.mu.Unlock()
+			select {
+			case <-done:
+				return true, nil
+			case <-ctx.Done():
+				return true, fmt.Errorf("di: draining %s: another Stop did not finish OnDrain: %w", b.key, ctx.Err())
+			}
 		}
-	}
-	if in.ph == phaseStarting {
-		// The start step is in flight and, as in release, may be on this
-		// goroutine. Leave the instance undecided: a later pass drains it if
-		// the step finishes in time.
+		if in.ph == phaseStarting {
+			// The start step is in flight on another goroutine. Wait for it:
+			// a service that is starting owes a drain as soon as it has
+			// started, and leaving it undecided for a later pass meant a
+			// step that outlasted the phase was never drained at all.
+			starting := waitOn(&in.startingCh)
+			owner.mu.Unlock()
+			select {
+			case <-starting:
+				continue
+			case <-ctx.Done():
+				return false, fmt.Errorf("di: draining %s: OnStart did not return: %w", b.key, ctx.Err())
+			}
+		}
+		if owner.isStopped() {
+			// The scope's own Stop has moved past draining. A sweep still
+			// running in an ancestor can reach an instance built into such a
+			// scope; draining it would run the hook against a scope that no
+			// longer resolves, for work it can no longer take on.
+			in.dr = drained
+			owner.mu.Unlock()
+			return false, nil
+		}
+		if owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired); !owed {
+			// Straight to drained, never draining, so no waiter can arrive
+			// and no channel is needed.
+			in.dr = drained
+			owner.mu.Unlock()
+			return false, nil
+		}
+		in.dr = draining
 		owner.mu.Unlock()
-		return false, nil
+		break
 	}
-	if owner.isStopped() {
-		// The scope's own Stop has moved past draining. A sweep still running
-		// in an ancestor can reach an instance built into such a scope;
-		// draining it would run the hook against a scope that no longer
-		// resolves, for work it can no longer take on.
-		in.dr = drained
-		owner.mu.Unlock()
-		return false, nil
-	}
-	owed := in.ph == phaseStarted || (in.ph == phaseBuilt && !paired)
-	if !owed {
-		// Straight to drained, never draining, so no waiter can arrive and no
-		// channel is needed.
-		in.dr = drained
-		owner.mu.Unlock()
-		return false, nil
-	}
-	in.dr = draining
-	owner.mu.Unlock()
 
 	t0 := time.Now()
-	err := b.onDrain(ctx, in.value)
+	err := b.onDrain(inHook(ctx, owner), in.value)
 	owner.emit(Event{Kind: EventDrain, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
 
 	owner.mu.Lock()
@@ -737,7 +752,7 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 		}
 	}
 	if b.onStop != nil {
-		if err := b.onStop(ctx, in.value); err != nil {
+		if err := b.onStop(inHook(ctx, owner), in.value); err != nil {
 			errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
 		}
 	}
@@ -758,7 +773,7 @@ func (in *instance) releaseAfterRun(ctx context.Context, owner *state, missed er
 	if in.runErr != nil {
 		errs = append(errs, in.runErr)
 	}
-	if err := b.onStop(ctx, in.value); err != nil {
+	if err := b.onStop(inHook(ctx, owner), in.value); err != nil {
 		errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
 	}
 	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: errors.Join(errs...)})
@@ -1803,14 +1818,17 @@ func (st *state) claimNext() (*instance, *state) {
 // build order (dependents first).
 //
 // A service is stopped only if it started, or if it declares no OnStart, in
-// which case OnStop is a plain destructor. Every failure is reported. Three
-// teardowns can outlive the call and are reported to observers rather than
-// returned: a service whose start step was in flight is torn down by the
-// goroutine running that step; a service whose Run hook outlasts ctx is
-// released once the hook returns; and a service held by a drain hook another
-// Stop is running is released once that hook returns. The last two report the
-// missed deadline here; the deadline bounds the wait, not whether the release
-// is owed.
+// which case OnStop is a plain destructor. Every failure is reported.
+//
+// Stop is synchronous. It waits out whatever another goroutine is still
+// running for a service it is tearing down -- a start step in flight, a drain
+// hook another Stop began, a Run hook being cancelled -- so when it returns,
+// the teardown has happened and its failures are in the error. A teardown
+// outlives the call in one case, when ctx expires first: the missed deadline
+// is reported here, and the release is finished once the outstanding step
+// returns, on a goroutine of its own, reaching observers rather than this
+// caller. A constructor that finishes after the scope has stopped is likewise
+// undone by whichever goroutine was resolving it.
 //
 // Afterwards the scope and its descendants refuse to resolve anything, with
 // ErrStopped; that includes a resolution that was already waiting when the
@@ -1822,10 +1840,23 @@ func (st *state) claimNext() (*instance, *state) {
 // scope down, and the others wait for it and report its result, bounded by
 // their own context. Two Stop calls that meet at one scope, as a child and
 // its parent do, wait for each other phase by phase, so neither starts
-// releasing what the other's hooks are still using. For that reason a hook
-// must not call Stop on its own scope or an ancestor, which would be a wait
-// on itself; call Shutdown, which never blocks.
+// releasing what the other's hooks are still using.
+//
+// Because Stop waits, a hook must not call Stop on its own scope or an
+// ancestor: it would be waiting for the step it is itself running. Stopping a
+// sibling, or a scope below the hook's own, is allowed. A hook that passes on
+// the context it was given gets an error saying so; one that passes a context
+// of its own is not recognised, and waits until that context expires. Call
+// Shutdown, which never blocks.
 func (s *Scope) Stop(ctx context.Context) error {
+	// A hook of this scope, or of one under it, calling Stop here would be
+	// waiting for a step it is itself running. Report it: the wait would
+	// otherwise last until ctx expired, and with a background context for
+	// ever. Only a hook that passed on the context it was given can be seen
+	// this way, which is the shape worth catching.
+	if h := hookOwner(ctx); h != nil && h.descendsFrom(s.state) {
+		return fmt.Errorf("di: a lifecycle hook of scope %s called Stop on scope %s, which it is inside: call Shutdown instead", h.name, s.name)
+	}
 	if !s.stopOnce.claim(s.state, func() {
 		if s.stopCtx == nil {
 			s.stopCtx = ctx // the first Stop owns it; a later call must not clobber it

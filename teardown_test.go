@@ -153,18 +153,18 @@ func TestRegressionLateUndoHonoursDeadline(t *testing.T) {
 	}
 }
 
-// An instance whose start step is in flight when Stop runs must still be
-// torn down. Stop hands that teardown to the goroutine running the step, so
-// it completes just after Stop returns rather than being skipped.
+// An instance whose start step is in flight when Stop runs is torn down
+// before Stop returns. Stop waits for the step; it used to hand the teardown
+// to the goroutine running it, which finished after Stop had returned.
 // (pass 2)
-func TestRegressionStopHandsOffInFlightStart(t *testing.T) {
+func TestStopWaitsForAnInFlightStartStep(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	stopped := make(chan struct{})
+	var stopped atomic.Bool
 	s := di.New()
 	s.Provide(func(*di.Scope) *DB { return &DB{} }).
 		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
-		OnStop(func(context.Context, *DB) error { close(stopped); return nil })
+		OnStop(func(context.Context, *DB) error { stopped.Store(true); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -172,15 +172,12 @@ func TestRegressionStopHandsOffInFlightStart(t *testing.T) {
 	go func() { _, err := s.Resolve[*DB](); res <- err }()
 	<-entered
 
+	go func() { time.Sleep(20 * time.Millisecond); close(release) }()
 	if err := s.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	close(release)
-
-	select {
-	case <-stopped:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the in-flight instance was never torn down")
+	if !stopped.Load() {
+		t.Fatal("Stop returned before the in-flight instance was torn down")
 	}
 	if err := <-res; !errors.Is(err, di.ErrStopped) {
 		t.Fatalf("a stopped scope handed out the value: %v", err)
@@ -212,33 +209,93 @@ func TestRegressionEagerConstructorFailureRollsBack(t *testing.T) {
 	}
 }
 
-// Stop called from inside a start step must not deadlock. The teardown
-// is handed to the goroutine running the step, which is this one.
+// A hook may not call Stop on its own scope: it would be waiting for the step
+// it is itself running. A hook that passes on the context it was given is
+// told so rather than left to wait, and Shutdown is the call that does work
+// from inside a hook.
 // (pass 3)
-func TestRegressionStopInsideStartHookDoesNotDeadlock(t *testing.T) {
-	stopped := false
+func TestStopFromAHookIsReported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire func(*di.Scope, chan<- error)
+	}{
+		{"OnStart", func(s *di.Scope, got chan<- error) {
+			s.Value(&DB{}).Eager().
+				OnStart(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); return nil })
+		}},
+		{"OnDrain", func(s *di.Scope, got chan<- error) {
+			s.Value(&DB{}).Eager().
+				OnDrain(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); return nil })
+		}},
+		{"OnStop", func(s *di.Scope, got chan<- error) {
+			s.Value(&DB{}).Eager().
+				OnStop(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); return nil })
+		}},
+		{"Run", func(s *di.Scope, got chan<- error) {
+			s.Value(&DB{}).Eager().
+				Run(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); <-ctx.Done(); return nil })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(chan error, 1)
+			s := di.New()
+			tc.wire(s, got)
+			if err := s.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			go func() { defer close(done); _ = s.Stop(context.Background()) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Stop deadlocked")
+			}
+			select {
+			case err := <-got:
+				if err == nil || !strings.Contains(err.Error(), "call Shutdown instead") {
+					t.Fatalf("the hook's Stop returned %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("the hook never ran")
+			}
+		})
+	}
+}
+
+// A hook that passes a context of its own is not recognised, and then the
+// wait is the caller's to bound: with a deadline it is reported, and only a
+// hook that waits for ever on a background context can hang.
+// (pass 3)
+func TestStopFromAHookWithItsOwnContextIsBounded(t *testing.T) {
+	got := make(chan error, 1)
 	s := di.New()
 	s.Value(&DB{}).Eager().
-		OnStart(func(ctx context.Context, _ *DB) error { return s.Stop(context.Background()) }).
-		OnStop(func(context.Context, *DB) error { stopped = true; return nil })
-
-	done := make(chan error, 1)
-	go func() { done <- s.Start(context.Background()) }()
+		OnStart(func(context.Context, *DB) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			got <- s.Stop(ctx)
+			return nil
+		})
+	// The Stop is a real one: it claims the scope, so Start reports that the
+	// scope stopped under it. What is being checked is that the hook's own
+	// call came back at all.
+	if err := s.Start(context.Background()); !errors.Is(err, di.ErrStopped) {
+		t.Fatalf("Start: %v", err)
+	}
 	select {
-	case <-done:
+	case err := <-got:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("want the missed deadline, got %v", err)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Start deadlocked")
-	}
-	if !stopped {
-		t.Fatal("the service was never torn down")
-	}
-	if _, err := s.Resolve[*DB](); !errors.Is(err, di.ErrStopped) {
-		t.Fatalf("scope should be stopped: %v", err)
+		t.Fatal("Stop from the hook never returned")
 	}
 }
 
 // A Stop whose deadline expires while a start step is in flight must not
-// orphan the instance: its Run hook is cancelled and its OnStop runs.
+// orphan the instance: its Run hook is cancelled and its OnStop runs. Stop
+// waits for the step, so this is the deadline ending the caller's wait rather
+// than the teardown, which finishes on a goroutine of its own.
 // (pass 3)
 func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
 	entered := make(chan struct{})
@@ -289,19 +346,27 @@ func TestRegressionAncestorStoppedRejectsChild(t *testing.T) {
 	}
 }
 
-// Start must not report success for a scope that a start hook stopped.
+// Start must not report success for a scope that was stopped while its hook
+// phase was running. The stop used to come from the hook itself; a hook may
+// no longer do that, so it comes from another goroutine, which is the shape
+// that remains.
 // (pass 4)
-func TestRegressionStartReportsSelfStop(t *testing.T) {
+func TestStartReportsAScopeStoppedUnderIt(t *testing.T) {
+	entered := make(chan struct{})
 	s := di.New()
-	s.Value(&DB{}).Eager().OnStart(func(context.Context, *DB) error { return s.Stop(context.Background()) })
+	s.Value(&DB{}).Eager().
+		OnStart(func(context.Context, *DB) error { close(entered); time.Sleep(50 * time.Millisecond); return nil })
+	go func() { <-entered; _ = s.Stop(context.Background()) }()
 	if err := s.Start(context.Background()); !errors.Is(err, di.ErrStopped) {
 		t.Fatalf("got %v, want ErrStopped", err)
 	}
 }
 
-// A teardown handed off after Stop returned still reaches observers.
+// The teardown of an instance whose start step was in flight is reported to
+// the caller of Stop, not only to observers: Stop waits for the step, so the
+// failure is its own to report.
 // (pass 4)
-func TestRegressionHandoffStopErrorReachesObservers(t *testing.T) {
+func TestStopReportsTheTeardownItWaitedFor(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	seen := make(chan error, 4)
@@ -320,57 +385,57 @@ func TestRegressionHandoffStopErrorReachesObservers(t *testing.T) {
 	}
 	go func() { _, _ = s.Resolve[*DB]() }()
 	<-entered
-	if err := s.Stop(context.Background()); err != nil {
-		t.Fatal(err)
+	go func() { time.Sleep(20 * time.Millisecond); close(release) }()
+
+	if err := s.Stop(context.Background()); !errors.Is(err, flush) {
+		t.Fatalf("Stop returned %v, want the teardown failure it waited for", err)
 	}
-	close(release)
 	select {
 	case err := <-seen:
 		if !errors.Is(err, flush) {
 			t.Fatalf("observer saw %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("the late teardown was never reported")
+		t.Fatal("the teardown was never reported")
 	}
 }
 
-// The Stop call that queues a handoff owns that teardown's context. A
+// The first Stop owns the context of every teardown its scope still owes,
+// including the one that undoes a build finishing after the scope stopped. A
 // later Stop, which has nothing left to tear down, must not substitute its
 // own, possibly cancelled, context.
 // (pass 5)
-func TestRegressionHandoffKeepsQueueingStopsContext(t *testing.T) {
+func TestFirstStopOwnsALateTeardownsContext(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	stopRan := make(chan struct{})
 	var sawCancelled atomic.Bool
 
 	s := di.New()
-	s.Provide(func(*di.Scope) *DB { return &DB{} }).Eager().
-		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
+	s.Provide(func(*di.Scope) *DB { close(entered); <-release; return &DB{} }).
 		OnStop(func(ctx context.Context, _ *DB) error {
 			sawCancelled.Store(ctx.Err() != nil)
 			close(stopRan)
 			return nil
 		})
-
-	go func() { _ = s.Start(context.Background()) }()
+	go func() { _, _ = s.Resolve[*DB]() }() // still constructing when Stop runs
 	<-entered
 
-	if err := s.Stop(context.Background()); err != nil { // queues the handoff
+	if err := s.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = s.Stop(cancelled) // nothing left to stop, must not change the queued context
+	_ = s.Stop(cancelled) // nothing left to stop, must not change the owned context
 
 	close(release)
 	select {
 	case <-stopRan:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the handed-off teardown never ran")
+		t.Fatal("the build that finished after Stop was never undone")
 	}
 	if sawCancelled.Load() {
-		t.Fatal("OnStop ran with a later Stop's cancelled context")
+		t.Fatal("the undo ran with a later Stop's cancelled context")
 	}
 }
 
