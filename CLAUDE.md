@@ -72,11 +72,24 @@ one holding the build, so both directions are matched against whole paths
 branches closing a cycle at once would both decide to wait. Lock order is
 state mutex then `graphMu`, never the reverse.
 
-**The resolution path is immutable.** `resolver` is a linked list node, not a
-slice, because a constructor may resolve from several goroutines and they all
-share the `*Scope` it was handed. A node is identified by binding *and*
-holder, never by key: that is what separates a group member from a plain
-registration of the same type, and one `Scoped` binding across scopes.
+**The resolution path is immutable, and finished nodes stop counting.**
+`resolver` is a linked list node, not a slice, because a constructor may
+resolve from several goroutines and they all share the `*Scope` it was handed.
+A node is identified by binding *and* holder, never by key: that is what
+separates a group member from a plain registration of the same type, and one
+`Scoped` binding across scopes. An alias hop is identified by the alias
+binding and the holder the *route ends at*, not the scope the alias was
+registered in, or one root alias to a `Scoped` target would be the same edge
+in every scope and collapse into a false cycle.
+
+`resolver.done` is the one thing about a node that changes: `resolve` sets it
+as it returns, and `onPath` skips a node that has it. The path stays whole for
+error messages; what goes away is the claim that the node is still a
+dependency. This exists because a constructor may keep the `*Scope` it was
+handed -- that is how a goroutine it starts resolves later -- and a resolution
+made through it afterwards would otherwise meet its own finished frame, be
+called a cycle, and have that verdict cached on whatever instance it was
+building.
 
 **Scopes have a stop machine too.** `stopDone` is made by the first `Stop`
 and closed when its teardown finishes; every later or concurrent `Stop` waits
@@ -84,12 +97,28 @@ on it and reports `stopErr`. That wait is what keeps dependency order when a
 child and its parent are stopped at once. The cost is that a hook may not call
 `Stop` on its own scope or an ancestor.
 
-**Draining precedes everything.** `Stop` is drain, then mark stopped, then
-children, then this scope's instances. `drain` skips a child whose `Stop` has
-already begun, because that `Stop` drained it; without the skip, `OnDrain`
-could run on an instance the child is tearing down. Draining is not otherwise
-ordered against such a child, and does not need to be, since it releases
-nothing.
+**Draining precedes everything, and it has a machine of its own.** `Stop` is
+drain, then mark stopped, then children, then this scope's instances. Both
+levels of the drain phase are once-with-wait, mirroring `stopDone`:
+`state.drainDone` for the scope, `instance.dr` (`drainNone` → `draining` →
+`drained`) for one hook. A second `Stop` arriving at either waits instead of
+skipping. An earlier version recorded only that a drain had been *decided*,
+which let a concurrent `Stop` see the flag, walk past a hook still running and
+begin releasing what it was using; and it skipped a child whose `Stop` had
+begun, which let this scope mark itself stopped while that child's hooks were
+still resolving through it.
+
+`drainAll` sweeps repeatedly rather than once. Draining is the only teardown
+phase during which the scope still resolves, so a hook finishing in-flight
+work may build a service or open a child scope for the first time; those owe a
+drain too, and it has to happen before `stopped` is set or their own hooks find
+nothing to resolve. A sweep that does no work ends the phase, and `ctx` bounds
+the sweep as well as the hooks. The narrow window left is an instance
+published between the last sweep and `stopped.Store(true)`: closing it would
+mean holding the state mutex across user hooks.
+
+Neither level waits out `phaseStarting`, for the same reason `stopIfNeeded`
+does not: the goroutine running that start step may be this one.
 
 **`freeze` is transactional.** Registrations queue in `pending` and commit in
 one batch. The batch is validated against *prospective copies* of
@@ -117,6 +146,14 @@ chains and reports the binding that actually serves a key, never an alias.
 earlier version relied on three call sites remembering to follow aliases, and
 one forgot.
 
+**A stopped scope refuses to serve, and that is checked twice.** `resolve`
+checks on the way in, and `await` checks again after the wait, because the
+scope can stop while a resolution is parked on someone else's build. The
+second check is on the *resolving* scope, not the instance's holder: the
+holder is always that scope or an ancestor, so checking the resolver covers
+both, and a stopped child must refuse the request whether or not what it asked
+for is still alive above it.
+
 **Errors versus panics.** A *wiring* failure (missing dependency, cycle, failed
 constructor) is an internal `abort{err}` panic that unwinds to the nearest
 `Resolve`/`Start`/`Run` and becomes an `error`. A *configuration* rejection
@@ -127,7 +164,11 @@ harness classify panics by that rule.
 
 **When a stop is owed.** `OnStop` runs when `OnStart` succeeded, or when there
 is no `OnStart` to pair with (or the scope was never started), making `OnStop` a
-plain destructor. A service built but never started is *not* torn down.
+plain destructor. A service built but never started is *not* torn down. Only a
+start hook that *returned* counts as succeeded: `startClaimed` recovers a
+panicking hook into a failed start, or the instance would sit at
+`phaseStarted`, be served to a caller that recovered the panic, and be paired
+with an `OnStop` for an `OnStart` that never finished.
 `binding.used` is set only when a resolution actually served a value, and
 `state.served` records keys a scope resolved from an *outer* scope, because
 `used` lives on the outer binding and cannot protect the inner scope.
@@ -138,7 +179,18 @@ plain destructor. A service built but never started is *not* torn down.
   owning state's mutex.
 - `Stop` must not wait on anything the current goroutine could be responsible
   for finishing. A start hook may call `Stop`; that is why a mid-start teardown
-  is handed off via `stopWanted` rather than waited on.
+  is handed off via `stopWanted` rather than waited on. This is the reason
+  `Stop` cannot be made fully synchronous, and it is forced, not a choice: Go
+  has no goroutine-local state, so there is no way to tell a start step running
+  on the caller's own goroutine from one running elsewhere. Every review so far
+  has reported the asymmetry as a bug; it is pinned by
+  `TestRegressionStopInsideStartHookDoesNotDeadlock` and answered in the
+  `Stop` godoc.
+- Nothing in the teardown path may run a user hook against a value another
+  hook still holds. That is one rule with three instances: `OnStop` after
+  `OnDrain`, `OnStop` after a `Run` hook (deferred to `releaseAfterRun` when
+  `ctx` expires rather than run alongside it), and a parent's hooks after a
+  child's.
 - `Start`'s rollback goes through `Stop` with `context.WithoutCancel`, so it
   stops child scopes and waits for `Run` hooks.
 - Whichever `Stop` call queues a handoff owns that teardown's context; a later
@@ -168,7 +220,16 @@ Four layers, each catching a different class:
   survives concurrency: nothing panics unexpectedly, every operation returns,
   nothing is stopped more often than built, and the stop-order oracle, which
   is the layer that catches a parent running ahead of a child.
-- `review_test.go` — one test per defect of the September 2026 review.
+- `review_test.go` — one test per defect of the first September 2026 review;
+  `review2_test.go` the same for the second, which found six more plus the
+  `Run`-hook overlap.
+
+  Every defect in both reviews lived in a gap the generators cannot see. The
+  concurrent driver's C1 oracle accepts *any* `panic(error)` as legitimate,
+  because that is how `Get` reports failure, so a false `ErrCycle` out of `Get`
+  reads as normal; and its `OnDrain` hooks do nothing, so the drain phase is
+  exercised without being checked. Tightening either is worth more than
+  another oracle.
 - `FuzzMachine` — the same invariants under coverage-guided search. Corpus in
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
 
@@ -190,9 +251,10 @@ The sequential generators do not explore goroutine interleavings. That is what
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
-- **Two teardowns may finish after `Stop` returns**: one handed off because a
-  start step was in flight, and one undoing a build that completed after the
-  scope stopped. Both are deliberate. Any ordering oracle has to model them
+- **Three teardowns may finish after `Stop` returns**: one handed off because a
+  start step was in flight, one undoing a build that completed after the scope
+  stopped, and one releasing a service whose `Run` hook outlasted `Stop`'s
+  context. All three are deliberate. Any ordering oracle has to model them
   or it will report them as defects; the concurrent driver does it by running
   every `Start` before any `Stop`, so no start step is ever in flight.
 - **CHANGELOG is enforced.** `.github/workflows/release.yml` fails a tag push

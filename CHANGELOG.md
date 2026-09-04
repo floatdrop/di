@@ -7,6 +7,69 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+Fixes for the six defects of the second September 2026 review, plus the
+`Run`-hook overlap reported alongside them. The public API is unchanged. Every
+change is behaviour; an upgrade can break a caller only in the way listed
+under Changed.
+
+### Fixed
+
+- The drain phase is now coherent with concurrent teardown, which is what the
+  phase was added for in 0.4.0. Three defects shared that root cause: a `Stop`
+  that reached a scope whose drain another `Stop` was running saw the flag,
+  skipped the hook and went on to release what it was still using; a scope
+  marked itself stopped while a descendant's drain was in flight, so those
+  hooks lost the dependencies they were draining against; and a service or
+  child scope first built *by* a drain hook was missed by the phase, so it was
+  either stopped without being drained or drained after the parent had already
+  stopped. Draining now runs once per scope with later arrivals waiting for
+  it, and sweeps the scope until a pass finds no new work. The shape all three
+  hit was an HTTP server finishing in-flight requests whose handlers take a
+  request scope.
+- A constructor may keep the `*Scope` it was handed -- which is how a
+  goroutine it starts resolves later -- without a deferred resolution through
+  it being reported as a false `ErrCycle`. A finished frame of the path is no
+  longer treated as an active dependency. The false cycle was also recorded on
+  whatever instance that resolution was building, so one such call poisoned
+  that service for the life of the process.
+- One `Bind` alias to a `Scoped` target is now a distinct edge in each scope
+  that holds an instance of the target, as the target's own node already was.
+  Keying the alias hop on the scope the alias was registered in collapsed
+  those edges and reported an acyclic graph as `ErrCycle`.
+- A scope that has stopped refuses to resolve, including a resolution that was
+  already waiting on a constructor running in a live ancestor. Only the
+  instance's holder was re-checked after the wait, so a fully stopped child
+  could still be handed a value.
+- A panicking `OnStart` is a failed start rather than a successful one. The
+  instance was left looking started, so a caller that recovered the panic was
+  served an initialisation that never finished, and `Stop` paired an `OnStop`
+  with it. The panic now reaches `Resolve` as an error, like a panicking
+  constructor, which also restores the rule that `Resolve` never panics.
+- `OnStop` no longer runs while a `Run` hook is still using the value. When a
+  `Run` hook outlasts `Stop`'s context, `Stop` reports the missed deadline as
+  before and the release now follows that hook's own return instead of racing
+  it. Service code that only followed the lifecycle API could be reading
+  what `OnStop` was closing.
+
+### Changed
+
+- `Stop` can now be slower to return when a drain hook builds something: the
+  phase keeps sweeping until nothing new appears, and both the sweep and the
+  hooks are bounded by the context passed to `Stop`. A caller that passed a
+  context without a deadline and relied on drain being a single pass will
+  wait longer.
+
+### Unchanged, deliberately
+
+- A service whose start step is in flight when `Stop` runs is still torn down
+  by the goroutine running that step, so that teardown can finish just after
+  `Stop` returns and its error reaches observers rather than the caller. This
+  looks like a defect and is a forced one: the goroutine running the step may
+  be the caller of `Stop` itself, because a start hook is allowed to stop the
+  scope, and Go offers no way to tell that case from another goroutine's start
+  step. Waiting would deadlock exactly those callers. `Stop`'s documentation
+  states the consequence; use `Shutdown` from a hook.
+
 ## [0.4.0] - 2026-09-04
 
 Fixes for the eleven defects of the September 2026 review, plus the
