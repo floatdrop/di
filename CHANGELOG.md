@@ -7,10 +7,17 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
-Fixes for the six defects of the second September 2026 review, plus the
-`Run`-hook overlap reported alongside them. The public API is unchanged. Every
-change is behaviour; an upgrade can break a caller only in the way listed
-under Changed.
+## [0.5.0] - 2026-09-04
+
+Fixes for the six defects of the second September 2026 review, the `Run`-hook
+overlap reported alongside them, two more that the tightened concurrent driver
+found in those fixes, and the half of the first review's ninth defect that its
+fix had left open. Almost all of it is the teardown path: draining, and how a
+failure gets out of a worker.
+
+The public API is unchanged -- `go doc -all` differs from 0.4.0 only in one
+parameter name -- so every change is behaviour, and an upgrade can break a
+caller in the two ways listed under Changed.
 
 ### Fixed
 
@@ -51,6 +58,7 @@ under Changed.
   and not for one built a level along, so it could be stopped without ever
   being drained. Found by the drain oracle added to the concurrent driver
   after the review, not by the review.
+
   Two things come with that fix rather than being separate defects, because
   revisiting a scope is what makes them reachable at all. `Stop` waits for a
   drain hook per instance, not only through the scope-wide phase: that phase
@@ -65,7 +73,6 @@ under Changed.
   before and the release now follows that hook's own return instead of racing
   it. Service code that only followed the lifecycle API could be reading
   what `OnStop` was closing.
-
 - A `Run` hook's failure always reaches `Shutdown`. Whether it did used to
   depend on a race: the worker goroutine asked the run context whether *we*
   had cancelled it, and a `Stop` landing between two readings of that context
@@ -355,7 +362,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/floatdrop/di/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/floatdrop/di/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/floatdrop/di/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/floatdrop/di/compare/v0.1.0...v0.2.0
