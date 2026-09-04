@@ -64,13 +64,21 @@ second resolution to carry on, never to wait.
 
 **Two cycle detectors, because one branch cannot see the other.** Within a
 branch, `resolver.onPath` walks the immutable path. Across branches,
-`resolver.wait` searches a wait-for graph under `graphMu` before blocking:
-instances point at the resolution building them, blocked resolutions point at
-what they wait for, and a branch that blocks does so several nodes below the
-one holding the build, so both directions are matched against whole paths
-(`descends`). The check and the edge it adds are one critical section, or two
-branches closing a cycle at once would both decide to wait. Lock order is
-state mutex then `graphMu`, never the reverse.
+`resolver.wait` searches a `*graph` before blocking: instances point at the
+resolution building them, blocked resolutions point at what they wait for, and
+a branch that blocks does so several nodes below the one holding the build, so
+both directions are matched against whole paths (`descends`). The check and the
+edge it adds are one critical section, or two branches closing a cycle at once
+would both decide to wait. Lock order is state mutex then `graph.mu`, never the
+reverse.
+
+There is one graph per container, made by `New` and handed down through
+`newState`, so `state.graph` is a field read rather than a walk to the root.
+That is exactly the reach a cycle has: a wait crosses scopes, because a
+resolution follows the parent chain, but nothing joins two containers. The
+graph used to be a package-level map and mutex, which found the same cycles and
+made every blocked resolution in the process scan every other container's edges
+under one lock to do it.
 
 **The resolution path is immutable, and finished nodes stop counting.**
 `resolver` is a linked list node, not a slice, because a constructor may

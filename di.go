@@ -282,7 +282,8 @@ type instance struct {
 	settled bool       // guarded by the owning state's mutex
 	dr      drainPhase // guarded by the owning state's mutex
 
-	// builder is the resolution running the build step, guarded by graphMu.
+	// builder is the resolution running the build step, guarded by the
+	// container graph's mutex.
 	// It is the edge that makes a cycle between concurrent builds visible.
 	builder *resolver
 
@@ -295,16 +296,23 @@ type instance struct {
 	runErr  error
 }
 
-// The wait-for graph, guarded by graphMu, has two kinds of edge: an instance
-// points at the resolution building it (instance.builder), and a blocked
-// resolution points at the instance it is waiting for (blockedFor). graphMu
-// is the innermost lock. A state's mutex may be held while taking it, never
-// the other way round, so the graph can be read consistently across scopes
-// without ever ordering two state mutexes against each other.
-var (
-	graphMu    sync.Mutex
-	blockedFor = map[*resolver]*instance{}
-)
+// graph is one container's wait-for graph. It has two kinds of edge: an
+// instance points at the resolution building it (instance.builder), and a
+// blocked resolution points at the instance it is waiting for (blockedFor).
+// Its mutex is the innermost lock. A state's mutex may be held while taking
+// it, never the other way round, so the graph can be read consistently across
+// scopes without ever ordering two state mutexes against each other.
+//
+// One graph is made by [New] and shared by every scope under that root, which
+// is exactly the reach a cycle can have: a wait crosses scopes, because a
+// resolution follows the parent chain, but nothing joins two containers, so
+// there is no edge between them to look for. A package-level graph found the
+// same cycles, but every blocked resolution scanned every other container's
+// edges under one process-wide lock to do it.
+type graph struct {
+	mu         sync.Mutex
+	blockedFor map[*resolver]*instance
+}
 
 // descends reports whether n is anc or was created below it. A branch that
 // blocks does so at a leaf of the path, several nodes below the one that
@@ -326,9 +334,9 @@ func descends(n, anc *resolver) bool {
 // holder's mutex held; the check and the edge it adds are one critical
 // section, so two branches closing a cycle at the same time cannot both
 // decide to wait.
-func (r *resolver) wait(in *instance) bool {
-	graphMu.Lock()
-	defer graphMu.Unlock()
+func (r *resolver) wait(g *graph, in *instance) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
 	seen := map[*instance]bool{in: true}
 	for stack := []*instance{in}; len(stack) > 0; {
@@ -341,30 +349,31 @@ func (r *resolver) wait(in *instance) bool {
 		if descends(r, builder) {
 			return false // waiting on our own branch's work
 		}
-		for n, j := range blockedFor {
+		for n, j := range g.blockedFor {
 			if descends(n, builder) && !seen[j] {
 				seen[j] = true
 				stack = append(stack, j)
 			}
 		}
 	}
-	blockedFor[r] = in
+	g.blockedFor[r] = in
 	return true
 }
 
-func (r *resolver) unwait() {
-	graphMu.Lock()
-	delete(blockedFor, r)
-	graphMu.Unlock()
+func (r *resolver) unwait(g *graph) {
+	g.mu.Lock()
+	delete(g.blockedFor, r)
+	g.mu.Unlock()
 }
 
 // claimBuild takes the build step for this resolution. Called with the
 // holder's mutex held.
-func (in *instance) claimBuild(r *resolver) {
+func (in *instance) claimBuild(holder *state, r *resolver) {
 	in.ph = phaseBuilding
-	graphMu.Lock()
+	g := holder.graph
+	g.mu.Lock()
 	in.builder = r
-	graphMu.Unlock()
+	g.mu.Unlock()
 }
 
 // settle publishes the outcome of the build step and wakes every resolution
@@ -372,9 +381,10 @@ func (in *instance) claimBuild(r *resolver) {
 func (in *instance) settle(holder *state) {
 	holder.mu.Lock()
 	in.settled = true
-	graphMu.Lock()
+	g := holder.graph
+	g.mu.Lock()
 	in.builder = nil
-	graphMu.Unlock()
+	g.mu.Unlock()
 	holder.cond.Broadcast()
 	holder.mu.Unlock()
 }
@@ -746,6 +756,7 @@ func (o *once) wait(st *state, ctx context.Context) (error, bool) {
 type state struct {
 	name   string
 	parent *state
+	graph  *graph // the container's wait-for graph, shared with every other scope under the root
 
 	mu sync.Mutex
 	// cond signals every instance phase change in this scope, so a
@@ -943,6 +954,14 @@ func newState(name string, parent *state) *state {
 		shutdownCh: make(chan struct{}),
 	}
 	st.cond = sync.NewCond(&st.mu)
+	// One graph per container: the root makes it and every scope under it
+	// shares that one pointer, so reaching it is a field read rather than a
+	// walk to the root.
+	if parent != nil {
+		st.graph = parent.graph
+	} else {
+		st.graph = &graph{blockedFor: map[*resolver]*instance{}}
+	}
 	return st
 }
 
@@ -1347,18 +1366,18 @@ func (s *Scope) await(in *instance, holder *state, k key) (any, error) {
 	holder.mu.Lock()
 	for in.ph == phaseNew || !in.settled || in.ph == phaseStarting {
 		if in.ph == phaseNew {
-			in.claimBuild(s.r)
+			in.claimBuild(holder, s.r)
 			holder.mu.Unlock()
 			s.materialise(in, holder, k)
 			holder.mu.Lock()
 			continue
 		}
-		if !s.r.wait(in) {
+		if !s.r.wait(holder.graph, in) {
 			holder.mu.Unlock()
 			return nil, fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.parent.pathStr(), k)
 		}
 		holder.cond.Wait()
-		s.r.unwait()
+		s.r.unwait(holder.graph)
 	}
 	value, err := in.value, in.err
 	if err == nil && s.isStopped() {
