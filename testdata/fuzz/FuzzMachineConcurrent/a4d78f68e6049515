@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("00888978RRRRRRR$29(!B00%0a8y80Z{%.A000A0010900")

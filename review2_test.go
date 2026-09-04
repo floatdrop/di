@@ -10,6 +10,7 @@ package di_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -369,5 +370,125 @@ func TestReview2OnStopWaitsForALiveRunHook(t *testing.T) {
 	}
 	if overlap.Load() {
 		t.Fatal("OnStop ran while the Run hook was still live")
+	}
+}
+
+// 10. Not from the review: found by the drain oracle added to the concurrent
+// driver afterwards. A drain hook may build into a scope the sweep has
+// already visited, and that instance owes a drain like any other. Sweeping
+// each descendant once was enough for a late build in the draining scope and
+// not for one a level along.
+func TestReview2LateBuildIntoSweptChildIsDrained(t *testing.T) {
+	var mu sync.Mutex
+	var log []string
+	note := func(s string) { mu.Lock(); log = append(log, s); mu.Unlock() }
+
+	root := di.New()
+	kid := root.Child("kid")
+	kid.Provide(func(*di.Scope) *wQ { return &wQ{} }).
+		OnDrain(func(context.Context, *wQ) error { note("drain late"); return nil }).
+		OnStop(func(context.Context, *wQ) error { note("stop late"); return nil })
+
+	root.Value(&Worker{}).Eager().
+		OnDrain(func(context.Context, *Worker) error {
+			note("drain root")
+			// The child was swept before this hook ran: it had nothing in it.
+			if _, err := kid.Resolve[*wQ](); err != nil {
+				t.Errorf("resolve into a child during drain: %v", err)
+			}
+			return nil
+		})
+
+	if err := root.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"drain root", "drain late", "stop late"}
+	if !slices.Equal(log, want) {
+		t.Fatalf("got %v, want %v", log, want)
+	}
+}
+
+type oLate struct{}
+type oRoot struct{}
+
+// 11. The companion to 10, and a hazard 10's fix creates rather than one that
+// was there before: once a sweep revisits a scope whose own phase has ended,
+// it can be draining a late instance there exactly as that scope's Stop
+// reaches it. The scope-wide phase cannot keep those apart -- it has already
+// ended, and it has to, or the drain in 4 would deadlock -- so Stop waits for
+// the hook per instance.
+func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
+	bDraining := make(chan struct{})
+	releaseB := make(chan struct{})
+	var overlap atomic.Bool
+	stopped := make(chan struct{})
+
+	root := di.New()
+	kid := root.Child("kid")
+
+	// Scoped, so resolving it through kid puts the instance in kid.
+	root.Provide(func(*di.Scope) *oLate { return &oLate{} }).Scoped().
+		OnDrain(func(context.Context, *oLate) error {
+			close(bDraining)
+			<-releaseB
+			return nil
+		}).
+		OnStop(func(context.Context, *oLate) error {
+			select {
+			case <-releaseB:
+			default:
+				overlap.Store(true)
+			}
+			close(stopped)
+			return nil
+		})
+
+	root.Value(&oRoot{}).Eager().
+		OnDrain(func(context.Context, *oRoot) error {
+			// kid was swept already: it had nothing in it. This puts an
+			// instance there afterwards.
+			if _, err := kid.Resolve[*oLate](); err != nil {
+				t.Errorf("resolve into the child during drain: %v", err)
+			}
+			return nil
+		})
+
+	if err := root.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	rootStop := make(chan error, 1)
+	go func() { rootStop <- root.Stop(context.Background()) }()
+
+	select {
+	case <-bDraining:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the late instance was never drained")
+	}
+
+	kidStop := make(chan error, 1)
+	go func() { kidStop <- kid.Stop(context.Background()) }()
+	time.Sleep(150 * time.Millisecond) // let kid.Stop reach the release
+
+	if overlap.Load() {
+		t.Fatal("OnStop ran while the instance's own OnDrain was still holding it")
+	}
+	close(releaseB)
+	for _, ch := range []chan error{kidStop, rootStop} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Stop never returned")
+		}
+	}
+	<-stopped
+	if overlap.Load() {
+		t.Fatal("OnStop ran while the instance's own OnDrain was still holding it")
 	}
 }

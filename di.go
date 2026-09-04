@@ -559,6 +559,14 @@ func (st *state) stopContext() context.Context {
 // plain destructor for what the constructor acquired. An instance whose
 // OnStart was skipped by a rollback, or failed, is not stopped.
 //
+// A drain hook still running for this instance is waited for. The scope-wide
+// drain phase is not enough on its own: it ends per scope, and it has to, or
+// an outer scope draining an HTTP server would deadlock against a handler
+// stopping its own request scope. So an instance built after its scope's
+// phase ended can be drained by a sweep still running above it while its own
+// Stop arrives, and only a per-instance wait keeps a release off a value its
+// drain hook is still holding.
+//
 // A start step in flight is handed to the goroutine running it rather than
 // waited for. That goroutine may be this one -- a start hook may call Stop --
 // and Go offers no way to tell that case from another goroutine's start step,
@@ -568,6 +576,16 @@ func (st *state) stopContext() context.Context {
 func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
 	paired := in.b.onStart != nil && owner.everStarted()
 	owner.mu.Lock()
+	if in.dr == draining {
+		done := in.drainedCh
+		owner.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return fmt.Errorf("di: stopping %s: OnDrain did not return: %w", in.b.key, ctx.Err())
+		}
+		owner.mu.Lock()
+	}
 	if in.ph == phaseStarting {
 		in.stopWanted = true
 		in.stopCtx = ctx // this Stop's context, not whichever is current later
@@ -618,6 +636,17 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 		// goroutine. Leave the instance undecided rather than waiting or
 		// writing it off: a later sweep of this phase drains it if the step
 		// settles in time.
+		owner.mu.Unlock()
+		return false, nil
+	}
+	if owner.isStopped() {
+		// The scope is already being torn down, by a Stop of its own that has
+		// moved past draining. Winding an instance down for work it can no
+		// longer take on is the opposite of what the hook is for: it would
+		// run against a scope that resolves nothing. A sweep still running in
+		// an ancestor can reach an instance built into a scope in this state,
+		// which is the one way the phase and the teardown meet out of order.
+		in.dr = drained
 		owner.mu.Unlock()
 		return false, nil
 	}
@@ -1800,9 +1829,9 @@ func (s *Scope) teardown(ctx context.Context) error {
 }
 
 // drain runs the OnDrain hooks of this scope's subtree before anything is
-// marked stopped, children first and then this scope in reverse build order,
-// which is the order Stop itself uses. Nothing here changes an instance's
-// phase: draining is a chance to finish, not a teardown.
+// marked stopped, innermost first and in reverse build order, which is the
+// order Stop itself uses. Nothing here changes an instance's phase: draining
+// is a chance to finish, not a teardown.
 //
 // Only the first drain of a scope runs; a second one, from a Stop that
 // arrived at the same scope by another route, waits for it. That wait is what
@@ -1820,40 +1849,90 @@ func (s *Scope) drain(ctx context.Context) error {
 		}
 		return nil
 	}
-	err := s.drainAll(ctx)
-	s.drainOnce.settle(s.state, err)
+	r := drainRun{
+		owned: []drainScope{{st: s.state}},
+		seen:  map[*state]bool{s.state: true},
+	}
+	err := r.sweepAll(ctx)
+	s.drainOnce.settle(s.state, err) // this scope's phase is the last to end
 	return err
 }
 
-// drainAll is the body of the first drain. It sweeps the scope repeatedly
-// rather than once, because draining is the one teardown phase during which
-// the scope still resolves: a hook that finishes in-flight work may build a
-// service, or open a child scope, for the first time. Those have to be
-// drained too, and before the scope is marked stopped, or their own hooks
-// would run with nothing left to resolve. A sweep that finds no new work ends
-// the phase.
-func (s *Scope) drainAll(ctx context.Context) error {
-	var errs []error
-	seen := map[*state]bool{}
-	for {
-		s.mu.Lock()
-		children := slices.Clone(s.children)
-		started := slices.Clone(s.started)
-		s.mu.Unlock()
+// drainRun is the bookkeeping of one drain phase: the scopes it took, in
+// discovery order, and where each of them has got to.
+type drainRun struct {
+	owned []drainScope
+	seen  map[*state]bool
+}
 
+type drainScope struct {
+	st      *state
+	settled bool // its phase has ended, which for a descendant is as soon as
+	// its own sweep does
+}
+
+// sweepAll is the body of the first drain. It sweeps the whole subtree
+// repeatedly rather than once, because draining is the one teardown phase
+// during which the scope still resolves: a hook finishing in-flight work may
+// build a service, or open a child scope, for the first time. Those owe a
+// drain too, and it has to happen before anything is marked stopped, or their
+// own hooks would run with nothing left to resolve.
+//
+// Every scope the phase owns is swept on every pass, not just the ones that
+// appeared in it. Sweeping each descendant once was enough for a hook that
+// builds into its own scope and not for one that builds into a scope already
+// visited, which is the same defect one level along. A pass that finds no new
+// work ends the phase.
+//
+// A descendant's phase ends the moment its own sweep does, not when the whole
+// run does. Holding it open until the end would be tidier -- an ancestor's
+// hook can still build into it -- and it deadlocks the case the phase exists
+// for: an HTTP server draining in an outer scope waits for a handler that is
+// stopping its own request scope, and that Stop would be waiting for this run
+// to finish.
+func (r *drainRun) sweepAll(ctx context.Context) error {
+	var errs []error
+	for {
 		progress := false
-		for _, c := range children {
-			if seen[c] {
-				continue
+		// Take, or wait for, the phase of every scope that has appeared under
+		// one this drain owns. The loop reads r.owned as it grows, so a scope
+		// discovered in this pass is descended into in the same pass.
+		for i := 0; i < len(r.owned); i++ {
+			st := r.owned[i].st
+			st.mu.Lock()
+			children := slices.Clone(st.children)
+			st.mu.Unlock()
+			for _, c := range children {
+				if r.seen[c] {
+					continue
+				}
+				r.seen[c] = true
+				progress = true
+				if c.drainOnce.claim(c, nil) {
+					r.owned = append(r.owned, drainScope{st: c})
+				} else if _, finished := c.drainOnce.wait(c, ctx); !finished {
+					errs = append(errs, fmt.Errorf("di: waiting for scope %s to drain: %w", c.name, ctx.Err()))
+				}
 			}
-			seen[c] = true
-			progress = true
-			errs = append(errs, (&Scope{state: c}).drain(ctx))
 		}
-		for _, in := range slices.Backward(started) {
-			ran, err := in.drainIfNeeded(ctx, s.state)
-			progress = progress || ran
-			errs = append(errs, err)
+		// Innermost first, and index 0 -- this scope -- last, which is the
+		// order Stop itself uses.
+		for i := len(r.owned) - 1; i >= 0; i-- {
+			ds := &r.owned[i]
+			ds.st.mu.Lock()
+			started := slices.Clone(ds.st.started)
+			ds.st.mu.Unlock()
+			for _, in := range slices.Backward(started) {
+				ran, err := in.drainIfNeeded(ctx, ds.st)
+				progress = progress || ran
+				errs = append(errs, err)
+			}
+			if i > 0 && !ds.settled {
+				// A descendant's failures are joined into this run's error,
+				// so its waiters need only the release.
+				ds.st.drainOnce.settle(ds.st, nil)
+				ds.settled = true
+			}
 		}
 		// ctx bounds the sweep as well as the hooks, so a hook that keeps
 		// building cannot hold the phase open for ever.
