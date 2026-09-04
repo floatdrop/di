@@ -91,16 +91,27 @@ made through it afterwards would otherwise meet its own finished frame, be
 called a cycle, and have that verdict cached on whatever instance it was
 building.
 
-**Scopes have a stop machine too.** `stopDone` is made by the first `Stop`
-and closed when its teardown finishes; every later or concurrent `Stop` waits
-on it and reports `stopErr`. That wait is what keeps dependency order when a
-child and its parent are stopped at once. The cost is that a hook may not call
-`Stop` on its own scope or an ancestor.
+**Scopes have a stop machine too.** `state.stopOnce` is claimed by the first
+`Stop` and settled when its teardown finishes; every later or concurrent `Stop`
+waits on it and reports its error. That wait is what keeps dependency order
+when a child and its parent are stopped at once. The cost is that a hook may
+not call `Stop` on its own scope or an ancestor.
+
+The `once` type is that pattern by itself -- claim, settle, ctx-bounded wait --
+because the scope has two of them and they were previously two hand-written
+copies that disagreed in ways only a comment recorded. Its fields are guarded
+by the state mutex rather than one of its own, so claiming a phase and
+recording what the claim decided (`stopCtx`, for `Stop`) stay one critical
+section and no third lock joins the ordering rules. The waiter's contract is
+the one thing the two callers still differ on, and it is now visible at the
+call site: `Stop` reports the owner's error, the scope-wide drain drops it,
+because a drain's failures already reach the caller through the `Stop` that
+owns them.
 
 **Draining precedes everything, and it has a machine of its own.** `Stop` is
 drain, then mark stopped, then children, then this scope's instances. Both
-levels of the drain phase are once-with-wait, mirroring `stopDone`:
-`state.drainDone` for the scope, `instance.dr` (`drainNone` → `draining` →
+levels of the drain phase are once-with-wait, mirroring the stop phase:
+`state.drainOnce` for the scope, `instance.dr` (`drainNone` → `draining` →
 `drained`) for one hook. A second `Stop` arriving at either waits instead of
 skipping. An earlier version recorded only that a drain had been *decided*,
 which let a concurrent `Stop` see the flag, walk past a hook still running and

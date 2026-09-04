@@ -683,6 +683,66 @@ func (in *instance) releaseAfterRun(ctx context.Context, owner *state, missed er
 	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: errors.Join(errs...)})
 }
 
+// once is a teardown phase that runs at most once per scope: the first caller
+// to reach it runs it, and every later or concurrent caller waits for that run
+// instead of starting a second. Stop and the scope-wide drain are both this
+// shape, and both need the wait bounded by the waiting caller's own context
+// rather than the owner's.
+//
+// Its fields are guarded by the state's mutex, the one the scope already has,
+// so claiming the phase and recording what that claim decided stay a single
+// critical section. A mutex of its own would buy nothing here and would add a
+// third lock to order against the other two.
+type once struct {
+	done chan struct{} // made by the claimer, closed once its run has finished
+	err  error         // that run's result
+}
+
+// claim reports whether this caller owns the run; the owner must go on to call
+// settle exactly once, and everyone else to call wait. claimed, when non-nil,
+// runs with the mutex still held, in the same critical section that picks the
+// winner: it is for state a waiter has to see set as soon as it can see the
+// phase claimed at all.
+func (o *once) claim(st *state, claimed func()) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if o.done != nil {
+		return false
+	}
+	o.done = make(chan struct{})
+	if claimed != nil {
+		claimed()
+	}
+	return true
+}
+
+// settle publishes the run's result and releases the waiters.
+func (o *once) settle(st *state, err error) {
+	st.mu.Lock()
+	o.err = err
+	st.mu.Unlock()
+	close(o.done)
+}
+
+// wait blocks until the owning run has finished and reports its error. It
+// reports false instead if the caller's own context expires first, which is
+// the one failure that belongs to the waiter rather than to the owner. Only a
+// caller whose claim returned false may wait: an unclaimed phase has no
+// channel to wait on and would block until ctx expires.
+func (o *once) wait(st *state, ctx context.Context) (error, bool) {
+	st.mu.Lock()
+	done := o.done
+	st.mu.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return nil, false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return o.err, true
+}
+
 type state struct {
 	name   string
 	parent *state
@@ -706,8 +766,7 @@ type state struct {
 
 	stopped  atomic.Bool     // set by Stop or a failed Start; resolution then fails with ErrStopped
 	stopCtx  context.Context // the context Stop was called with
-	stopDone chan struct{}   // made by the first Stop, closed when its teardown has finished
-	stopErr  error           // that teardown's result, reported to later Stop calls too
+	stopOnce once            // this scope's teardown; later Stop calls wait for it
 	startCtx context.Context // set by Start; read by Context()
 	running  bool            // set once Start reaches the hook phase; enables late OnStart
 
@@ -715,7 +774,7 @@ type state struct {
 	// same reason: two Stop calls may reach one scope, and the second must
 	// wait for the first scope-wide drain instead of running its own or
 	// skipping past it into teardown.
-	drainDone chan struct{} // made by the first drain, closed when it has finished
+	drainOnce once
 
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{}
@@ -1656,32 +1715,19 @@ func (st *state) claimNext() (*instance, *state) {
 // must not call Stop on its own scope or an ancestor, which would be a wait
 // on itself; call Shutdown, which never blocks.
 func (s *Scope) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	if done := s.stopDone; done != nil {
-		s.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
+	if !s.stopOnce.claim(s.state, func() {
+		if s.stopCtx == nil {
+			s.stopCtx = ctx // the first Stop owns it; a later call must not clobber it
+		}
+	}) {
+		err, finished := s.stopOnce.wait(s.state, ctx)
+		if !finished {
 			return fmt.Errorf("di: waiting for scope %s to stop: %w", s.name, ctx.Err())
 		}
-		s.mu.Lock()
-		err := s.stopErr
-		s.mu.Unlock()
-		return err
+		return err // the owning teardown's result, reported to this call too
 	}
-	done := make(chan struct{})
-	s.stopDone = done
-	if s.stopCtx == nil {
-		s.stopCtx = ctx // the first Stop owns it; a later call must not clobber it
-	}
-	s.mu.Unlock()
-
 	err := s.teardown(ctx)
-
-	s.mu.Lock()
-	s.stopErr = err
-	s.mu.Unlock()
-	close(done)
+	s.stopOnce.settle(s.state, err)
 	return err
 }
 
@@ -1721,26 +1767,18 @@ func (s *Scope) teardown(ctx context.Context) error {
 // without it the second Stop would walk past a drain still in flight and
 // start releasing what those hooks are using.
 func (s *Scope) drain(ctx context.Context) error {
-	s.mu.Lock()
-	if done := s.drainDone; done != nil {
-		s.mu.Unlock()
-		select {
-		case <-done:
-			// Whoever owns this drain reports its failures through the Stop
-			// that owns it, and this Stop either is that one or goes on to
-			// wait for it, so the result is deliberately not joined again
-			// here. Only the failure to wait belongs to this call.
-			return nil
-		case <-ctx.Done():
+	if !s.drainOnce.claim(s.state, nil) {
+		// Whoever owns this drain reports its failures through the Stop that
+		// owns it, and this Stop either is that one or goes on to wait for it,
+		// so the owner's error is deliberately dropped rather than joined
+		// again here. Only the failure to wait belongs to this call.
+		if _, finished := s.drainOnce.wait(s.state, ctx); !finished {
 			return fmt.Errorf("di: waiting for scope %s to drain: %w", s.name, ctx.Err())
 		}
+		return nil
 	}
-	done := make(chan struct{})
-	s.drainDone = done
-	s.mu.Unlock()
-
 	err := s.drainAll(ctx)
-	close(done)
+	s.drainOnce.settle(s.state, err)
 	return err
 }
 
