@@ -2,8 +2,9 @@
 //
 // Run starts the scope, waits for SIGINT/SIGTERM or a Shutdown call, then
 // stops everything in reverse order with a bounded context. The server's
-// OnStop calls http.Server.Shutdown, which stops accepting connections and
-// waits for in-flight requests until the stop context expires.
+// OnDrain calls http.Server.Shutdown, which stops accepting connections and
+// waits for in-flight requests until the stop context expires. Draining runs
+// before anything is torn down, so those requests still have their scopes.
 package main
 
 import (
@@ -52,10 +53,13 @@ func main() {
 			}()
 			return nil
 		}).
-		OnStop(func(ctx context.Context, srv *http.Server) error {
+		// OnDrain runs before anything is stopped, so handlers that are
+		// still running keep their scopes and dependencies.
+		OnDrain(func(ctx context.Context, srv *http.Server) error {
 			log.Println("draining")
 			return srv.Shutdown(ctx) // waits for in-flight requests, bounded by StopTimeout
-		})
+		}).
+		OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Close() })
 
 	// Blocks until Ctrl-C, SIGTERM, or app.Shutdown. A second signal cancels
 	// the stop context so a hung hook cannot keep the process alive.

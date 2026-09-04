@@ -44,16 +44,52 @@ path attached, which is how cycle detection and error paths work.
 **Which state owns an instance.** A singleton lives in the scope that
 registered the binding (`owner`); a `Scoped` instance lives in the scope that
 resolves it (`holder`), so it can see that scope's values; a `Transient` builds
-in the resolving scope and is not tracked at all. `instanceFor` makes this
-choice, and the rest of the pipeline works in terms of `holder`.
+in the resolving scope and is not tracked at all. `resolve` picks the holder
+and the rest of the pipeline works in terms of it.
 
-**The instance phase machine** (`phaseNew` → `Built` → `Starting` →
-`Started`/`Failed` → `Stopped`) is read and written *only* under the owning
-state's mutex. This exists because splitting a start-or-stop decision across
-two critical sections produced several bugs. In particular: `publish` appends
-to the stop list and *then* `startIfRunning` reads `running`, while `Start`
-sets `running` before it drains. That ordering is what guarantees an instance
-is started by exactly one path.
+**The instance phase machine** (`phaseNew` → `Building` → `Built` →
+`Starting` → `Started`/`Failed` → `Stopped`) is read and written *only* under
+the owning state's mutex. This exists because splitting a start-or-stop
+decision across two critical sections produced several bugs. In particular:
+`publish` appends to the stop list and *then* `startIfRunning` reads
+`running`, while `Start` sets `running` before it drains. That ordering is
+what guarantees an instance is started by exactly one path.
+
+`await` is the only way to reach an instance. It claims the build step or
+waits on the holder's `sync.Cond` for whoever did, and it also waits out
+`phaseStarting`, which is what stops a resolution handing back a service
+whose `OnStart` is still running. `settled` says the build step is over and
+`value`/`err` are final; it replaced a `sync.Once`, which could only tell a
+second resolution to carry on, never to wait.
+
+**Two cycle detectors, because one branch cannot see the other.** Within a
+branch, `resolver.onPath` walks the immutable path. Across branches,
+`resolver.wait` searches a wait-for graph under `graphMu` before blocking:
+instances point at the resolution building them, blocked resolutions point at
+what they wait for, and a branch that blocks does so several nodes below the
+one holding the build, so both directions are matched against whole paths
+(`descends`). The check and the edge it adds are one critical section, or two
+branches closing a cycle at once would both decide to wait. Lock order is
+state mutex then `graphMu`, never the reverse.
+
+**The resolution path is immutable.** `resolver` is a linked list node, not a
+slice, because a constructor may resolve from several goroutines and they all
+share the `*Scope` it was handed. A node is identified by binding *and*
+holder, never by key: that is what separates a group member from a plain
+registration of the same type, and one `Scoped` binding across scopes.
+
+**Scopes have a stop machine too.** `stopDone` is made by the first `Stop`
+and closed when its teardown finishes; every later or concurrent `Stop` waits
+on it and reports `stopErr`. That wait is what keeps dependency order when a
+child and its parent are stopped at once. The cost is that a hook may not call
+`Stop` on its own scope or an ancestor.
+
+**Draining precedes everything.** `Stop` is drain, then mark stopped, then
+children, then this scope's instances. `drain` skips a child whose `Stop` has
+already begun, because that `Stop` drained it; without the skip, `OnDrain`
+could run on an instance the child is tearing down. Draining is not otherwise
+ordered against such a child, and does not need to be, since it releases
+nothing.
 
 **`freeze` is transactional.** Registrations queue in `pending` and commit in
 one batch. The batch is validated against *prospective copies* of
@@ -67,6 +103,13 @@ registration, because they are typed on that value. Eagerness belongs to the
 to whichever binding owns the key. `deriveEager` is the single place that
 decides what `Eager` means, and it validates in the same loop so the derived
 set and its rules cannot drift apart.
+
+**A key is served to a whole route, not just to its destination.**
+`binding.used` protects the owner; `markServed` records the key in every scope
+between the resolver and that owner, and does the same for each alias hop.
+Both halves matter: an earlier version marked only the endpoint, and a scope
+in the middle, or one holding an alias's target, could then shadow a key it
+had already handed out.
 
 **Aliases are resolved in `lookup`, not by callers.** `lookup` follows `Bind`
 chains and reports the binding that actually serves a key, never an alias.
@@ -114,14 +157,27 @@ Four layers, each catching a different class:
   of the eager/alias rules. A predictive model can be wrong in the same way as
   the code, so treat it as needing its own scrutiny.
 - `machine_test.go` — random *operation* sequences (register, resolve, start,
-  stop, health) across a root and two children, checked against invariants
-  taken from documented guarantees rather than predicted values. This is the
-  layer that catches error-path and cross-scope bugs.
+  stop, health) across a root, two children and a grandchild, checked against
+  invariants taken from documented guarantees rather than predicted values.
+  This is the layer that catches error-path and cross-scope bugs. Keep the
+  I4 exemptions narrow: exempting every aliased key from value stability,
+  rather than only one whose target is `Transient`, is what hid a scope
+  handing out two live values for one interface.
+- `concurrent_test.go` — the same operations run in parallel lanes under
+  `-race`, in phases (wire, resolve, start, stop). It checks only what
+  survives concurrency: nothing panics unexpectedly, every operation returns,
+  nothing is stopped more often than built, and the stop-order oracle, which
+  is the layer that catches a parent running ahead of a child.
+- `review_test.go` — one test per defect of the September 2026 review.
 - `FuzzMachine` — the same invariants under coverage-guided search. Corpus in
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
 
-Neither generator explores goroutine interleavings; concurrency is covered by
-stress loops under `-race` (see `TestRegressionStartRace`).
+`FuzzMachineConcurrent` is the coverage-guided driver for the concurrent
+oracles; run it with `-race` or it checks almost nothing.
+
+The sequential generators do not explore goroutine interleavings. That is what
+`concurrent_test.go` and the stress loops under `-race` are for (see
+`TestRegressionStartRace`).
 
 ## Repo conventions
 
@@ -134,6 +190,11 @@ stress loops under `-race` (see `TestRegressionStartRace`).
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
+- **Two teardowns may finish after `Stop` returns**: one handed off because a
+  start step was in flight, and one undoing a build that completed after the
+  scope stopped. Both are deliberate. Any ordering oracle has to model them
+  or it will report them as defects; the concurrent driver does it by running
+  every `Start` before any `Stop`, so no start step is ever in flight.
 - **CHANGELOG is enforced.** `.github/workflows/release.yml` fails a tag push
   when `CHANGELOG.md` has no `## [<version>]` section. The public API has been
   stable across tags; verify with `go doc -all` diffed between tags before

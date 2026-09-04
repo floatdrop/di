@@ -9,13 +9,15 @@ package di_test
 // finding them. Instead each sequence is checked against invariants taken
 // from the documented guarantees, which hold whatever the sequence is:
 //
-//	I1  Resolve never panics. Wiring problems are errors; only a rejected
-//	    configuration panics, and only from Register, Get, All or Start.
+//	I1  Resolve never panics, with an error or anything else. Wiring
+//	    problems are errors; only a rejected configuration panics, and only
+//	    from Register, Get, All or Start.
 //	I2  A rejected configuration is rejected identically when the same
 //	    read-only operation is repeated. (Different operations on one scope
 //	    may legitimately be rejected for different reasons, and a resolve
 //	    freezes several scopes, so the check is per operation.)
-//	I3  A stopped scope, and everything under it, resolves to ErrStopped.
+//	I3  A stopped scope, and everything under it, refuses to resolve: an
+//	    operation on it fails, or is rejected, but never succeeds.
 //	I4  A singleton is stable: two successful resolutions of a key from one
 //	    scope return the identical value.
 //	I5  Nothing is stopped more often than it was built.
@@ -48,10 +50,16 @@ type mkI interface{ marker() }
 func (*mk1) marker() {}
 
 const (
-	numKeys   = 4 // mk1, mk2, mk3, mkI
-	ifaceKey  = 3
-	numScopes = 3 // root plus two children
+	numKeys  = 4 // mk1, mk2, mk3, mkI
+	ifaceKey = 3
+	// root, two children and a grandchild. The grandchild is what lets a
+	// scope between a resolver and the owner of a binding shadow a key that
+	// has already been served through it.
+	numScopes = 4
 )
+
+// parentOf[i] is the index of scope i's parent, -1 for the root.
+var parentOf = [numScopes]int{-1, 0, 0, 1}
 
 var keyNames = []string{"mk1", "mk2", "mk3", "mkI"}
 
@@ -122,6 +130,7 @@ type machine struct {
 
 	failedResolve map[string]bool
 	unstable      map[int]bool // keys that need not resolve to a stable value
+	aliased       bool         // mkI has been aliased to *mk1 at some point
 }
 
 // fail reports a violation together with the sequence that produced it.
@@ -154,8 +163,9 @@ func newMachine(t *testing.T, ops []op) *machine {
 			m.stops[id]++
 		}
 	})
-	m.scopes = []*di.Scope{root, root.Child("c1"), root.Child("c2")}
-	m.names = []string{"root", "c1", "c2"}
+	c1 := root.Child("c1")
+	m.scopes = []*di.Scope{root, c1, root.Child("c2"), c1.Child("gc")}
+	m.names = []string{"root", "c1", "c2", "gc"}
 	return m
 }
 
@@ -163,6 +173,7 @@ func newMachine(t *testing.T, ops []op) *machine {
 type outcome struct {
 	value    any
 	err      error
+	panicked bool   // the operation panicked rather than returning
 	rejected string // a configuration rejection, which panics by design
 }
 
@@ -182,7 +193,7 @@ func (m *machine) call(what string, f func() (any, error)) outcome {
 				}
 				out.rejected = v
 			case error:
-				out.err = v
+				out.err, out.panicked = v, true
 			default:
 				m.fail("%s panicked with %T: %v", what, r, r)
 			}
@@ -210,6 +221,9 @@ func (m *machine) step(i int, o op) {
 	case opResolve:
 		f := func() (any, error) { return m.resolve(s, o) }
 		out := m.call(label, f)
+		if out.panicked {
+			m.fail("%s: Resolve panicked with an error instead of returning it: %v", label, out.err)
+		}
 		if out.err == nil && out.rejected == "" {
 			m.checkStable(label, o, out.value)
 		}
@@ -268,10 +282,15 @@ func (m *machine) checkRepeatable(label string, out outcome, again func() (any, 
 	}
 }
 
-// checkStopped enforces I3.
+// checkStopped enforces I3. A resolve from a stopped tree must not succeed:
+// reporting only on the errors it did return would accept the very case the
+// invariant exists to rule out.
 func (m *machine) checkStopped(label string, o op, out outcome) {
-	if !m.stoppedTree(int(o.scope)) || out.err == nil {
+	if !m.stoppedTree(int(o.scope)) || out.rejected != "" {
 		return
+	}
+	if out.err == nil {
+		m.fail("%s: resolving from a stopped scope succeeded", label)
 	}
 	if !errors.Is(out.err, di.ErrStopped) && !errors.Is(out.err, di.ErrNotProvided) && !errors.Is(out.err, di.ErrCycle) {
 		m.fail("%s: resolving from a stopped scope gave %v", label, out.err)
@@ -294,18 +313,49 @@ func (m *machine) checkStable(label string, o op, v any) {
 	}
 }
 
+// markTransient and markAliased maintain the set of keys exempt from I4.
+// The exemption is deliberately narrow: an alias resolves to its target's own
+// instance, so it is only unstable when that target is. Exempting every
+// aliased key instead is what hid a scope handing out two live values for one
+// interface, so the model must not give that case away.
+func (m *machine) markTransient(k int) {
+	m.unstable[k] = true
+	if k == 0 && m.aliased {
+		m.unstable[ifaceKey] = true
+	}
+}
+
+func (m *machine) markAliased() {
+	m.aliased = true
+	if m.unstable[0] {
+		m.unstable[ifaceKey] = true
+	}
+}
+
 func (m *machine) vkey(o op) string { return fmt.Sprintf("s%d/%s", o.scope, keyNames[o.key]) }
 
+// markStopped records that scope i was stopped, along with its descendants.
 func (m *machine) markStopped(i int) {
 	m.stopped[i] = true
-	if i == 0 { // stopping the root stops its children
-		for j := range m.stopped {
-			m.stopped[j] = true
+	for j := range m.stopped {
+		for a := j; a >= 0; a = parentOf[a] {
+			if a == i {
+				m.stopped[j] = true
+				break
+			}
 		}
 	}
 }
 
-func (m *machine) stoppedTree(i int) bool { return m.stopped[i] || m.stopped[0] }
+// stoppedTree reports whether scope i or any ancestor has been stopped.
+func (m *machine) stoppedTree(i int) bool {
+	for a := i; a >= 0; a = parentOf[a] {
+		if m.stopped[a] {
+			return true
+		}
+	}
+	return false
+}
 
 // finish enforces I5 and I6.
 func (m *machine) finish() {
@@ -344,7 +394,7 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 		b = s.Provide(func(*di.Scope) T { return plain() }).Scoped().OnStop(noop)
 	case 3:
 		b = s.Provide(func(*di.Scope) T { return plain() }).Transient()
-		m.unstable[int(o.key)] = true
+		m.markTransient(int(o.key))
 	case 4:
 		b = s.Add(func(*di.Scope) T { return plain() }).OnStart(noop).OnStop(noop)
 	case 6:
@@ -387,9 +437,7 @@ func (m *machine) register(s *di.Scope, o op) {
 			func(sc *di.Scope) *mk3 { return &mk3{dep: sc.Get[*mk1]()} })
 	default:
 		if o.reg == 5 { // only the interface key can be aliased
-			// The alias serves its target, which may be transient, so the
-			// interface key is not required to resolve to a stable value.
-			m.unstable[ifaceKey] = true
+			m.markAliased()
 			bd := s.Bind[mkI, *mk1]()
 			if o.eager {
 				bd.Eager()

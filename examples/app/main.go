@@ -87,7 +87,12 @@ func main() {
 			}()
 			return nil
 		}).
-		OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Shutdown(ctx) })
+		// Draining happens before anything is stopped, so a handler still
+		// in flight keeps its request scope and everything it depends on.
+		// In OnStop this would race the teardown of the very scopes those
+		// handlers are using.
+		OnDrain(func(ctx context.Context, srv *http.Server) error { return srv.Shutdown(ctx) }).
+		OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Close() })
 
 	if err := app.Run(context.Background()); err != nil {
 		log.Fatal(err)
