@@ -76,6 +76,7 @@ const (
 	opStart
 	opStop
 	opHealth
+	opShutdown
 	numOpKinds
 )
 
@@ -84,13 +85,20 @@ type op struct {
 	scope uint8
 	key   uint8
 	reg   uint8 // which registration shape
+	// eager is the registration's Eager flag. On every other kind it is a
+	// spare bit the concurrent driver reads as a variant: a Stop whose
+	// context is far too short for the hooks it will run, which is how the
+	// deadline paths are reached at all.
 	eager bool
 }
 
 func (o op) String() string {
-	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Health"}
+	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Health", "Shutdown"}
 	if o.kind == opRegister {
 		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v)", o.scope, keyNames[o.key], o.reg, o.eager)
+	}
+	if o.kind == opStop && o.eager {
+		return fmt.Sprintf("Stop(s%d, impatient)", o.scope)
 	}
 	return fmt.Sprintf("%s(s%d, %s)", names[o.kind], o.scope, keyNames[o.key])
 }
@@ -265,8 +273,16 @@ func (m *machine) step(i int, o op) {
 
 	case opHealth:
 		m.call(label, func() (any, error) { return nil, s.HealthCheck(context.Background()) })
+
+	case opShutdown:
+		// Sequentially this only records a cause; it is here so the operation
+		// exists in the shared encoding, and because Shutdown is what a hook
+		// must call now that it may not call Stop.
+		m.call(label, func() (any, error) { s.Shutdown(errShutdown); return nil, nil })
 	}
 }
+
+var errShutdown = errors.New("shutdown from the machine")
 
 // checkRepeatable enforces I2. It re-runs the identical operation and
 // requires the same rejection. Only read-only operations are re-run:

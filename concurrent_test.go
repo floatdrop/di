@@ -29,12 +29,25 @@ package di_test
 //	    boundary instead of guessing at it.
 //	C8  One fixed graph, one verdict: two resolutions of the same key from
 //	    the same scope never disagree about a cycle or a missing provider.
+//	C9  Every instance that owes a stop step gets exactly one, by the time
+//	    everything has gone quiet. This is the oracle for a release dropped
+//	    on a path nobody returns from -- a missed deadline, a scope that
+//	    detached -- which C4, counting only excess stops, cannot see.
+//	C10 A resolution begun after its scope's Stop has returned fails. Begun,
+//	    not finished: a resolution already in flight may legitimately return
+//	    a value decided before the scope stopped.
 //
 // C6, C7 and C8 exist because the first version of this driver could not see
 // four of the six defects of the second September 2026 review. Its drain
 // hooks returned nil and touched nothing, so the phase was exercised without
 // being checked; and C1 accepted any panicked error, which is how a false
 // ErrCycle out of Get reads as a legitimate failure.
+//
+// C9 and C10 exist because the third review found two more the same way. The
+// coverage the generators reached was 78% against the suite's 97%, and the
+// whole gap was the lifecycle: no Run hook, no Shutdown, no context expiring
+// mid-Stop, and starts kept strictly before stops. Everything the reviews
+// found lived in that gap. It is closed here.
 
 import (
 	"context"
@@ -185,9 +198,34 @@ type cmachine struct {
 	byName     map[string]*di.Scope   // so a hook can resolve from the scope holding its value
 	childrenOf map[string][]*di.Scope // and from one below it
 
+	// inHook counts the user hooks currently running, so the run can wait for
+	// quiescence before the oracles that only hold once everything the
+	// container still owed has happened. A release deferred past a missed
+	// deadline finishes on a goroutine of its own, after Stop returned --
+	// which is also why this is a counter and not a WaitGroup: such a hook
+	// starts after the run has begun waiting, and a WaitGroup may not have
+	// Add called on a zero counter concurrently with Wait.
+	inHook atomic.Int32
+
+	// impatient records the scopes where a Stop reported a missed deadline.
+	// Both ordering oracles are switched off for those: the releases such a
+	// Stop leaves behind run outside its ordering by design, and an oracle
+	// that cannot tell them apart from a defect must not guess.
+	impatient sync.Map // scope name -> struct{}
+	// stopReturned records the scopes whose Stop has come back, for C10.
+	stopReturned sync.Map // scope name -> struct{}
+
+	// owed holds every instance whose binding declares an OnStop and no
+	// OnStart, so that being built is the whole of owing a release; released
+	// counts the releases that actually ran, per instance. C9 is the two
+	// compared once everything has gone quiet.
+	owed sync.Map // built value -> the name of the scope that owes its release
+
 	mu       sync.Mutex
 	builds   map[string]int
+	starts   map[string]int
 	stops    map[string]int
+	released map[any]int
 	verdicts map[string]map[string]bool // scope/key -> the verdicts resolution gave
 	fails    []string
 }
@@ -195,7 +233,8 @@ type cmachine struct {
 func newCMachine(t *testing.T, ops []op) *cmachine {
 	m := &cmachine{
 		t: t, ops: ops,
-		builds: map[string]int{}, stops: map[string]int{},
+		builds: map[string]int{}, starts: map[string]int{}, stops: map[string]int{},
+		released: map[any]int{},
 		verdicts: map[string]map[string]bool{},
 		order:    newStopOrder(map[string]string{"c1": "root", "c2": "root", "gc": "c1", "request": "root"}),
 		drain:    newDrainWatch(),
@@ -209,6 +248,10 @@ func newCMachine(t *testing.T, ops []op) *cmachine {
 		case di.EventBuild:
 			if ev.Err == nil {
 				m.builds[id]++
+			}
+		case di.EventStart:
+			if ev.Err == nil {
+				m.starts[id]++
 			}
 		case di.EventStop:
 			m.stops[id]++
@@ -240,6 +283,20 @@ func newCMachine(t *testing.T, ops []op) *cmachine {
 func (m *cmachine) builtLate(v any) bool {
 	_, ok := m.late.Load(v)
 	return ok
+}
+
+// unordered reports whether the teardown of anything in scope is outside the
+// ordering the oracles check, because a Stop there, or above it, reported a
+// missed deadline. Such a Stop finishes its releases on goroutines of its
+// own, after it has returned; that is documented, and an ordering oracle that
+// modelled it would be modelling the clock.
+func (m *cmachine) unordered(scope string) bool {
+	for s := scope; s != ""; s = m.order.parent[s] {
+		if _, ok := m.impatient.Load(s); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // holderOf names the scope that built v, defaulting to the root so a value
@@ -297,11 +354,16 @@ func isDocumentedFailure(err error) bool {
 // every hook has to cooperate with the stop-order oracle.
 func (m *cmachine) register(s *di.Scope, o op) {
 	stop := func(_ context.Context, v any) error {
+		m.inHook.Add(1)
+		defer m.inHook.Add(-1)
 		name := m.holderOf(v)
-		m.drain.stopping(v, name) // C6
-		if m.builtLate(v) {
-			return nil // C3 cannot order a release that no teardown issued
+		m.mu.Lock()
+		m.released[v]++ // C9: counted before any check can bail out
+		m.mu.Unlock()
+		if m.builtLate(v) || m.unordered(name) {
+			return nil // neither is a release any Stop issued in order
 		}
+		m.drain.stopping(v, name) // C6
 		m.order.enter(name)
 		time.Sleep(time.Millisecond) // widen the window a bad ordering needs
 		m.order.exit(name)
@@ -319,8 +381,26 @@ func (m *cmachine) register(s *di.Scope, o op) {
 	}
 }
 
+// errWorker is a Run hook failing of its own accord rather than because it
+// was cancelled, which is what makes the container hand it to Shutdown. A
+// worker that only ever returns nil leaves that whole path unreached.
+var errWorker = errors.New("worker failed")
+
 func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) error, plain func() T, dep func(*di.Scope) T) {
 	down := func(ctx context.Context, v T) error { return stop(ctx, v) }
+	// Every shape gets a worker, so that any instance the sequence starts is
+	// one Stop has to cancel and wait for. Only the shapes with a worker
+	// reach the release that finishes after a missed deadline, and while one
+	// shape in six had one, the sequence had to put that shape, a Start and
+	// an impatient Stop together before anything was exercised at all.
+	work := func(ctx context.Context, _ T) error {
+		<-ctx.Done()
+		time.Sleep(2 * time.Millisecond) // outlast an impatient Stop
+		if o.reg%3 == 0 {
+			return errWorker // its own failure, not the cancellation
+		}
+		return nil
+	}
 	// owe records that this instance's binding declares OnDrain, which is
 	// what makes C6 hold it to one.
 	owe := func(sc *di.Scope, v T) T {
@@ -332,32 +412,50 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 	// phase promises still works (C7), and resolves its own key from a scope
 	// below that one, which is what can put a late instance somewhere the
 	// sweep has already been.
-	drainHook := func(_ context.Context, v T) error {
+	drainHook := func(ctx context.Context, v T) error {
+		m.inHook.Add(1)
+		defer m.inHook.Add(-1)
 		m.drain.begin(any(v))
 		holder := m.holderOf(any(v))
 		m.resolveDuringDrain(holder)
 		m.buildIntoChild(holder, o.key)
-		time.Sleep(time.Millisecond) // widen the window a bad ordering needs
+		time.Sleep(2 * time.Millisecond) // widen the window a bad ordering needs
 		m.drain.end(any(v))
 		return nil
 	}
 	// own records which scope the constructor ran in, which for every
-	// lifetime is the scope that holds the instance and will stop it.
+	// lifetime is the scope that holds the instance and will stop it, and
+	// what that instance owes: for a shape with no OnStart, "built" and
+	// "owes a release" are the same thing, so C9 holds it to exactly one
+	// stop step from here. The shape that has one records itself in the
+	// hook, once the start step has actually succeeded.
 	own := func(sc *di.Scope, v T) T {
-		m.owner.Store(any(v), sc.Get[scopeName]().name)
+		name := sc.Get[scopeName]().name
+		m.owner.Store(any(v), name)
 		if m.tearing.Load() {
 			m.late.Store(any(v), true)
+		}
+		if o.reg%6 != 4 {
+			m.owed.Store(any(v), name)
 		}
 		return v
 	}
 	build := func(sc *di.Scope) T { return own(sc, plain()) }
 	switch o.reg % 6 {
 	case 0:
-		s.Provide(build).OnStop(down)
+		s.Provide(build).Run(work).OnStop(down)
 	case 1:
-		s.Provide(build).Scoped().OnStop(down)
+		s.Provide(build).Scoped().Run(work).OnStop(down)
 	case 2:
-		s.Provide(func(sc *di.Scope) T { return own(sc, dep(sc)) }).OnStop(down)
+		s.Provide(func(sc *di.Scope) T { return own(sc, dep(sc)) }).
+			Run(work).
+			OnStop(func(ctx context.Context, v T) error {
+				// Slow enough that an impatient Stop misses its deadline
+				// here, which is the only way this driver reaches the
+				// release that finishes after Stop has returned.
+				time.Sleep(2 * time.Millisecond)
+				return down(ctx, v)
+			})
 	case 3:
 		// OnDrain stays out of the stop-order oracle, because draining is not
 		// ordered against a concurrently stopping sibling: it releases
@@ -369,11 +467,20 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// survived this driver.
 		s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).
 			OnDrain(drainHook).
-			Run(func(ctx context.Context, _ T) error { <-ctx.Done(); return nil }).
+			Run(work).
 			OnStop(down)
 	case 4:
+		// The one shape with an OnStart, so its stop step is owed only when
+		// the start step succeeded. Its Run hook is what puts a worker under
+		// a Stop that has to cancel it and wait.
 		s.Provide(build).
-			OnStart(func(context.Context, T) error { return nil }).
+			OnStart(func(_ context.Context, v T) error {
+				// The one shape whose release is owed only once the start
+				// step has succeeded, so the hook itself is what tells C9.
+				m.owed.Store(any(v), m.holderOf(any(v)))
+				return nil
+			}).
+			Run(work).
 			OnStop(down)
 	default:
 		// Scoped *and* draining. Without this shape the driver could not put
@@ -383,6 +490,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// drain defect was unreachable for want of one registration.
 		s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).Scoped().
 			OnDrain(drainHook).
+			Run(work).
 			OnStop(down)
 	}
 }
@@ -430,6 +538,10 @@ func (m *cmachine) buildIntoChild(name string, key uint8) {
 }
 
 func (m *cmachine) resolve(s *di.Scope, o op) {
+	// C10 is decided here, before the call: a resolution already in flight
+	// may return a value the container settled on before the scope stopped,
+	// but one begun afterwards has nothing legitimate to hand back.
+	dead := m.stoppedBefore(m.names[o.scope])
 	var err error
 	switch o.key {
 	case 0:
@@ -441,7 +553,21 @@ func (m *cmachine) resolve(s *di.Scope, o op) {
 	default:
 		_, err = s.Resolve[mkI]()
 	}
+	if dead && err == nil {
+		m.fail("%s resolved from %s after its Stop had returned", keyNames[o.key], m.names[o.scope])
+	}
 	m.verdict(o, err)
+}
+
+// stoppedBefore reports whether a Stop of this scope, or of one above it, had
+// already returned when the caller looked.
+func (m *cmachine) stoppedBefore(scope string) bool {
+	for s := scope; s != ""; s = m.order.parent[s] {
+		if _, ok := m.stopReturned.Load(s); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // verdict records how one key resolved, for C8. Every registration happens
@@ -482,9 +608,33 @@ func (m *cmachine) step(i int, o op) {
 		case opStart:
 			_ = s.Start(context.Background())
 		case opStop:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// An impatient Stop cannot finish the hooks it starts, which is
+			// how the driver reaches the release that outlives its caller.
+			// The scope is marked before the call, not after: the releases
+			// that Stop leaves behind may begin while it is still running.
+			d := 5 * time.Second
+			if o.eager {
+				// Two flavours, because they reach different code. A context
+				// that has already expired makes every wait inside Stop take
+				// its deadline branch, which is the only way this driver
+				// reaches the release that finishes after Stop returned. A
+				// very short one races the hooks instead.
+				d = time.Millisecond
+				if o.key%2 == 0 {
+					d = 0
+				}
+				m.impatient.Store(m.names[o.scope], struct{}{})
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), d)
 			defer cancel()
-			_ = s.Stop(ctx)
+			err := s.Stop(ctx)
+			m.stopReturned.Store(m.names[o.scope], struct{}{})
+			if err != nil && !o.eager && !isDocumentedFailure(err) &&
+				!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errWorker) {
+				m.fail("%s: Stop reported an undocumented failure: %v", label, err)
+			}
+		case opShutdown:
+			s.Shutdown(errShutdown)
 		case opHealth:
 			_ = s.HealthCheck(context.Background())
 		default:
@@ -508,7 +658,7 @@ func (m *cmachine) run() {
 		switch o.kind {
 		case opRegister:
 			wired = append(wired, o)
-		case opStart, opHealth:
+		case opStart, opHealth, opShutdown:
 			up = append(up, o)
 		case opStop:
 			down = append(down, o)
@@ -520,31 +670,78 @@ func (m *cmachine) run() {
 		m.step(i, o)
 	}
 
-	// Stops go in their own phase, after the starts. A start step that is
-	// still in flight when Stop arrives is handed to the goroutine running
-	// it and may finish just after Stop returns, which is documented and
-	// deliberate but is indistinguishable, from outside, from a parent
-	// running ahead of its child. Keeping the two apart lets C3 be checked
-	// without an exemption that would also excuse the real defect. Start
-	// racing Stop has its own regression tests.
+	// Starts and stops now run in one phase, overlapping. They were kept
+	// apart while a start step in flight was handed to the goroutine running
+	// it: that teardown finished after Stop returned and was, from outside,
+	// indistinguishable from a parent running ahead of its child. Stop waits
+	// for the step now, so the ordering it promises holds even when the two
+	// race, and this is the interleaving three reviews' worth of defects
+	// lived in.
 	//
 	// Every scope is stopped at the end anyway, so a sequence that generated
-	// no Stop still gets one overlapping pair to check.
+	// no Stop still gets one overlapping pair to check. The child's is the
+	// impatient flavour: a Stop that runs out of context while an ancestor's
+	// sweep is inside a drain hook of one of its instances is the shape that
+	// defers a release, and waiting for a random sequence to produce both
+	// halves left that path unreached.
 	if len(down) == 0 {
-		down = []op{{kind: opStop, scope: 1}, {kind: opStop, scope: 0}}
+		down = []op{{kind: opStop, scope: 1, eager: true, key: 1}, {kind: opStop, scope: 0}}
 	}
 
-	for _, phase := range [][]op{warm, up} {
-		m.parallel(phase)
-	}
+	m.parallel(warm)
 	m.tearing.Store(true)
-	m.parallel(down)
+	m.parallel(append(up, down...))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	m.call("final Stop", func() { _ = m.scopes[0].Stop(ctx) })
+	for _, name := range m.names {
+		m.stopReturned.Store(name, struct{}{})
+	}
 
+	// C9 and C4 only hold once what the container still owed has happened: a
+	// release whose Stop ran out of context finishes on a goroutine of its
+	// own, afterwards. Waiting for the hooks is what makes "afterwards"
+	// something the oracles can stand on.
+	m.settle()
 	m.check()
+}
+
+// settle waits for the container to go quiet: every hook returned, and every
+// release it still owed has happened.
+//
+// The second half cannot be a WaitGroup. A release deferred past a missed
+// deadline is issued by a goroutine that first waits for the Run hook to
+// return, so between that hook finishing and the release starting there is a
+// moment when no hook is running and the work is still owed. Polling for the
+// owed set to empty is what closes that gap, and it keeps C9 to the property
+// that actually holds -- every owed release happens *eventually* -- rather
+// than to a deadline of the driver's own invention. A release that never
+// comes still fails, just after this waits for it.
+func (m *cmachine) settle() {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if m.inHook.Load() == 0 && m.owedButUnreleased() == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			return // C9 reports what is still owed, with the sequence
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func (m *cmachine) owedButUnreleased() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	m.owed.Range(func(v, _ any) bool {
+		if m.released[v] == 0 {
+			n++
+		}
+		return true
+	})
+	return n
 }
 
 // parallel runs one phase's operations in lanes released together, so they
@@ -590,6 +787,17 @@ func (m *cmachine) check() {
 			m.fails = append(m.fails, fmt.Sprintf("%s: stopped %d times but built %d", id, n, m.builds[id]))
 		}
 	}
+	m.owed.Range(func(v, scope any) bool { // C9
+		switch n := m.released[v]; {
+		case n == 0:
+			m.fails = append(m.fails, fmt.Sprintf(
+				"an instance held by %s owed a stop step and never got one", scope))
+		case n > 1:
+			m.fails = append(m.fails, fmt.Sprintf(
+				"an instance held by %s was released %d times", scope, n))
+		}
+		return true
+	})
 	for id, seen := range m.verdicts { // C8
 		if len(seen) > 1 {
 			m.fails = append(m.fails, fmt.Sprintf("%s resolved to %s in one run", id, strings.Join(sortedKeys(seen), " and to ")))
@@ -648,6 +856,61 @@ func TestMachineConcurrentSeeds(t *testing.T) {
 		t.Run(fmt.Sprintf("seed%d", i), func(t *testing.T) {
 			for range 20 {
 				newCMachine(t, decode(data)).run()
+				if t.Failed() {
+					return
+				}
+			}
+		})
+	}
+}
+
+// The shapes that need saying outright. A byte seed is a blunt instrument for
+// reaching a particular interleaving -- it has to survive four modulos -- and
+// the coverage map after the third review showed which paths no random
+// sequence was reaching at all. These build the operations directly, and run
+// them through the same driver, so every oracle is live rather than only the
+// assertions a targeted test happens to make.
+func TestMachineConcurrentShapes(t *testing.T) {
+	shapes := []struct {
+		name string
+		ops  []op
+	}{{
+		// A Scoped, draining instance held by a child, with the parent's
+		// sweep inside its drain hook as the child's own Stop runs out of
+		// context. That is the release stopIfNeeded defers to a goroutine of
+		// its own, and the one the third review found dropped.
+		name: "impatient child Stop under the parent's drain",
+		ops: []op{
+			{kind: opRegister, scope: 0, key: 0, reg: 5},
+			{kind: opResolve, scope: 1, key: 0},
+			{kind: opStop, scope: 1, key: 0, eager: true},
+			{kind: opStop, scope: 0},
+		},
+	}, {
+		// The same, one level deeper, so the sweep that owns the phase is two
+		// scopes above the one that gives up on it.
+		name: "impatient grandchild Stop under the root's drain",
+		ops: []op{
+			{kind: opRegister, scope: 0, key: 1, reg: 5},
+			{kind: opResolve, scope: 3, key: 1},
+			{kind: opStop, scope: 3, key: 0, eager: true},
+			{kind: opStop, scope: 0},
+		},
+	}, {
+		// A started worker cancelled by a Stop that cannot wait for it, which
+		// is the release that follows the hook's own return.
+		name: "impatient Stop of a running worker",
+		ops: []op{
+			{kind: opRegister, scope: 0, key: 2, reg: 4},
+			{kind: opResolve, scope: 0, key: 2},
+			{kind: opStart, scope: 0},
+			{kind: opStop, scope: 0, key: 0, eager: true},
+		},
+	}}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			for range 40 {
+				newCMachine(t, sh.ops).run()
 				if t.Failed() {
 					return
 				}
@@ -770,6 +1033,96 @@ func TestConcurrentCycleAlwaysReports(t *testing.T) {
 			if err == nil {
 				t.Fatalf("resolution %d returned a value from a cyclic graph", i)
 			}
+		}
+	}
+}
+
+// A Stop whose context is already spent still owes every release, and the
+// coverage map says a random sequence reaches this shape rarely: the drain of
+// one instance has to be running, under another Stop, exactly as an impatient
+// Stop of the scope holding it arrives. That is the wait stopIfNeeded gives
+// up on and hands to a goroutine of its own, and the release it defers is the
+// one the third review found dropped.
+func TestConcurrentImpatientStopStillReleases(t *testing.T) {
+	for range 50 {
+		inDrain := make(chan struct{})
+		release := make(chan struct{})
+		stopped := make(chan struct{})
+
+		root := di.New()
+		child := root.Child("child")
+		root.Provide(func(*di.Scope) *Repo { return &Repo{} }).Scoped().
+			OnDrain(func(context.Context, *Repo) error {
+				select {
+				case <-inDrain:
+				default:
+					close(inDrain)
+				}
+				<-release
+				return nil
+			}).
+			OnStop(func(context.Context, *Repo) error { close(stopped); return nil })
+		if _, err := child.Resolve[*Repo](); err != nil {
+			t.Fatal(err)
+		}
+
+		rootDone := make(chan error, 1)
+		go func() { rootDone <- root.Stop(context.Background()) }()
+		<-inDrain
+
+		spent, cancel := context.WithTimeout(context.Background(), 0)
+		if err := child.Stop(spent); err == nil {
+			t.Fatal("a Stop with a spent context reported success")
+		}
+		cancel()
+		select {
+		case <-stopped:
+			t.Fatal("the release ran while the drain hook still held the value")
+		default:
+		}
+
+		close(release)
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the release the impatient Stop deferred never happened")
+		}
+		if err := <-rootDone; err != nil {
+			t.Fatalf("root.Stop: %v", err)
+		}
+	}
+}
+
+// The drain phase waits for a start step in flight rather than stepping
+// around it. An instance still starting when the sweep reaches it owes a
+// drain as soon as it has started, and leaving it undecided for a later pass
+// meant a step that outlasted the phase was never drained at all.
+func TestConcurrentDrainWaitsForAnInFlightStartStep(t *testing.T) {
+	for range 50 {
+		starting := make(chan struct{})
+		release := make(chan struct{})
+		var drained, stoppedAfterDrain atomic.Bool
+
+		root := di.New()
+		root.Provide(func(*di.Scope) *DB { return &DB{} }).
+			OnStart(func(context.Context, *DB) error { close(starting); <-release; return nil }).
+			OnDrain(func(context.Context, *DB) error { drained.Store(true); return nil }).
+			OnStop(func(context.Context, *DB) error { stoppedAfterDrain.Store(drained.Load()); return nil })
+		if err := root.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		go func() { _, _ = root.Resolve[*DB]() }()
+		<-starting
+
+		go func() { time.Sleep(2 * time.Millisecond); close(release) }()
+		if err := root.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		if !drained.Load() {
+			t.Fatal("an instance whose start step was in flight was never drained")
+		}
+		if !stoppedAfterDrain.Load() {
+			t.Fatal("OnStop ran before OnDrain")
 		}
 	}
 }

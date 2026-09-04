@@ -34,6 +34,11 @@ jobs:
           go run ./examples/scopes
       - name: test
         run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: what only the hand-written tests reach
+        run: |
+          go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=generators.out .
+          go test -count=1 -coverprofile=everything.out .
+          go run scripts/generatorgap.go -floor 80 generators.out everything.out
       - name: benchmarks compile and run
         working-directory: benchmarks
         run: |

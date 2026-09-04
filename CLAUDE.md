@@ -18,6 +18,10 @@ test -z "$(gofmt -l .)"                       # formatting gate
 go run github.com/campoy/embedmd@v1.0.0 -d README.md   # README in sync?
 go run github.com/campoy/embedmd@v1.0.0 -w README.md   # re-embed after editing examples/
 cd benchmarks && go test -bench . -benchmem   # separate module, see below
+
+go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
+go test -count=1 -coverprofile=all.out .
+go run scripts/generatorgap.go -floor 80 gen.out all.out   # what only hand-written tests reach
 ```
 
 Run the full gate as a single `&&` chain before committing, the same way CI
@@ -342,14 +346,30 @@ Four layers, each catching a different class:
   rather than only one whose target is `Transient`, is what hid a scope
   handing out two live values for one interface.
 - `concurrent_test.go` — the same operations run in parallel lanes under
-  `-race`, in phases (wire, resolve, start, stop). It checks only what
+  `-race`, in two phases (wire, then everything else). It checks only what
   survives concurrency: nothing panics unexpectedly, every operation returns,
   nothing is stopped more often than built, and the stop-order oracle, which
-  is the layer that catches a parent running ahead of a child. Three more
-  oracles cover the drain phase and the class of defect C1 cannot see: no stop
-  hook of an instance begins inside or before that instance's drain hook (C6),
-  a drain hook can still resolve (C7), and one fixed graph gives one verdict,
-  so two resolutions of a key never disagree about a cycle (C8).
+  is the layer that catches a parent running ahead of a child. Five more
+  oracles cover the drain phase and the classes C1 cannot see: no stop hook of
+  an instance begins inside or before that instance's drain hook (C6), a drain
+  hook can still resolve (C7), one fixed graph gives one verdict, so two
+  resolutions of a key never disagree about a cycle (C8), every instance that
+  owes a stop step gets exactly one by quiescence (C9), and a resolution
+  *begun* after its scope's Stop returned fails (C10).
+
+  C9 is the one that needed a definition of quiescence, since a release
+  deferred past a missed deadline lands after every Stop has returned:
+  `settle` polls until no hook is running and nothing owed is unreleased.
+  Starts and stops share one phase now that `Stop` waits for a start step;
+  keeping them apart was a workaround for the handoff.
+
+  `TestMachineConcurrentShapes` builds op sequences directly rather than from
+  bytes. A byte seed has to survive four modulos to reach a particular
+  interleaving, and the three shapes there -- an impatient `Stop` under an
+  ancestor's drain, the same a level deeper, and an impatient `Stop` of a
+  running worker -- are what the coverage gap said no random sequence was
+  reaching. Both were checked by mutation: delete either deferred release in
+  `di.go` and C9 fails.
 - The three September 2026 reviews are the source of most of those tests: the
   first found eleven defects plus a gap it did not count, the second six plus
   the `Run`-hook overlap and then two the tightened driver found on its own,
@@ -377,6 +397,10 @@ Four layers, each catching a different class:
   generator before believing the code.
 - `FuzzMachine` — the same invariants under coverage-guided search. Corpus in
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
+- `scripts/generatorgap.go` — the map of what only the hand-written tests
+  reach, which is the map of where the next review will dig: every defect the
+  three September 2026 reviews found lived on such a line. CI runs it with a
+  floor of 80% generator coverage. When the floor moves, move it up.
 
 `FuzzMachineConcurrent` is the coverage-guided driver for the concurrent
 oracles; run it with `-race` or it checks almost nothing.
