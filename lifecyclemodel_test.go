@@ -48,15 +48,28 @@ import (
 	"strings"
 )
 
-// machineStart marks the context the machine starts scopes with, so that
-// "was Start ever called on this scope or an ancestor" can be read back off
-// Scope.Context, which is what that method reports. The model observes this
-// one fact rather than predicting it: whether a Start that was rejected had
-// already recorded its context depends on which panic came first, and that is
-// not something the package promises.
+// The machine starts each scope with a context naming that scope, so both
+// halves of "which Start governs this scope" can be read back off
+// Scope.Context: that it was started at all, and which scope's Start it was.
+// The model observes this rather than predicting it, because whether a
+// rejected Start had already recorded its context depends on which panic came
+// first, which the package does not promise -- and because the answer changes
+// while a Start is running, which is the window an eager build happens in.
 type machineStartKey struct{}
 
-var machineStartCtx = context.WithValue(context.Background(), machineStartKey{}, true)
+func machineStartCtx(scope int) context.Context {
+	return context.WithValue(context.Background(), machineStartKey{}, scope)
+}
+
+// governedBy names the scope whose Start this one answers to: the nearest
+// scope, itself included, that Start has been called on.
+func (l *lifecycle) governedBy(scope int) (int, bool) {
+	v := l.m.scopes[scope].Context().Value(machineStartKey{})
+	if v == nil {
+		return 0, false
+	}
+	return v.(int), true
+}
 
 type hookSet struct{ start, drain, stop bool }
 
@@ -128,20 +141,27 @@ func under(a, b int) bool {
 // which is what makes an OnStop a paired teardown rather than a plain
 // destructor.
 func (l *lifecycle) everStarted(scope int) bool {
-	return l.m.scopes[scope].Context().Value(machineStartKey{}) != nil
+	_, ok := l.governedBy(scope)
+	return ok
 }
 
 // running reports whether the scope's Start has passed its hook phase, which
 // is when an instance built later starts as part of being built. A Start that
 // returned nil is past it by definition, and that is the only case the model
 // claims anything about.
+// running reports whether the Start that governs this scope has passed its
+// hook phase, which is when an instance built later starts as part of being
+// built. The scope that governs is the nearest one Start was called on, and
+// that becomes the scope itself the moment its own Start records its context
+// -- before it builds its eager bindings. An eager build during that window
+// does not start, because that Start has not reached its hook phase yet; it
+// starts in the phase that follows, if the call gets there. Walking to the
+// nearest *finished* Start instead answered for an ancestor that was already
+// running, and predicted a start step for an instance whose own scope's Start
+// went on to fail.
 func (l *lifecycle) running(scope int) bool {
-	for s := scope; s >= 0; s = parentOf[s] {
-		if l.phase[s] != scopeNew {
-			return l.phase[s] == scopeStarted
-		}
-	}
-	return false
+	s, ok := l.governedBy(scope)
+	return ok && l.phase[s] == scopeStarted
 }
 
 // built is called by every constructor the machine registers, with the scope

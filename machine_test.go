@@ -281,7 +281,7 @@ func (m *machine) step(i int, o op) {
 		m.checkRepeatable(label, m.call(label, f), f)
 
 	case opStart:
-		out := m.call(label, func() (any, error) { return nil, s.Start(machineStartCtx) })
+		out := m.call(label, func() (any, error) { return nil, s.Start(machineStartCtx(int(o.scope))) })
 		if out.rejected == "" {
 			m.lc.started(int(o.scope), out.err)
 		}
