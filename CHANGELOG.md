@@ -31,6 +31,33 @@ below says plainly whether an upgrade can break a caller.
   work. This is the upgrade note: if a start hook stops its own scope, replace
   it with `Shutdown`.
 
+### Testing
+
+Three reviews in a row found six or so defects each, all of them in the
+concurrent lifecycle, and none of them found by the generators. Measuring why
+gave a number: the generators reached 78% of statements against the suite's
+97%, and the whole gap was the lifecycle -- no `Run` hook, no `Shutdown`, no
+context expiring inside `Stop`, and every `Start` kept before every `Stop`.
+Every defect the reviews found lived in that gap.
+
+- The concurrent driver has all four now, and two new oracles: every instance
+  that owes a stop step gets exactly one by quiescence, and a resolution begun
+  after its scope's `Stop` returned fails. Generator coverage is 82.5%, and
+  `scripts/generatorgap.go` prints what only the hand-written tests reach --
+  the map of where the next review will dig. CI fails below 80%.
+- The instance lifecycle has a model (`lifecyclemodel_test.go`). Registration
+  is still checked against invariants rather than predictions, for the reason
+  the tests have always given; what happens to an instance once it exists is a
+  small documented state machine, and predicting it is what catches a hook
+  that should have run and did not.
+- The interleaving is an input (`scheduler_test.go`): hooks and operations
+  park at scheduling points and a seed decides who goes next.
+
+Each of these was mutation-tested rather than trusted. That is also how the
+one defect in the *oracles* turned up: an exemption written for the ordering
+oracle had switched off the drain/stop overlap check for exactly the shape it
+exists for.
+
 
 Fixes for the six defects of the third September 2026 review. Every one of
 them is an interaction between two things that are each correct alone: two
