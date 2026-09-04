@@ -386,6 +386,17 @@ Four layers, each catching a different class:
   Starts and stops share one phase now that `Stop` waits for a start step;
   keeping them apart was a workaround for the handoff.
 
+  `scheduler_test.go` makes the interleaving an input. Every hook and every
+  operation parks at a scheduling point, and a seed decides which parked
+  goroutine goes next, so `TestMachineScheduled` replays one sequence under
+  many orderings with every oracle live. It explores rather than verifies: a
+  released goroutine can block inside the container where no test can see it,
+  and the next release then happens on a timer, so two runs of a seed can
+  still differ. The loop waits ~200µs for goroutines to gather before it
+  chooses, because releasing each one as it arrives leaves nothing to decide
+  and the seed decides nothing -- that single change took a sample sequence
+  from two distinct schedules across twelve seeds to six.
+
   `TestMachineConcurrentShapes` builds op sequences directly rather than from
   bytes. A byte seed has to survive four modulos to reach a particular
   interleaving, and the three shapes there -- an impatient `Stop` under an
@@ -403,6 +414,14 @@ Four layers, each catching a different class:
   made in a constructor starting a fresh path. No generator reaches any of
   the third review's six, which is the same lesson as the second: they need
   shapes the driver does not build.
+
+  The exemptions these oracles need are the most dangerous part of them. C3
+  cannot order a release that a missed deadline deferred, so it is switched
+  off for scopes where a `Stop` reported one -- and switching C6 off with it,
+  which looked like the same exemption, silently disabled the drain/stop
+  overlap check for the one shape that needs it. C6 holds however impatient
+  the `Stop` was: a missed deadline defers a release, it never runs one early.
+  Mutation-test an exemption before believing it.
 
   Every defect in both reviews lived in a gap the generators could not see,
   and closing those gaps found a seventh. Two things had been missing, both

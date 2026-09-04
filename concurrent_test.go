@@ -215,6 +215,10 @@ type cmachine struct {
 	// stopReturned records the scopes whose Stop has come back, for C10.
 	stopReturned sync.Map // scope name -> struct{}
 
+	// sched, when set, decides the order the hooks and operations run in.
+	// Nil is the ordinary driver, where the Go scheduler decides.
+	sched *scheduler
+
 	// owed holds every instance whose binding declares an OnStop and no
 	// OnStart, so that being built is the whole of owing a release; released
 	// counts the releases that actually ran, per instance. C9 is the two
@@ -357,13 +361,22 @@ func (m *cmachine) register(s *di.Scope, o op) {
 		m.inHook.Add(1)
 		defer m.inHook.Add(-1)
 		name := m.holderOf(v)
+		m.sched.pause("OnStop in " + name)
+		defer m.sched.pause("OnStop returns in " + name)
 		m.mu.Lock()
 		m.released[v]++ // C9: counted before any check can bail out
 		m.mu.Unlock()
+		// C6 holds however impatient the Stop was. A missed deadline defers
+		// a release; it never runs one early, and the release still waits
+		// for the drain hook that holds the value. Exempting it here along
+		// with the scope ordering, which a deferred release really is
+		// outside of, switched this check off for the one shape that needs
+		// it: an ancestor's sweep inside the hook as the holder's own Stop
+		// gives up on waiting.
+		m.drain.stopping(v, name)
 		if m.builtLate(v) || m.unordered(name) {
-			return nil // neither is a release any Stop issued in order
+			return nil // C3 cannot order a release no Stop issued in order
 		}
-		m.drain.stopping(v, name) // C6
 		m.order.enter(name)
 		time.Sleep(time.Millisecond) // widen the window a bad ordering needs
 		m.order.exit(name)
@@ -395,6 +408,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 	// an impatient Stop together before anything was exercised at all.
 	work := func(ctx context.Context, _ T) error {
 		<-ctx.Done()
+		m.sched.pause("worker cancelled")
 		time.Sleep(2 * time.Millisecond) // outlast an impatient Stop
 		if o.reg%3 == 0 {
 			return errWorker // its own failure, not the cancellation
@@ -417,6 +431,8 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		defer m.inHook.Add(-1)
 		m.drain.begin(any(v))
 		holder := m.holderOf(any(v))
+		m.sched.pause("OnDrain in " + holder)
+		defer m.sched.pause("OnDrain returns in " + holder)
 		m.resolveDuringDrain(holder)
 		m.buildIntoChild(holder, o.key)
 		time.Sleep(2 * time.Millisecond) // widen the window a bad ordering needs
@@ -601,6 +617,7 @@ func (m *cmachine) verdict(o op, err error) {
 func (m *cmachine) step(i int, o op) {
 	s := m.scopes[o.scope]
 	label := fmt.Sprintf("op %d %v", i, o)
+	m.sched.pause(label)
 	m.call(label, func() {
 		switch o.kind {
 		case opRegister:
@@ -703,6 +720,10 @@ func (m *cmachine) run() {
 	// release whose Stop ran out of context finishes on a goroutine of its
 	// own, afterwards. Waiting for the hooks is what makes "afterwards"
 	// something the oracles can stand on.
+	// Nothing may be parked once the operations are done: the releases a
+	// missed deadline deferred still have to run, and the oracles are about
+	// to read what they did.
+	m.sched.close()
 	m.settle()
 	m.check()
 }
@@ -804,7 +825,7 @@ func (m *cmachine) check() {
 		}
 	}
 	if len(m.fails) > 0 {
-		m.t.Fatalf("%s\n  sequence: %v", strings.Join(m.fails, "\n  "), m.ops)
+		m.t.Fatalf("%s\n  sequence: %v\n  %s", strings.Join(m.fails, "\n  "), m.ops, m.sched.history())
 	}
 }
 
@@ -913,6 +934,57 @@ func TestMachineConcurrentShapes(t *testing.T) {
 				newCMachine(t, sh.ops).run()
 				if t.Failed() {
 					return
+				}
+			}
+		})
+	}
+}
+
+// TestMachineScheduled runs the driver with the interleaving as an input
+// rather than as a matter of luck. Each sequence is replayed under a series
+// of seeds, and every oracle is live throughout: what changes is only which
+// parked goroutine goes next.
+//
+// The shapes are the ones whose orderings matter -- two Stops meeting at one
+// scope, an impatient Stop under an ancestor's drain, a worker being
+// cancelled while its scope is torn down -- because a schedule is only worth
+// exploring where there is something to order.
+func TestMachineScheduled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scheduled sweep")
+	}
+	shapes := [][]op{{
+		{kind: opRegister, scope: 0, key: 0, reg: 5},
+		{kind: opRegister, scope: 1, key: 1, reg: 3},
+		{kind: opResolve, scope: 3, key: 0},
+		{kind: opResolve, scope: 1, key: 1},
+		{kind: opStop, scope: 1},
+		{kind: opStop, scope: 0},
+	}, {
+		{kind: opRegister, scope: 0, key: 2, reg: 4},
+		{kind: opResolve, scope: 0, key: 2},
+		{kind: opStart, scope: 0},
+		{kind: opStop, scope: 1, key: 0, eager: true},
+		{kind: opStop, scope: 0},
+	}, {
+		{kind: opRegister, scope: 1, key: 0, reg: 3},
+		{kind: opRegister, scope: 0, key: 1, reg: 5},
+		{kind: opResolve, scope: 1, key: 0},
+		{kind: opResolve, scope: 3, key: 1},
+		{kind: opStart, scope: 1},
+		{kind: opStop, scope: 3, key: 0, eager: true},
+		{kind: opStop, scope: 1},
+		{kind: opStop, scope: 0},
+	}}
+	for i, ops := range shapes {
+		t.Run(fmt.Sprintf("shape%d", i), func(t *testing.T) {
+			for seed := range 25 {
+				m := newCMachine(t, ops)
+				m.sched = newScheduler(uint64(seed))
+				m.run()
+				m.sched.close()
+				if t.Failed() {
+					t.Fatalf("failing seed: %d", seed)
 				}
 			}
 		})
