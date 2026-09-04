@@ -226,8 +226,12 @@ mid-hook, because the scope became stopped after the decision to drain it.
 That last one is why the concurrent driver exercises resolution inside drain
 hooks but does not assert that it succeeds.
 
-Neither level waits out `phaseStarting`, for the same reason `stopIfNeeded`
-does not: the goroutine running that start step may be this one.
+Both levels now wait out `phaseStarting` rather than stepping around it,
+which is what the no-`Stop`-from-a-hook rule buys: the goroutine running that
+start step can no longer be this one. `drainIfNeeded` waits for it because a
+service that is starting owes a drain as soon as it has started, and leaving
+it undecided for a later pass meant a start step that outlasted the phase was
+never drained at all.
 
 **`freeze` is transactional.** Registrations queue in `pending` and commit in
 one batch. The batch is validated against *prospective copies* of
@@ -286,15 +290,19 @@ with an `OnStop` for an `OnStart` that never finished.
 
 - Never set a phase or read `running`/`stopped` for a decision outside the
   owning state's mutex.
-- `Stop` must not wait on anything the current goroutine could be responsible
-  for finishing. A start hook may call `Stop`; that is why a mid-start teardown
-  is handed off via `stopWanted` rather than waited on. This is the reason
-  `Stop` cannot be made fully synchronous, and it is forced, not a choice: Go
-  has no goroutine-local state, so there is no way to tell a start step running
-  on the caller's own goroutine from one running elsewhere. Every review so far
-  has reported the asymmetry as a bug; it is pinned by
-  `TestRegressionStopInsideStartHookDoesNotDeadlock` and answered in the
-  `Stop` godoc.
+- **`Stop` is synchronous, and that rests on one rule: no hook may call `Stop`
+  on its own scope or an ancestor.** `stopIfNeeded` waits out every step
+  another goroutine owns for the instance -- `phaseStarting`, then `draining`
+  -- so a teardown outlives `Stop` only when `ctx` expired. The old asymmetry
+  (a mid-start teardown handed off via `stopWanted`) existed because a start
+  hook was allowed to call `Stop` and Go cannot tell that goroutine from any
+  other; every review reported the asymmetry as a bug. The rule is now the
+  documented one, and `Stop` reports the misuse instead of waiting whenever it
+  can see it: hook contexts carry their scope (`inHook`/`hookOwner`), so a
+  hook that passes on the context it was given gets an error naming
+  `Shutdown`. A hook that passes a context of its own is invisible and waits,
+  which is why the fallback still has to be a bounded wait rather than a
+  promise.
 - Nothing in the teardown path may run a user hook against a value another
   hook still holds. That is one rule with three instances: `OnStop` after
   `OnDrain`, `OnStop` after a `Run` hook (deferred to `releaseAfterRun` when
@@ -388,14 +396,14 @@ The sequential generators do not explore goroutine interleavings. That is what
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
-- **Four teardowns may finish after `Stop` returns**: one handed off because a
-  start step was in flight, one undoing a build that completed after the scope
-  stopped, one releasing a service whose `Run` hook outlasted `Stop`'s
-  context, and one releasing a service whose `OnDrain` -- run by another
-  `Stop` -- outlasted it. All four are deliberate. The last two share a rule:
-  a deadline bounds how long `Stop` waits, never whether the release is owed,
-  and `Stop` has already taken the instance off its scope's list, so no other
-  caller will reach it. Any ordering oracle has to model them
+- **A teardown finishes after `Stop` returns only when `Stop`'s context
+  expired** -- waiting for a `Run` hook, a start step or a drain hook -- plus
+  the one that undoes a build completing after the scope stopped, which no
+  `Stop` issued. The deadline bounds how long `Stop` waits, never whether the
+  release is owed, and `Stop` has already taken the instance off its scope's
+  list, so nothing else will reach it: the handoff goroutine re-enters
+  `stopIfNeeded` with `context.WithoutCancel`, whose `Done` is nil, so it
+  waits properly and cannot recurse again. Any ordering oracle has to model them
   or it will report them as defects; the concurrent driver does it by running
   every `Start` before any `Stop`, so no start step is ever in flight.
 - **CHANGELOG is enforced.** `.github/workflows/release.yml` fails a tag push
