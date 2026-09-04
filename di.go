@@ -315,7 +315,16 @@ type instance struct {
 	stopWanted bool            // Stop arrived mid-start; the claimer tears it down
 	stopCtx    context.Context // the context of the Stop that queued the handoff
 
-	// Run hook bookkeeping, set by start and consumed by stop.
+	// Run hook bookkeeping. Every other field here says which mutex guards
+	// it; these three are guarded by the phase machine instead, and the rule
+	// is worth stating because it is not local. cancel and runDone are written
+	// by start, on the goroutine that owns the start step, and read by stop --
+	// which stopIfNeeded will not reach while the phase is phaseStarting, and
+	// the phase leaves phaseStarting only in startClaimed's deferred block,
+	// under the owning state's mutex, after start has returned. That
+	// lock-release/lock-acquire pair is the happens-before. runErr is written
+	// by the Run goroutine before it closes runDone, and read only after a
+	// receive from runDone.
 	cancel  context.CancelFunc
 	runDone chan struct{}
 	runErr  error
@@ -549,16 +558,13 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) (err error) 
 }
 
 // everStarted reports whether Start was called on this scope or an ancestor.
+// That is runContext's walk with the answer thrown away -- the nearest scope
+// Start was called on is the only one there can be, so "is there one" and
+// "which one" are the same search, and doing it twice only created two places
+// for the rule to drift.
 func (st *state) everStarted() bool {
-	for ; st != nil; st = st.parent {
-		st.mu.Lock()
-		started := st.startCtx != nil
-		st.mu.Unlock()
-		if started {
-			return true
-		}
-	}
-	return false
+	ctx, _ := st.runContext()
+	return ctx != nil
 }
 
 // stopContext returns the context Stop was called with, or a background one
