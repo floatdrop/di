@@ -55,12 +55,36 @@ decision across two critical sections produced several bugs. In particular:
 `running`, while `Start` sets `running` before it drains. That ordering is
 what guarantees an instance is started by exactly one path.
 
-`await` is the only way to reach an instance. It claims the build step or
-waits on the holder's `sync.Cond` for whoever did, and it also waits out
-`phaseStarting`, which is what stops a resolution handing back a service
-whose `OnStart` is still running. `settled` says the build step is over and
-`value`/`err` are final; it replaced a `sync.Once`, which could only tell a
-second resolution to carry on, never to wait.
+`await` is the only way to reach an instance. It claims the build step or waits
+for whoever did, and it also waits out `phaseStarting`, which is what stops a
+resolution handing back a service whose `OnStart` is still running. `settled`
+says the build step is over and `value`/`err` are final; it replaced a
+`sync.Once`, which could only tell a second resolution to carry on, never to
+wait.
+
+**A waiter blocks on one step, not on the scope.** Each step another goroutine
+can be responsible for finishing has a channel closed when it is done:
+`settledCh` (built with the instance, since a waiter can arrive before anything
+claims the build), `startingCh` (made by `claimStart`), `drainedCh` (made by
+the transition to `draining`). The phase still says *which* step is
+outstanding, and the phase and the channel are read in one critical section, so
+a waiter cannot pick up the channel from a later step. Closing happens under
+the same mutex, which is what makes a lost wakeup impossible: a waiter holding
+the channel either finds it closed or is released by the close.
+
+This replaced a `sync.Cond` per scope, where every phase change woke every
+waiter in the scope to re-check a predicate that was almost never theirs, and
+where bounding a wait by a context needed `awaitPhase` to fake it with a
+`context.AfterFunc` that broadcast on expiry. The context-bounded wait in
+`drainIfNeeded` is now an ordinary `select`. A `Transient` instance gets no
+channels at all: it is never cached, so no second resolution can find it.
+
+The one broadcast with no channel replacing it is the one `teardown` did after
+`stopped.Store(true)`. Nothing waits on a predicate that mentions `stopped` --
+`await` blocks only on `settled` and `phaseStarting`, and both are advanced by
+goroutines a `Stop` does not interrupt -- so it released nobody who was not
+about to be released anyway. If a resolution is ever found hanging across a
+`Stop`, this is the first thing to suspect.
 
 **Two cycle detectors, because one branch cannot see the other.** Within a
 branch, `resolver.onPath` walks the immutable path. Across branches,
