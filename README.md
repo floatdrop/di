@@ -199,14 +199,39 @@ errors; that rolls back exactly the services that started, child scopes
 included. A service built after `Start` runs its `OnStart` as part of being
 built, so nothing is handed out unstarted.
 
-`Stop` stops child scopes first, then runs `OnStop` hooks in reverse build
-order, and returns every failure joined. A service is stopped only when its
-stop is owed: its `OnStart` succeeded, or it has no `OnStart` to pair with, in
-which case `OnStop` is a plain destructor. Afterwards the scope and everything
-under it refuses to resolve, with `di.ErrStopped`.
+`Stop` runs in three phases. It drains, then stops child scopes, then runs
+`OnStop` hooks in reverse build order, and returns every failure joined. A
+service is stopped only when its stop is owed: its `OnStart` succeeded, or it
+has no `OnStart` to pair with, in which case `OnStop` is a plain destructor.
+Afterwards the scope and everything under it refuses to resolve, with
+`di.ErrStopped`.
+
+`Stop` is idempotent and safe to call concurrently: only the first call tears
+the scope down, and the others wait for it and report its result. A hook must
+therefore not call `Stop` on its own scope or an ancestor, which would be a
+wait on itself; call `Shutdown`, which never blocks.
 
 Start hooks must not block. A server binds its listener synchronously, so a
 busy port fails `Start`, then serves in a goroutine.
+
+### Draining
+
+`OnDrain` runs before anything is stopped, from the innermost scope outwards
+and in reverse build order, while every scope still resolves normally. It is
+where a service stops taking new work and waits for the work it already has.
+
+```go
+app.Provide(newServer).Eager().
+    OnDrain(func(ctx context.Context, srv *http.Server) error { return srv.Shutdown(ctx) }).
+    OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Close() })
+```
+
+An HTTP server is the case that needs it. Its handlers hold request scopes
+that are children of the application scope, so shutting the server down from
+`OnStop` would be racing the teardown of the scopes those handlers are still
+using: a request in flight would start failing with `di.ErrStopped` before the
+server had finished waiting for it. Draining first gives handlers their scopes
+and dependencies until they return.
 
 ### Workers
 
@@ -284,8 +309,9 @@ cancels that context, so a hung hook cannot keep the process alive.
 //
 // Run starts the scope, waits for SIGINT/SIGTERM or a Shutdown call, then
 // stops everything in reverse order with a bounded context. The server's
-// OnStop calls http.Server.Shutdown, which stops accepting connections and
-// waits for in-flight requests until the stop context expires.
+// OnDrain calls http.Server.Shutdown, which stops accepting connections and
+// waits for in-flight requests until the stop context expires. Draining runs
+// before anything is torn down, so those requests still have their scopes.
 package main
 
 import (
@@ -334,10 +360,13 @@ func main() {
 			}()
 			return nil
 		}).
-		OnStop(func(ctx context.Context, srv *http.Server) error {
+		// OnDrain runs before anything is stopped, so handlers that are
+		// still running keep their scopes and dependencies.
+		OnDrain(func(ctx context.Context, srv *http.Server) error {
 			log.Println("draining")
 			return srv.Shutdown(ctx) // waits for in-flight requests, bounded by StopTimeout
-		})
+		}).
+		OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Close() })
 
 	// Blocks until Ctrl-C, SIGTERM, or app.Shutdown. A second signal cancels
 	// the stop context so a hung hook cannot keep the process alive.
@@ -400,14 +429,28 @@ concrete type and reads left to right. The trade-off is that generic methods
 cannot appear on interfaces, so `*di.Scope` is concrete; substitute
 dependencies through scopes rather than by mocking the container.
 
-**Concurrency.** Resolution is safe from many goroutines. Each singleton is
-built at most once, and the per-call resolution path is kept off the scope so
-concurrent resolutions never share state.
+**Concurrency.** Resolution is safe from many goroutines, including
+goroutines a constructor starts for itself. Each singleton is built at most
+once however many resolutions race for it, and the resolution path is an
+immutable linked list, so parallel branches share nothing. Once the scope is
+running, a resolution returns only a service whose `OnStart` has finished,
+waiting if another goroutine is starting it. A cycle is reported as
+`di.ErrCycle` even when the two halves are being built concurrently, which
+needs a wait-for graph rather than the per-branch path alone.
+
+Two re-entrancy limits apply. In a goroutine a constructor started, use
+`Resolve` rather than `Get`: `Get` reports failure by panicking, and that
+panic has no enclosing call to unwind to from another goroutine. And an
+`OnStart` hook must not resolve a service that depends on the one being
+started, which would be a wait on itself.
 
 **Known limitations.** The dependency graph is only known once constructors
 run, so a missing dependency of a lazy service surfaces on first resolution,
 or at `Start` if the service is eager; there is no whole-graph validation.
-Transient instances are not tracked and get no lifecycle hooks.
+Transient instances are not tracked and get no lifecycle hooks. A teardown
+that `Stop` handed off, because a start step was in flight, may finish just
+after `Stop` returns; the same is true of a build that completed after the
+scope stopped and undid itself.
 
 ## Performance
 

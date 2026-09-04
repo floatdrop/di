@@ -7,6 +7,70 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+Fixes for the eleven defects of the September 2026 review, plus the
+resolution-during-`Start` gap it noted without counting. One method is added,
+`Binding.OnDrain`; every other change is behaviour. An upgrade can break a
+caller in the three ways listed under Changed.
+
+### Added
+
+- `Binding.OnDrain` and the matching `EventDrain`. `Stop` now runs a drain
+  phase before anything is torn down: `OnDrain` hooks run from the innermost
+  scope outwards, in reverse build order, while every scope still resolves.
+  It is where a service stops taking new work and waits for what it has. An
+  HTTP server belongs here rather than in `OnStop`, because its handlers hold
+  request scopes that `OnStop` would be racing.
+
+### Fixed
+
+- Concurrent `Stop` calls no longer break dependency order. A parent that
+  finds a child already stopping now waits for that teardown to finish
+  instead of seeing an emptied scope and closing what the child's hooks are
+  still using. The shape this hit was an HTTP request ending as the
+  application shut down.
+- `Run` now applies its configured `StopTimeout`, and its signal handling, to
+  the rollback of a failed `Start` as well as to an ordinary exit. A correct
+  `OnStop` that waits on its context used to hang there forever.
+- A constructor may resolve its dependencies from several goroutines. The
+  resolution path is now an immutable linked list rather than a shared slice,
+  which removes a data race and the false `ErrCycle` two parallel resolutions
+  of one singleton could produce.
+- A dependency cycle whose halves are built concurrently is reported as
+  `ErrCycle` instead of deadlocking, through a wait-for graph between
+  in-flight builds.
+- A `Transient` constructor goes through the same wrapper as every other one:
+  a panic inside it becomes an error rather than escaping `Resolve`, and a
+  successful build emits `EventBuild`.
+- Shadowing a key a scope has already been served is rejected along the whole
+  lookup route, not just at its end. That covers a `Bind` alias owned by an
+  outer scope, and any scope between the resolver and the owner of the
+  binding; both could previously end up with two live values for one key.
+- A nil interface can be registered and resolved. `Get`, `Lookup`, `Resolve`,
+  `Maybe`, `All` and the hook adapters no longer panic on it.
+- Cycle detection compares bindings rather than keys, so a group member and a
+  plain registration of the same type are no longer treated as one node.
+  `All` reported a false cycle for that pair.
+- A worker that dies in a child scope reaches the root's `Run` even when the
+  child is stopped and detached first. The failure is wrapped once and
+  reported once, whether it arrives as the cause or as a `Stop` error.
+- `Middleware` registers the same `*http.Request` it passes to the handler.
+  A router writes path values and the matched pattern into the request it is
+  given, so the copy registered before was missing everything the route
+  matched, and its context carried no scope.
+
+### Changed
+
+- Once a scope is running, a resolution waits for a start step another
+  goroutine is running rather than returning the service unstarted. An
+  `OnStart` hook must therefore not resolve a service that depends on the one
+  being started, which would be a wait on itself.
+- A hook must not call `Stop` on its own scope or an ancestor. Concurrent
+  `Stop` calls now wait for the first, so that would be a wait on itself.
+  Use `Shutdown`, which never blocks.
+- A dying `Run` hook now records its error as the cause `Run` returns, as
+  well as reporting it through `Stop`. `Run` recognises the two as one
+  failure and reports it once.
+
 ## [0.3.0] - 2026-09-03
 
 The public API is unchanged from 0.2.0: no signature was added, removed or
