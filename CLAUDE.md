@@ -3,9 +3,9 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 `github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
-on generic methods. The whole library is `di.go`, plus the net/http adapter
-in `dihttp/`; everything else is tests, examples, and a separate benchmarks
-module.
+on generic methods. The library is `di.go`, the rendering of the recorded
+graph in `explain.go`, and the net/http adapter in `dihttp/`; everything
+else is tests, examples, and a separate benchmarks module.
 
 ## Commands
 
@@ -273,6 +273,24 @@ to whichever binding owns the key. `deriveEager` is the single place that
 decides what `Eager` means, and it validates in the same loop so the derived
 set and its rules cannot drift apart.
 
+**The graph is recorded by watching, and only while a constructor runs.**
+`resolve` appends the instance it just produced to `deps` on the instance of
+the node that asked for it, which is `s.r` -- the node this resolution hangs
+off, not the one it just made. A node with no binding is a top-level call, and
+the test for that is at the call site rather than inside `dependOn`, so a warm
+`Get` pays a pointer comparison instead of a function call; that difference is
+measurable in the resolve benchmark. `deps` is guarded by the *asking*
+instance's holder mutex, because a constructor may resolve from several
+goroutines that share the `*Scope` it was handed.
+
+Two consequences fall out of using the resolution path rather than a registry.
+A resolution made through a `Scope` a constructor kept is a new path, whose
+first node has no binding, so it records nothing -- the same rule that stops it
+being called a cycle. And a failed resolution records nothing either, since it
+produced no value and its path is already in the error. Only `Explain` and
+`Graph` read `deps`; nothing in the build, start or stop machine does, so a
+mistake here cannot break resolution.
+
 **A key is served to a whole route, not just to its destination.**
 `binding.used` protects the owner; `markServed` records the key in every scope
 between the resolver and that owner. Both halves matter: an earlier version
@@ -457,6 +475,13 @@ Four layers, each catching a different class:
   generator before believing the code.
 - `FuzzMachine` — the same invariants under coverage-guided search. Corpus in
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
+- The rendering is generated against too: the sequential machine renders
+  every scope and explains every key at the end of a sequence (I7), and the
+  concurrent driver renders inside its lanes, which is the only way a
+  generator meets an instance mid-build or mid-start and the only thing that
+  puts the rendering's reads under `-race`. Both tolerate a configuration
+  rejection from `Explain`, which looks a key up and so commits the pending
+  batch exactly as a resolution would, and nothing else.
 - `scripts/generatorgap.go` — the map of what only the hand-written tests
   reach, which is the map of where the next review will dig: every defect the
   four September 2026 reviews found lived on such a line. CI runs it with a
@@ -469,6 +494,11 @@ Four layers, each catching a different class:
   the registration made the body look covered. A tool that measures a gap has
   to be measured itself.
 
+  It was wrong a second way, found when `explain.go` arrived: it indexed
+  functions from `di.go` alone and attributed a block by line without
+  looking at which file it came from, so every block of the new file was
+  charged to whichever function of the old one started above the same line.
+  The answer looked plausible, which is the dangerous kind of wrong.
 `FuzzMachineConcurrent` is the coverage-guided driver for the concurrent
 oracles; run it with `-race` or it checks almost nothing.
 

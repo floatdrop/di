@@ -51,6 +51,14 @@
 // with a deadline. [Scope.Observe] reports every step for logging and
 // metrics.
 //
+// # Inspecting the graph
+//
+// A constructor's dependencies are recorded as it resolves them, so the
+// graph is known for whatever has been built. [Scope.Explain] renders one
+// service's dependency tree, with the registration site, lifetime and scope
+// of each node, and what needed it. [Scope.Graph] renders everything built
+// in a scope and its descendants as Graphviz DOT.
+//
 // # Concurrency
 //
 // A [Scope] is safe to use from many goroutines, including from goroutines a
@@ -222,6 +230,16 @@ const (
 	drained                     // OnDrain ran, or was skipped for good
 )
 
+// dep is one recorded dependency edge: an instance a constructor resolved,
+// and the scope holding it, which is what names it in a rendering. The
+// holder is carried rather than looked up because an instance does not know
+// its own scope, and the scope it was resolved from may be gone by the time
+// anything reads the edge.
+type dep struct {
+	in     *instance
+	holder *state
+}
+
 // instance is one built value of a binding, owned by the state that stops it.
 type instance struct {
 	b     *binding
@@ -232,6 +250,14 @@ type instance struct {
 	// final.
 	settled bool       // guarded by the owning state's mutex
 	dr      drainPhase // guarded by the owning state's mutex
+
+	// deps are the services this instance's constructor resolved, in the
+	// order it asked for them, each recorded once however many times it
+	// asked. Guarded by the owning state's mutex, because a constructor may
+	// resolve from several goroutines at once and they share the Scope it
+	// was handed. Only Explain and Graph read them; nothing in the
+	// build/start/stop machine does.
+	deps []dep
 
 	// Each step another goroutine may have to wait for has a channel that is
 	// closed when the step is done, so a waiter blocks on that step alone.
@@ -1259,11 +1285,22 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	// it returns. See resolver.done.
 	defer sc.r.done.Store(true)
 
-	v, err := sc.await(holder.instanceFor(b), holder)
+	in := holder.instanceFor(b)
+	v, err := sc.await(in, holder)
 	if err != nil {
 		panic(abort{err})
 	}
 	b.used.Store(true)
+	// The edge belongs to whoever asked, which is the node this resolution
+	// hangs off, not the one it just made. A failed resolution records
+	// nothing: it built no value, and the path it failed on is in the error.
+	//
+	// The test is here rather than inside dependOn so that a resolution with
+	// nobody to tell pays a pointer comparison instead of a call: a node with
+	// no binding is a top-level Get, which is the warm path.
+	if s.r.b != nil {
+		s.r.dependOn(in, holder)
+	}
 	return v
 }
 
@@ -1281,6 +1318,40 @@ func (st *state) instanceFor(b *binding) *instance {
 		st.scoped[b] = in
 	}
 	return in
+}
+
+// instanceAt is instanceFor without the making: the instance b already has
+// in st, or nil. Called with st's mutex held, by the callers that must not
+// bring one into being -- a recorded edge, and the inspection API.
+func (st *state) instanceAt(b *binding) *instance {
+	if !b.scoped {
+		return b.single
+	}
+	return st.scoped[b]
+}
+
+// dependOn records that the resolution at this node needed in. The node is
+// the one that asked, so the edge lands on its instance; the caller checks
+// first that there is one, since a node with no binding is a top-level call
+// and owes nothing to anybody. That is what keeps this off the warm path: a
+// Get made outside a constructor starts a fresh path whose first node has no
+// binding, and a Scope kept past its resolution is no longer in flight, so it
+// starts one too.
+//
+// Recorded once per distinct dependency. A constructor that asks for the
+// same service twice, or resolves in a loop, gets one edge; the scan that
+// buys that is over one constructor's own dependencies and runs while it is
+// building, never on a resolution that is only reading a built value.
+func (r *resolver) dependOn(in *instance, holder *state) {
+	r.holder.mu.Lock()
+	defer r.holder.mu.Unlock()
+	// The asking instance is being built, so it exists: resolve made it
+	// before it ran the constructor this call came from.
+	asker := r.holder.instanceAt(r.b)
+	if asker == nil || slices.ContainsFunc(asker.deps, func(d dep) bool { return d.in == in }) {
+		return
+	}
+	asker.deps = append(asker.deps, dep{in: in, holder: holder})
 }
 
 // await returns the instance's value: this branch builds it if it gets there

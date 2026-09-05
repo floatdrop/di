@@ -662,6 +662,11 @@ func (m *cmachine) step(i int, o op) {
 	s := m.scopes[o.scope]
 	label := fmt.Sprintf("op %d %v", i, o)
 	m.sched.pause(label)
+	// Rendering runs in the lane with everything else, so it reads the
+	// phase machine while other lanes are writing it. That is what -race
+	// is for here, and it is also the only way a generator reaches an
+	// instance rendered mid-build or mid-start.
+	defer m.render(label, s)
 	m.call(label, func() {
 		switch o.kind {
 		case opRegister:
@@ -720,6 +725,24 @@ func (m *cmachine) step(i int, o op) {
 			m.resolve(s, o)
 		}
 	})
+}
+
+// render reads the graph while the rest of the lanes are changing it. A
+// configuration rejection is legitimate, since Explain commits the pending
+// batch the way a resolution does; nothing else is.
+func (m *cmachine) render(label string, s *di.Scope) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, rejected := r.(string); !rejected {
+				m.fail("%s: rendering panicked with %v", label, r)
+			}
+		}
+	}()
+	if g := s.Graph(); !strings.HasPrefix(g, "digraph di {") {
+		m.fail("%s: Graph rendered %q", label, g)
+	}
+	_ = s.Explain[*mk1]()
+	_ = s.Explain[mkI]()
 }
 
 // run executes the sequence in three phases: wiring sequentially, then the

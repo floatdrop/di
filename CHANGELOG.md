@@ -7,6 +7,28 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Added
+
+- **`Scope.Explain[T]` and `Scope.Graph`**, which answer what a service was
+  built from and what needed it ([#2]). Constructors are closures, so the
+  container learns a service's dependencies by watching it resolve them; each
+  one is now recorded on the instance that asked, and the two methods render
+  what has been built. `Explain` is a tree with each node's lifetime, scope,
+  lifecycle state and registration site, followed by the instances that needed
+  it, with a dependency reached twice expanded once. `Graph` is Graphviz DOT,
+  one cluster per scope. Neither builds anything: a service that has not been
+  resolved is reported with its registration and left alone.
+
+  The recording costs nothing on the warm path. A resolution made outside a
+  constructor has nobody to tell, and the test for that is a pointer
+  comparison at the call site; a warm `Get` allocates what it did before.
+  Building a four-service graph allocates one small slice per constructor that
+  has dependencies.
+
+  Not done, and not needed: the issue's optional dependency-aware `Stop`.
+  Build order is already a valid reverse topological order, and nothing stops
+  instances individually.
+
 ### Internal
 
 The API cuts of 0.7.0 left machinery behind that only the removed features
@@ -636,6 +658,7 @@ checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
 [Unreleased]: https://github.com/floatdrop/di/compare/v0.7.0...HEAD
+[#2]: https://github.com/floatdrop/di/issues/2
 [0.7.0]: https://github.com/floatdrop/di/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/floatdrop/di/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/floatdrop/di/compare/v0.4.0...v0.5.0
