@@ -240,9 +240,15 @@ type cmachine struct {
 	starts      map[string]int
 	stops       map[string]int
 	released    map[any]int
-	stopReports map[string][]error         // scope -> what each patient Stop returned
-	verdicts    map[string]map[string]bool // scope/key -> the verdicts resolution gave
-	fails       []string
+	stopReports map[string][]error // scope -> what each patient Stop of it returned
+	// drainAt and stopAt order the two against each other, which is what a
+	// C11 failure has to be read against: a Stop that returned before the
+	// hook began is a different story from one that returned after it.
+	drainAt  map[string]int   // scope -> when its failing drain hook began
+	stopAt   map[string][]int // scope -> when each patient Stop of it returned
+	clock    int
+	verdicts map[string]map[string]bool // scope/key -> the verdicts resolution gave
+	fails    []string
 }
 
 func newCMachine(t *testing.T, ops []op) *cmachine {
@@ -251,6 +257,8 @@ func newCMachine(t *testing.T, ops []op) *cmachine {
 		builds: map[string]int{}, starts: map[string]int{}, stops: map[string]int{},
 		released:    map[any]int{},
 		stopReports: map[string][]error{},
+		drainAt:     map[string]int{},
+		stopAt:      map[string][]int{},
 		verdicts:    map[string]map[string]bool{},
 		order:       newStopOrder(map[string]string{"c1": "root", "c2": "root", "gc": "c1", "request": "root"}),
 		drain:       newDrainWatch(),
@@ -458,6 +466,10 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 			// exercises the phase without checking what it does with an
 			// error, which is how a child Stop that dropped its own hook's
 			// failure survived three drivers.
+			m.mu.Lock()
+			m.clock++
+			m.drainAt[holder] = m.clock
+			m.mu.Unlock()
 			if !m.builtLate(any(v)) {
 				// C11 holds only for an instance that existed before the
 				// teardown began. One built during the phase can be drained
@@ -683,7 +695,9 @@ func (m *cmachine) step(i int, o op) {
 				// context may return the missed deadline instead of what the
 				// phase went on to report.
 				m.mu.Lock()
+				m.clock++
 				m.stopReports[m.names[o.scope]] = append(m.stopReports[m.names[o.scope]], err)
+				m.stopAt[m.names[o.scope]] = append(m.stopAt[m.names[o.scope]], m.clock)
 				m.mu.Unlock()
 			}
 			if err != nil && !o.eager && !isDocumentedFailure(err) &&
@@ -725,7 +739,12 @@ func (m *cmachine) run() {
 		switch o.kind {
 		case opRegister:
 			wired = append(wired, o)
-		case opStart, opHealth, opShutdown:
+		case opStart, opHealth, opShutdown, opRun:
+			// Run belongs with the lifecycle calls, not with the resolutions.
+			// It fell to the default and was classified as one, so it ran
+			// before the teardown phase was marked -- and the instances its
+			// drain hooks built were then not recorded as late, which is what
+			// C11's exemption rests on.
 			up = append(up, o)
 		case opStop:
 			down = append(down, o)
@@ -875,7 +894,7 @@ func (m *cmachine) check() {
 		return true
 	})
 	m.drainFailed.Range(func(scope, want any) bool { // C11
-		for _, got := range m.stopReports[scope.(string)] {
+		for i, got := range m.stopReports[scope.(string)] {
 			if errors.Is(got, context.DeadlineExceeded) {
 				// A Stop that ran out of context reports that, and what the
 				// phase went on to conclude is not its answer. The impatient
@@ -886,7 +905,8 @@ func (m *cmachine) check() {
 			}
 			if !errors.Is(got, want.(error)) {
 				m.fails = append(m.fails, fmt.Sprintf(
-					"a drain hook of %s failed and a Stop of that scope reported %v", scope, got))
+					"a drain hook of %s failed and Stop #%d of that scope reported %v\n    all of them: %v\n    the hook began at %d, those Stops returned at %v",
+					scope, i, got, m.stopReports[scope.(string)], m.drainAt[scope.(string)], m.stopAt[scope.(string)]))
 			}
 		}
 		return true
