@@ -22,8 +22,8 @@ repo, err := app.Resolve[*Repo]()
 - **Constructors return `T`, not `(T, error)`.** A missing dependency or a
   failed constructor unwinds to the enclosing `Resolve` or `Start` as an
   `error` that names the full dependency path and the registration site.
-- **Typed lifecycle.** `OnStart`, `OnStop` and `Worker` hooks are typed
-  on the service. Nothing is discovered by sniffing interfaces.
+- **Typed lifecycle.** `OnStart`, `OnDrain`, `OnStop` and `Worker` hooks are
+  typed on the service. Nothing is discovered by sniffing interfaces.
 - **Deterministic shutdown.** Reverse build order, child scopes first, every
   error reported.
 - **Scopes for requests and tests.** Child scopes shadow their parent; the
@@ -40,8 +40,8 @@ v0.23 or newer.
 
 ## Quick start
 
-Every example in this document is a compiled program under
-[`examples/`](examples/) and is run in CI.
+Every embedded example in this document is a compiled program under
+[`examples/`](examples/), built in CI.
 
 [embedmd]:# (examples/quickstart/main.go go)
 ```go
@@ -108,6 +108,7 @@ registration and must be called before the scope is first resolved.
 | `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
+| `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
 | `.Worker(f)` | A long-running function, cancelled on stop. |
 
 An interface is served by a constructor that returns the implementation:
@@ -195,6 +196,35 @@ A singleton is built in the scope that registered it, so a child cannot rewire
 a parent's singleton. A service that must see child-scoped values is declared
 `Scoped()`: one instance per resolving scope, built there.
 
+### Groups
+
+`Group()` makes a registration one member of the group for its type rather
+than the binding for it, and `All` resolves every member across the scope
+chain. A health endpoint is the usual case. There is no health-check hook,
+because a group of checkers is the same thing in user code, and the handler
+decides what healthy means:
+
+```go
+type Checker interface{ Check(ctx context.Context) error }
+
+app.Provide(func(s *di.Scope) Checker { return s.Get[*DB]() }).Group()
+
+mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+    for _, c := range app.All[Checker]() {
+        if err := c.Check(r.Context()); err != nil {
+            http.Error(w, err.Error(), http.StatusServiceUnavailable)
+            return
+        }
+    }
+    fmt.Fprintln(w, "ok")
+})
+```
+
+`All` builds any member not built yet, so a checker's target is up by the
+time it is asked. Members keep their own lifetime and hooks, and a plain
+registration of the same type is neither shadowed by the group nor part of
+it.
+
 ### Lifecycle
 
 `Start` builds every `Eager` binding, then runs `OnStart` hooks in build order.
@@ -256,30 +286,6 @@ holds even if the worker only reports the failure once shutdown is under way,
 since when an error surfaces says nothing about what caused it; returning
 `context.Canceled` after cancellation is the one case that means nothing more
 than "I stopped".
-
-### Health checks
-
-There is no health-check hook. A `Group` of checkers is the same thing in
-user code, and the handler decides what healthy means:
-
-```go
-type Checker interface{ Check(ctx context.Context) error }
-
-app.Provide(func(s *di.Scope) Checker { return s.Get[*DB]() }).Group()
-
-mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-    for _, c := range app.All[Checker]() {
-        if err := c.Check(r.Context()); err != nil {
-            http.Error(w, err.Error(), http.StatusServiceUnavailable)
-            return
-        }
-    }
-    fmt.Fprintln(w, "ok")
-})
-```
-
-`All` builds any member not built yet, so a checker's target is up by the
-time it is asked.
 
 ### Request scopes
 
@@ -453,30 +459,32 @@ waiting if another goroutine is starting it. A cycle is reported as
 `di.ErrCycle` even when the two halves are being built concurrently, which
 needs a wait-for graph rather than the per-branch path alone.
 
-Two re-entrancy limits apply. In a goroutine a constructor started, use
+Three re-entrancy limits apply. In a goroutine a constructor started, use
 `Resolve` rather than `Get`: `Get` reports failure by panicking, and that
-panic has no enclosing call to unwind to from another goroutine. And an
+panic has no enclosing call to unwind to from another goroutine. An
 `OnStart` hook must not resolve a service that depends on the one being
-started, which would be a wait on itself.
+started, which would be a wait on itself. And no hook may call `Stop` on its
+own scope or an ancestor, for the same reason; `Shutdown` never blocks.
 
 **Known limitations.** The dependency graph is only known once constructors
 run, so a missing dependency of a lazy service surfaces on first resolution,
-or at `Start` if the service is eager; there is no whole-graph validation.
-A teardown
-that `Stop` handed off, because a start step was in flight, may finish just
-after `Stop` returns; the same is true of a build that completed after the
-scope stopped and undid itself.
+or at `Start` if the service is eager; there is no whole-graph validation
+([#3](https://github.com/floatdrop/di/issues/3)). `Stop` is synchronous with
+one exception: when its own context expires while a hook is still running,
+the missed deadline is reported to the caller and the release finishes on a
+goroutine of its own, reaching observers. A build that completes after its
+scope stopped is undone the same way.
 
 ## Performance
 
 [`benchmarks/`](benchmarks/) is a separate module comparing this package with
 [samber/do](https://github.com/samber/do) on the same four-service graph, so
-the library itself stays dependency-free. On Apple Silicon:
+the library itself stays dependency-free. On an Apple M3 Max:
 
 | | Warm resolve | Cold register and build |
 |---|---|---|
-| `di` | 53 ns, 2 allocs | 3.5 µs, 64 allocs |
-| `do` v2.1 | 127 ns, 6 allocs | 6.2 µs, 120 allocs |
+| `di` | 45 ns, 2 allocs | 3.8 µs, 67 allocs |
+| `do` v2.1 | 140 ns, 6 allocs | 6.2 µs, 120 allocs |
 
 ```sh
 cd benchmarks && go test -bench . -benchmem
@@ -491,14 +499,17 @@ upgrade can break a caller.
 
 ## Contributing
 
-Alongside ordinary tests, three generative suites guard the parts that proved
-easiest to get wrong: a property test over random registration sequences, a
-model-based test over random sequences of operations checked against
-documented invariants, and a fuzz target over the same invariants.
+Alongside one regression test per historical defect, generative suites guard
+the parts that proved easiest to get wrong: a property test over random
+registration sequences, a model-based test over random operation sequences
+checked against documented invariants and a lifecycle model, the same
+operations run in parallel lanes under the race detector, and fuzz targets
+over both.
 
 ```sh
 go test -race ./...
-go test -run '^$' -fuzz FuzzMachine -fuzztime 2m .
+go test -run '^$' -fuzz 'FuzzMachine$' -fuzztime 2m .
+go test -race -run '^$' -fuzz FuzzMachineConcurrent -fuzztime 2m .
 ```
 
 The code blocks in this README are embedded from `examples/` with
