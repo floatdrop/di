@@ -165,9 +165,11 @@ by the state mutex rather than one of its own, so claiming a phase and
 recording what the claim decided (`stopCtx`, for `Stop`) stay one critical
 section and no third lock joins the ordering rules. The waiter's contract is
 the one thing the two callers still differ on, and it is now visible at the
-call site: `Stop` reports the owner's error, the scope-wide drain drops it,
-because a drain's failures already reach the caller through the `Stop` that
-owns them.
+call site: both report the owner's error. The scope-wide drain used to drop
+it, on the reasoning that a drain's failures reach the caller through the
+`Stop` that owns them -- true when that is the same call, and false for a
+request scope ending while the application shuts down, which is where the
+failure needed reporting. The fourth review found it.
 
 **Draining precedes everything, and it has a machine of its own.** `Stop` is
 drain, then mark stopped, then children, then this scope's instances. Both
@@ -224,6 +226,30 @@ ended; and a hook running on such a late instance can find its scope stopped
 mid-hook, because the scope became stopped after the decision to drain it.
 That last one is why the concurrent driver exercises resolution inside drain
 hooks but does not assert that it succeeds.
+
+**Who hears a drain failure is decided by who owns the teardown, not by who
+ran the hook.** A sweep settles a descendant's failures into that
+descendant's phase, so the descendant's own `Stop` reports them, and an
+ancestor inherits them by stopping that descendant and joining what its
+`Stop` returns. When a second `Stop` of that descendant is already in flight,
+that call owns the teardown, hears the failure, and detaches the scope as it
+finishes -- so whether the ancestor also hears it depends on whether the
+detach beats the ancestor's read of its child list. Both orders are correct,
+because the failure always reaches the caller that owned the teardown, and
+`EventDrain` carries it to observers either way. Do not write an ordering
+oracle, or a test, that requires the ancestor to hear it: one did, and failed
+about one run in eight. `TestReview4ChildStopReportsItsOwnDrainFailure` is
+that test with the assertion narrowed, and
+`TestReview5RootStopReportsAChildsDrainFailure` pins the half that is fixed --
+an ancestor that does own the teardown.
+
+Taking the child list before the drain as well as after it would make the
+ancestor hear it always, and it is the wrong trade: the ancestor would then
+also inherit a deadline the *other* caller set, so a `Stop` that waited
+properly and released everything would report `context.DeadlineExceeded`.
+`TestReview3LostDrainWaitStillReleases` and
+`TestConcurrentImpatientStopStillReleases` both fail that way; they are the
+guard on this paragraph.
 
 Both levels now wait out `phaseStarting` rather than stepping around it,
 which is what the no-`Stop`-from-a-hook rule buys: the goroutine running that

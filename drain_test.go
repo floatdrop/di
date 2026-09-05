@@ -570,11 +570,43 @@ func TestReview4ChildStopReportsItsOwnDrainFailure(t *testing.T) {
 		time.Sleep(20 * time.Millisecond) // let the child reach the phase
 		close(release)
 
-		if err := <-rootErr; !errors.Is(err, drainFailed) {
-			t.Fatalf("root.Stop: %v", err)
-		}
 		if err := <-childErr; !errors.Is(err, drainFailed) {
 			t.Fatalf("child.Stop hid its own drain failure: %v", err)
 		}
+		// Whether the root reports it as well is not fixed by this shape,
+		// and asserting that it does made this test fail about one run in
+		// eight. Settling the hook's failure into the child's phase releases
+		// the child's own Stop, which then runs to completion and detaches
+		// the child; if that happens before the root reads its child list,
+		// the root has nobody to inherit from. Both orders are correct: a
+		// teardown's failures are owed to the caller that owned it and to
+		// whoever waits for it, and the caller above waits only when it is
+		// the one stopping the child. What the root must never do is report
+		// something else, and the test below pins the case where the root
+		// does own that teardown.
+		if err := <-rootErr; err != nil && !errors.Is(err, drainFailed) {
+			t.Fatalf("root.Stop: %v", err)
+		}
+	}
+}
+
+// A Stop that owns a child scope's teardown reports the failure of a drain
+// hook that ran in that child, with no concurrent Stop to hand it to. This is
+// the half of the rule above that does not depend on an interleaving: the
+// root drains the child's instance, settles the failure into the child's
+// phase, and then stops the child itself and inherits it from there.
+// (review 5, 1)
+func TestReview5RootStopReportsAChildsDrainFailure(t *testing.T) {
+	drainFailed := errors.New("drain failed")
+	root := di.New()
+	child := root.Child("child")
+	// Scoped, so resolving it through the child puts the instance there.
+	root.Provide(func(*di.Scope) *Repo { return &Repo{} }).Scoped().
+		OnDrain(func(context.Context, *Repo) error { return drainFailed })
+	if _, err := child.Resolve[*Repo](); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Stop(context.Background()); !errors.Is(err, drainFailed) {
+		t.Fatalf("root.Stop: want the child's drain failure, got %v", err)
 	}
 }
