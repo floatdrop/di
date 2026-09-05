@@ -8,8 +8,8 @@ package di_test
 // of the first September 2026 review, checked against 12dba3c; review 2 was
 // checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
 // fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor, and (alias
-// refactor) the sweep that made lookup follow Bind chains. An untagged test
+// checked against the code before the instance-phase refactor. An untagged
+// test
 // comes from the first of those passes, or from the generators, which its own
 // comment says. Several fail by hanging rather than by reporting, which is why
 // each bounds its own wait instead of relying on the package timeout.

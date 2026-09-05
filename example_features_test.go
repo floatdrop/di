@@ -56,28 +56,7 @@ func ExampleBinding_Worker() {
 	// stop: <nil>
 }
 
-type Cache struct{ ok bool }
-
-func ExampleBinding_Health() {
-	app := di.New()
-	app.Provide(func(*di.Scope) *Cache { return &Cache{} }).
-		Health(func(ctx context.Context, c *Cache) error {
-			if !c.ok {
-				return errors.New("not connected")
-			}
-			return nil
-		})
-
-	fmt.Println("before build:", app.HealthCheck(context.Background()))
-	app.Get[*Cache]()
-	err := app.HealthCheck(context.Background())
-	fmt.Println("unhealthy:", errors.Is(err, di.ErrUnhealthy))
-	fmt.Println(err)
-	// Output:
-	// before build: <nil>
-	// unhealthy: true
-	// di: *github.com/floatdrop/di_test.Cache unhealthy: not connected
-}
+type Cache struct{}
 
 func ExampleScope_Observe() {
 	app := di.New()

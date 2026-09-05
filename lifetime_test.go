@@ -83,7 +83,6 @@ func TestLifetimeOnValueIsRejected(t *testing.T) {
 		apply func(di.Binding[*DB])
 	}{
 		{"Scoped", func(b di.Binding[*DB]) { b.Scoped() }},
-		{"Transient", func(b di.Binding[*DB]) { b.Transient() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := di.New()

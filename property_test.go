@@ -2,16 +2,14 @@ package di_test
 
 // A property test for the eager set, the part of the container that has
 // broken most often. Rather than checking specific cases it generates random
-// registration sequences, including Bind aliases, and asserts the documented
-// invariant:
+// registration sequences and asserts the documented invariant:
 //
 //	Lifetime and lifecycle hooks belong to a registration. Eagerness belongs
 //	to the key: for every key, Start builds whatever serves that key exactly
 //	once if any registration for the key was marked Eager, at the position of
-//	the first such registration. A group member is its own entry. An alias
-//	serves its target, so it builds the target and shares its instance. A
-//	binding that serves an eager key may not have a per-scope lifetime, nor
-//	may a single registration combine Eager with one.
+//	the first such registration. A group member is its own entry. A binding
+//	that serves an eager key may not have a per-scope lifetime, nor may a
+//	single registration combine Eager with one.
 
 // The generator starts from a fresh scope each iteration and never touches
 // one again after a rejection, so it cannot see defects in freeze's error
@@ -19,7 +17,6 @@ package di_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -33,17 +30,14 @@ type pk1 struct{}
 type pk2 struct{}
 type pk3 struct{}
 
-// pkI is served either directly or, via Bind, by *pk1.
+// pkI is an interface key, served by a constructor returning *pk1.
 type pkI interface{ marker() }
 
 func (*pk1) marker() {}
 
-const bindTarget = 0 // Bind[pkI, *pk1] always redirects to key 0
-
 var (
-	propKinds  = []string{"provide", "value", "scoped", "transient", "group"}
-	ifaceKinds = []string{"provide", "value", "bind", "group"}
-	propNames  = []string{"pk1", "pk2", "pk3", "pkI"}
+	propKinds = []string{"provide", "value", "scoped", "group"}
+	propNames = []string{"pk1", "pk2", "pk3", "pkI"}
 )
 
 type propStep struct {
@@ -65,8 +59,6 @@ func regKind[T any](s *di.Scope, mk func() T, kind string, eager bool) {
 		b = s.Value(mk())
 	case "scoped":
 		b = s.Provide(func(*di.Scope) T { return mk() }).Scoped()
-	case "transient":
-		b = s.Provide(func(*di.Scope) T { return mk() }).Transient()
 	case "group":
 		b = s.Provide(func(*di.Scope) T { return mk() }).Group()
 	}
@@ -84,13 +76,6 @@ func applyStep(s *di.Scope, st propStep) {
 	case 2:
 		regKind(s, func() *pk3 { return &pk3{} }, st.kind, st.eager)
 	case 3:
-		if st.kind == "bind" {
-			b := s.Bind[pkI, *pk1]()
-			if st.eager {
-				b.Eager()
-			}
-			return
-		}
 		regKind(s, func() pkI { return &pk1{} }, st.kind, st.eager)
 	}
 }
@@ -98,46 +83,29 @@ func applyStep(s *di.Scope, st propStep) {
 type propWant struct {
 	builds []string
 	panics bool
-	errs   bool // Start returns an error rather than building
 }
 
 // wantEager derives what the container must do with a sequence.
 func wantEager(steps []propStep) propWant {
-	perScope := func(kind string) bool { return kind == "scoped" || kind == "transient" }
-
 	winner := map[int]string{} // last non-group registration serves the key
 	for _, st := range steps {
 		if st.kind != "group" {
 			winner[st.key] = st.kind
 		}
 	}
-	// effective returns the key whose binding actually gets built.
-	effective := func(k int) int {
-		if winner[k] == "bind" {
-			return bindTarget
-		}
-		return k
-	}
 
 	for _, st := range steps {
 		// A registration may not combine Eager with a per-scope lifetime,
 		// override or not.
-		if st.eager && perScope(st.kind) {
+		if st.eager && st.kind == "scoped" {
 			return propWant{panics: true}
 		}
 		if !st.eager || st.kind == "group" {
 			continue
 		}
-		// Whatever serves an eager key must be able to honour eagerness,
-		// whether it serves directly or through an alias.
-		if perScope(winner[st.key]) || perScope(winner[effective(st.key)]) {
+		// Whatever serves an eager key must be able to honour eagerness.
+		if winner[st.key] == "scoped" {
 			return propWant{panics: true}
-		}
-	}
-	for _, st := range steps {
-		// An alias to a target nothing registers cannot be built.
-		if st.eager && st.kind != "group" && winner[st.key] == "bind" && winner[bindTarget] == "" {
-			return propWant{errs: true}
 		}
 	}
 
@@ -147,16 +115,15 @@ func wantEager(steps []propStep) propWant {
 		if !st.eager {
 			continue
 		}
-		id, name := fmt.Sprintf("g%d", i), propNames[st.key] // a group member is its own entry
+		id := fmt.Sprintf("g%d", i) // a group member is its own entry
 		if st.kind != "group" {
-			eff := effective(st.key)
-			id, name = fmt.Sprintf("k%d", eff), propNames[eff] // an alias shares its target's instance
+			id = fmt.Sprintf("k%d", st.key)
 		}
 		if seen[id] {
 			continue
 		}
 		seen[id] = true
-		want.builds = append(want.builds, name)
+		want.builds = append(want.builds, propNames[st.key])
 	}
 	return want
 }
@@ -187,12 +154,11 @@ func TestPropertyEagerSet(t *testing.T) {
 	for iter := range 6000 {
 		steps := make([]propStep, 1+rng.IntN(6))
 		for i := range steps {
-			key := rng.IntN(len(propNames))
-			kinds := propKinds
-			if key == 3 {
-				kinds = ifaceKinds
+			steps[i] = propStep{
+				key:   rng.IntN(len(propNames)),
+				kind:  propKinds[rng.IntN(len(propKinds))],
+				eager: rng.IntN(2) == 0,
 			}
-			steps[i] = propStep{key: key, kind: kinds[rng.IntN(len(kinds))], eager: rng.IntN(2) == 0}
 		}
 		want := wantEager(steps)
 		got, panicked, err := runSteps(steps)
@@ -206,10 +172,6 @@ func TestPropertyEagerSet(t *testing.T) {
 		case !want.panics && panicked:
 			fail("unexpected rejection")
 		case panicked:
-			continue
-		case want.errs && !errors.Is(err, di.ErrNotProvided):
-			fail("expected ErrNotProvided, got %v (builds %v)", err, got)
-		case want.errs:
 			continue
 		case err != nil:
 			fail("Start failed: %v", err)

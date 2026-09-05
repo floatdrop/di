@@ -19,6 +19,14 @@ type DB struct{ dsn string }
 
 func (db *DB) Ping(ctx context.Context) error { return nil }
 
+// Checker is what the health endpoint asks. A service that can report on
+// itself joins the Checker group, and the handler resolves them all.
+type Checker interface {
+	Check(ctx context.Context) error
+}
+
+func (db *DB) Check(ctx context.Context) error { return db.Ping(ctx) }
+
 type User struct{ Name string }
 
 type Mailer struct{ queue chan string }
@@ -32,8 +40,8 @@ func main() {
 		db := &DB{dsn: "postgres://localhost/app"}
 		return s.Must(db, db.Ping(ctx))
 	}).
-		Health(func(ctx context.Context, db *DB) error { return db.Ping(ctx) }).
 		OnStop(func(ctx context.Context, db *DB) error { log.Println("db closed"); return nil })
+	app.Provide(func(s *di.Scope) Checker { return s.Get[*DB]() }).Group()
 
 	// A worker: started with the app, cancelled by Stop, awaited before the
 	// DB it depends on is closed. Returning an error stops the application.
@@ -65,9 +73,11 @@ func main() {
 		fmt.Fprintln(w, "hello", user.Name)
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := app.HealthCheck(r.Context()); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
+		for _, c := range app.All[Checker]() {
+			if err := c.Check(r.Context()); err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
 		}
 		fmt.Fprintln(w, "ok")
 	})

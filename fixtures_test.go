@@ -25,8 +25,6 @@ type (
 
 	wA struct{ sc *di.Scope }
 	wB struct{ a *wA }
-	wT struct{}
-	wU struct{ i wI }
 	wQ struct{}
 
 	oLate struct{}
@@ -40,24 +38,12 @@ type (
 	r3Plain   struct{}
 	r3Self    struct{}
 	r3Server  struct{}
-	r3T       struct{}
 	r3Worker  struct{}
-
-	altReader struct{}
 )
 
-// Two interfaces with the same method set, so each satisfies the other.
-type (
-	readerA interface{ Read() string }
-	readerB interface{ Read() string }
+type vI interface{ marker() }
 
-	vI interface{ marker() }
-	wI interface{ tag() string }
-)
-
-func (*altReader) Read() string { return "alt" }
-func (*vT) marker()             {}
-func (*wT) tag() string         { return "T" }
+func (*vT) marker() {}
 
 // mustPanic runs fn and requires it to panic with a string containing want,
 // which is how a configuration rejection reports itself.

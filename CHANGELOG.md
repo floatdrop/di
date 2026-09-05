@@ -7,7 +7,7 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
-Four cuts to the API surface, made before the graph-validation work of
+Nine cuts to the API surface, made before the graph-validation work of
 issue #3 so that it lands on a smaller and more regular API. Each one
 breaks a caller that used the removed name, and each has a one-line
 migration.
@@ -31,6 +31,29 @@ migration.
   `dihttp.Middleware(app)(mux)`. The core package no longer imports net/http
   and no longer registers anything on a caller's behalf. `WithScope` and
   `FromContext` stay where they were.
+- **`Scope.Bind`.** An interface is served by a constructor that returns the
+  implementation: `s.Bind[Reader, *Repo]()` becomes
+  `s.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })`, declared
+  `Scoped()` too when the target is. The closure is checked by the compiler
+  where `Bind` checked `Implements` at registration, shares the target's
+  instance because it returns the same pointer, and is an ordinary binding,
+  so the alias machinery goes with it: the route marking for hops, the alias
+  cycle detector and the eager-through-alias rules.
+- **`Binding.Transient`.** A per-resolution value is a factory,
+  `s.Provide(func(s *di.Scope) func() *X { ... })`, or a constructor called
+  directly. Transient instances had no hooks and no tracking, which made
+  them a lifetime in name only, and every teardown oracle carried an
+  exemption for them.
+- **`Binding.Health`, `Scope.HealthCheck`, `ErrUnhealthy` and
+  `EventHealth`.** A health endpoint is a `Group` of checkers in user code;
+  the README's "Health checks" section is now that recipe and
+  `examples/app` uses it. What is lost is `HealthCheck` skipping services
+  not yet built: `All` builds a checker's target instead, which is what an
+  endpoint usually wants.
+- **`Signals`.** `Run` exits on `os.Interrupt` and `SIGTERM`, which is what
+  every caller used. `StopTimeout` stays as the one `RunOption`.
+- **`SlogObserver`.** Four lines in user code, and the one place the package
+  imported `log/slog`.
 
 ### Changed
 

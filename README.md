@@ -22,7 +22,7 @@ repo, err := app.Resolve[*Repo]()
 - **Constructors return `T`, not `(T, error)`.** A missing dependency or a
   failed constructor unwinds to the enclosing `Resolve` or `Start` as an
   `error` that names the full dependency path and the registration site.
-- **Typed lifecycle.** `OnStart`, `OnStop`, `Worker` and `Health` hooks are typed
+- **Typed lifecycle.** `OnStart`, `OnStop` and `Worker` hooks are typed
   on the service. Nothing is discovered by sniffing interfaces.
 - **Deterministic shutdown.** Reverse build order, child scopes first, every
   error reported.
@@ -101,17 +101,24 @@ registration and must be called before the scope is first resolved.
 |---|---|
 | `s.Provide(func(*di.Scope) T)` | A lazily built singleton. `T` is inferred. |
 | `s.Value(v)` | An instance you already have. |
-| `s.Bind[I, T]()` | An alias: `I` is served by `T`'s binding, lifetime and hooks included. |
 
 | Method | Effect |
 |---|---|
 | `.Scoped()` | One instance per resolving scope, built and stopped there. |
-| `.Transient()` | A new, untracked instance on every resolution. |
 | `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.Worker(f)` | A long-running function, cancelled on stop. |
-| `.Health(f)` | A health check, run by `HealthCheck`. |
+
+An interface is served by a constructor that returns the implementation:
+
+```go
+app.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })
+```
+
+The compiler checks that `*Repo` satisfies `Reader`, and the two keys share
+one instance because the constructor returns the same pointer. Declare it
+`Scoped()` as well when the target is.
 
 Rules the container enforces:
 
@@ -122,9 +129,8 @@ Rules the container enforces:
   leave one key with two live values, so it panics instead. A resolution that
   failed built nothing and leaves the key re-registerable.
 - Combinations that cannot be honoured are rejected when the scope is first
-  resolved, whatever order the methods were called in: hooks or `Eager` on a
-  transient, `Eager` on a scoped binding, a lifetime on a `Value`, and
-  lifetimes, `Group` or hooks on an alias.
+  resolved, whatever order the methods were called in: `Eager` on a scoped
+  binding, and `Scoped` on a `Value`.
 
 ### Resolution
 
@@ -253,21 +259,27 @@ than "I stopped".
 
 ### Health checks
 
+There is no health-check hook. A `Group` of checkers is the same thing in
+user code, and the handler decides what healthy means:
+
 ```go
-app.Provide(newDB).Health(func(ctx context.Context, db *DB) error { return db.Ping(ctx) })
+type Checker interface{ Check(ctx context.Context) error }
+
+app.Provide(func(s *di.Scope) Checker { return s.Get[*DB]() }).Group()
 
 mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-    if err := app.HealthCheck(r.Context()); err != nil {
-        http.Error(w, err.Error(), http.StatusServiceUnavailable)
-        return
+    for _, c := range app.All[Checker]() {
+        if err := c.Check(r.Context()); err != nil {
+            http.Error(w, err.Error(), http.StatusServiceUnavailable)
+            return
+        }
     }
     fmt.Fprintln(w, "ok")
 })
 ```
 
-`HealthCheck` runs the `Health` hook of every service already built in the
-scope and its descendants, concurrently and bounded by the context. Each
-failure wraps `di.ErrUnhealthy` and names the service.
+`All` builds any member not built yet, so a checker's target is up by the
+time it is asked.
 
 ### Request scopes
 
@@ -384,8 +396,6 @@ func main() {
 ### Observability
 
 ```go
-app.Observe(di.SlogObserver(slog.Default()))
-
 app.Observe(func(ev di.Event) {
     if ev.Kind == di.EventBuild {
         buildDuration.WithLabelValues(ev.Service).Observe(ev.Duration.Seconds())
@@ -394,7 +404,7 @@ app.Observe(func(ev di.Event) {
 ```
 
 Observers receive an `Event` for every constructor and every `OnStart`,
-`OnStop` and `Health` hook in the scope and its descendants, plus one per
+`OnDrain` and `OnStop` hook in the scope and its descendants, plus one per
 `Shutdown`. Each event names the service, its scope, the registration site,
 the duration and the error, if any.
 
@@ -452,7 +462,7 @@ started, which would be a wait on itself.
 **Known limitations.** The dependency graph is only known once constructors
 run, so a missing dependency of a lazy service surfaces on first resolution,
 or at `Start` if the service is eager; there is no whole-graph validation.
-Transient instances are not tracked and get no lifecycle hooks. A teardown
+A teardown
 that `Stop` handed off, because a start step was in flight, may finish just
 after `Stop` returns; the same is true of a build that completed after the
 scope stopped and undid itself.

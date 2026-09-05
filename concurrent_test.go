@@ -345,7 +345,7 @@ func (m *cmachine) call(what string, f func()) {
 // says a resolution can report. A wiring failure that wraps none of them is a
 // defect, not a legitimate outcome.
 func isDocumentedFailure(err error) bool {
-	for _, sentinel := range []error{di.ErrStopped, di.ErrNotProvided, di.ErrCycle, di.ErrUnhealthy} {
+	for _, sentinel := range []error{di.ErrStopped, di.ErrNotProvided, di.ErrCycle} {
 		if errors.Is(err, sentinel) {
 			return true
 		}
@@ -652,8 +652,6 @@ func (m *cmachine) step(i int, o op) {
 			}
 		case opShutdown:
 			s.Shutdown(errShutdown)
-		case opHealth:
-			_ = s.HealthCheck(context.Background())
 		default:
 			m.resolve(s, o)
 		}
@@ -675,7 +673,7 @@ func (m *cmachine) run() {
 		switch o.kind {
 		case opRegister:
 			wired = append(wired, o)
-		case opStart, opHealth, opShutdown:
+		case opStart, opShutdown:
 			up = append(up, o)
 		case opStop:
 			down = append(down, o)

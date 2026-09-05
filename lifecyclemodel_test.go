@@ -6,7 +6,7 @@ package di_test
 // whole container is itself likely to be wrong, and a wrong model that agrees
 // with a wrong implementation hides defects rather than finding them. That
 // argument holds for registration, where what serves a key depends on
-// overrides, aliases and the eager rules, and property_test.go models exactly
+// overrides and the eager rules, and property_test.go models exactly
 // that much and no more.
 //
 // It does not hold for what happens to an instance once it exists. Given that
@@ -78,13 +78,13 @@ type hookSet struct{ start, drain, stop bool }
 // regShape, so they are read together.
 func hooksOfShape(reg uint8) hookSet {
 	switch reg {
-	case 0, 4:
+	case 0, 3:
 		return hookSet{start: true, stop: true}
-	case 1, 2, 6:
+	case 1, 2, 4:
 		return hookSet{stop: true}
-	case 10:
+	case 7:
 		return hookSet{drain: true, stop: true}
-	case 11:
+	case 8:
 		return hookSet{start: true, drain: true, stop: true}
 	}
 	return hookSet{}

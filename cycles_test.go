@@ -8,8 +8,8 @@ package di_test
 // of the first September 2026 review, checked against 12dba3c; review 2 was
 // checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
 // fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor, and (alias
-// refactor) the sweep that made lookup follow Bind chains. An untagged test
+// checked against the code before the instance-phase refactor. An untagged
+// test
 // comes from the first of those passes, or from the generators, which its own
 // comment says. Several fail by hanging rather than by reporting, which is why
 // each bounds its own wait instead of relying on the package timeout.
@@ -22,22 +22,6 @@ import (
 
 	"github.com/floatdrop/di"
 )
-
-// An alias chain that loops is a cycle, not a hang or a stack overflow.
-// Two interfaces with the same method set each satisfy the other, so they
-// can be bound to one another.
-// (alias refactor)
-func TestRegressionAliasCycle(t *testing.T) {
-	s := di.New()
-	s.Bind[readerA, readerB]()
-	s.Bind[readerB, readerA]() // readerA -> readerB -> readerA
-	if _, err := s.Resolve[readerA](); !errors.Is(err, di.ErrCycle) {
-		t.Fatalf("got %v, want ErrCycle", err)
-	}
-	if _, ok := s.Maybe[readerA](); ok {
-		t.Fatal("Maybe reported a looping alias chain as present")
-	}
-}
 
 // A constructor may resolve its dependencies from several goroutines. The
 // resolution path must not be shared mutable state.
@@ -167,34 +151,6 @@ func TestReview2RetainedScopeIsNotACycle(t *testing.T) {
 	}
 	if _, err := root.Resolve[*wB](); err != nil {
 		t.Fatalf("a later clean resolve inherited the failure: %v", err)
-	}
-}
-
-// One alias to a Scoped target is a different edge in each scope that holds
-// an instance of that target, so reaching it twice at two holders is not a
-// cycle. wT takes an optional per-scope decoration, present only in the child,
-// which is what makes the root's own wT a leaf.
-// (review 2, 6)
-func TestReview2AliasAcrossScopedHolders(t *testing.T) {
-	root := di.New()
-	root.Provide(func(sc *di.Scope) *wT {
-		if _, ok := sc.Maybe[*wQ](); ok {
-			_ = sc.Get[*wU]()
-		}
-		return &wT{}
-	}).Scoped()
-	root.Bind[wI, *wT]()
-	root.Provide(func(sc *di.Scope) *wU { return &wU{i: sc.Get[wI]()} })
-
-	kid := root.Child("kid")
-	kid.Value(&wQ{})
-
-	v, err := kid.Resolve[wI]()
-	if err != nil {
-		t.Fatalf("acyclic graph reported as a cycle: %v", err)
-	}
-	if v.tag() != "T" {
-		t.Fatalf("got %q", v.tag())
 	}
 }
 
