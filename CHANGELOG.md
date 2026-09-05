@@ -7,34 +7,18 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
-### Fixed
+## [0.7.0] - 2026-09-05
 
-- `Scope.Run` reports a cause published through `Shutdown` while a failed
-  `Start` was rolling back, not only one published during an ordinary stop. A
-  rollback runs the drain and stop hooks, so a worker can die there exactly as
-  it can during a shutdown; the error branch returned before the cause was
-  ever read.
-- A `Stop` reports the failure of a drain hook of its own scope even when an
-  ancestor's `Stop` owned the phase and ran the hook. The waiter dropped the
-  owner's error on the grounds that it reached the caller through the `Stop`
-  that owned the drain -- true when that is the same call, and false for a
-  request scope ending while the application shuts down, which is exactly
-  where the failure needed reporting. Each scope's drain errors now settle
-  into that scope's phase and reach the aggregate through its own `Stop`, so
-  they are reported to every caller that should hear them and still appear
-  once in any one error.
-- A key cannot be overridden while a resolution of it is in flight. `used` is
-  set only once a value has been served, so a constructor could register over
-  its own key and resolve the replacement: the nested call was served the new
-  value and the outer call returned the old one -- two live values for one
-  key, from a single goroutine, past a guard meant to prevent exactly that.
-  Re-registering after a *failed* resolution still works, which is how a key
-  whose constructor failed is recovered.
+The API surface cut down ahead of the graph-validation work of
+[#3](https://github.com/floatdrop/di/issues/3), so that it lands on a
+smaller and more regular API, and the four defects of the fourth September
+2026 review.
 
-Nine cuts to the API surface, made before the graph-validation work of
-issue #3 so that it lands on a smaller and more regular API. Each one
-breaks a caller that used the removed name, and each has a one-line
-migration.
+Nine identifiers are gone and one is renamed; `go doc -all` diffed against
+0.6.0 lists exactly those and one addition, `Binding.Group`. An upgrade
+breaks any caller that used one of them, and each entry under Removed and
+Changed carries its one-line migration. Behaviour otherwise changes only in
+the three ways listed under Fixed.
 
 ### Removed
 
@@ -86,6 +70,35 @@ migration.
   is unchanged; the error `Stop` returns for a hook that outlasts the
   deadline now reads "Worker hook did not return".
 
+### Fixed
+
+- `Scope.Run` reports a cause published through `Shutdown` while a failed
+  `Start` was rolling back, not only one published during an ordinary stop. A
+  rollback runs the drain and stop hooks, so a worker can die there exactly as
+  it can during a shutdown; the error branch returned before the cause was
+  ever read.
+- A `Stop` reports the failure of a drain hook of its own scope even when an
+  ancestor's `Stop` owned the phase and ran the hook. The waiter dropped the
+  owner's error on the grounds that it reached the caller through the `Stop`
+  that owned the drain -- true when that is the same call, and false for a
+  request scope ending while the application shuts down, which is exactly
+  where the failure needed reporting. Each scope's drain errors now settle
+  into that scope's phase and reach the aggregate through its own `Stop`, so
+  they are reported to every caller that should hear them and still appear
+  once in any one error.
+- A key cannot be overridden while a resolution of it is in flight. `used` is
+  set only once a value has been served, so a constructor could register over
+  its own key and resolve the replacement: the nested call was served the new
+  value and the outer call returned the old one -- two live values for one
+  key, from a single goroutine, past a guard meant to prevent exactly that.
+  Re-registering after a *failed* resolution still works, which is how a key
+  whose constructor failed is recovered.
+
+Nine cuts to the API surface, made before the graph-validation work of
+issue #3 so that it lands on a smaller and more regular API. Each one
+breaks a caller that used the removed name, and each has a one-line
+migration.
+
 ### Testing
 
 The fourth review's findings were all in places the generators still could not
@@ -108,7 +121,6 @@ reach, so each fix comes with the shape that would have caught it:
   made the body look covered. It now keys on the full block, and CI checks its
   arithmetic against `go tool cover -func`, because a tool that measures a gap
   has to be measured itself.
-
 
 ## [0.6.0] - 2026-09-04
 
@@ -582,7 +594,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/floatdrop/di/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/floatdrop/di/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/floatdrop/di/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/floatdrop/di/compare/v0.3.0...v0.4.0
