@@ -104,12 +104,12 @@ func TestRegressionRollbackStopsChildren(t *testing.T) {
 	}
 }
 
-// Rollback must wait for Run hooks even when the caller's context is done.
-func TestRegressionRollbackAwaitsRunHook(t *testing.T) {
+// Rollback must wait for Worker hooks even when the caller's context is done.
+func TestRegressionRollbackAwaitsWorkerHook(t *testing.T) {
 	returned := make(chan struct{})
 	s := di.New()
 	s.Value(&Worker{}).Eager().
-		Run(func(ctx context.Context, w *Worker) error {
+		Worker(func(ctx context.Context, w *Worker) error {
 			<-ctx.Done()
 			time.Sleep(50 * time.Millisecond)
 			close(returned)
@@ -125,7 +125,7 @@ func TestRegressionRollbackAwaitsRunHook(t *testing.T) {
 	select {
 	case <-returned:
 	default:
-		t.Fatal("rollback returned without awaiting the Run hook")
+		t.Fatal("rollback returned without awaiting the Worker hook")
 	}
 }
 
@@ -135,7 +135,7 @@ func TestRegressionLateUndoHonoursDeadline(t *testing.T) {
 	release := make(chan struct{})
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { close(building); <-release; return &Worker{} }).
-		Run(func(ctx context.Context, w *Worker) error { time.Sleep(3 * time.Second); return nil })
+		Worker(func(ctx context.Context, w *Worker) error { time.Sleep(3 * time.Second); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestStopFromAHookIsReported(t *testing.T) {
 		}},
 		{"Run", func(s *di.Scope, got chan<- error) {
 			s.Value(&DB{}).Eager().
-				Run(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); <-ctx.Done(); return nil })
+				Worker(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); <-ctx.Done(); return nil })
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,7 +293,7 @@ func TestStopFromAHookWithItsOwnContextIsBounded(t *testing.T) {
 }
 
 // A Stop whose deadline expires while a start step is in flight must not
-// orphan the instance: its Run hook is cancelled and its OnStop runs. Stop
+// orphan the instance: its Worker hook is cancelled and its OnStop runs. Stop
 // waits for the step, so this is the deadline ending the caller's wait rather
 // than the teardown, which finishes on a goroutine of its own.
 // (pass 3)
@@ -304,7 +304,7 @@ func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).
 		OnStart(func(context.Context, *Worker) error { close(entered); time.Sleep(150 * time.Millisecond); return nil }).
-		Run(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); close(runCancelled); return nil }).
+		Worker(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); close(runCancelled); return nil }).
 		OnStop(func(context.Context, *Worker) error { close(stopped); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
 		select {
 		case <-ch:
 		case <-time.After(5 * time.Second):
-			t.Fatal("the instance was orphaned: its Run hook or OnStop never ran")
+			t.Fatal("the instance was orphaned: its Worker hook or OnStop never ran")
 		}
 	}
 }

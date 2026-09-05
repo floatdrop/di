@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 
 	"github.com/floatdrop/di"
 )
@@ -31,11 +29,11 @@ func ExampleBinding_Scoped() {
 
 type Queue struct{ jobs chan string }
 
-func ExampleBinding_Run() {
+func ExampleBinding_Worker() {
 	app := di.New()
 	done := make(chan string, 1)
 	app.Provide(func(*di.Scope) *Queue { return &Queue{jobs: make(chan string, 1)} }).Eager().
-		Run(func(ctx context.Context, q *Queue) error {
+		Worker(func(ctx context.Context, q *Queue) error {
 			for {
 				select {
 				case job := <-q.jobs:
@@ -79,28 +77,6 @@ func ExampleBinding_Health() {
 	// before build: <nil>
 	// unhealthy: true
 	// di: *github.com/floatdrop/di_test.Cache unhealthy: not connected
-}
-
-type Caller struct{ Name string }
-
-func ExampleScope_Middleware() {
-	app := di.New()
-	app.Provide(func(s *di.Scope) *Caller {
-		return &Caller{Name: s.Get[*http.Request]().Header.Get("X-Caller")}
-	}).Scoped()
-
-	h := app.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		req, _ := di.FromContext(r.Context())
-		fmt.Fprintln(w, "hello", req.Get[*Caller]().Name)
-	}))
-
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("X-Caller", "ada")
-	h.ServeHTTP(rec, r)
-	fmt.Print(rec.Body.String())
-	// Output:
-	// hello ada
 }
 
 func ExampleScope_Observe() {

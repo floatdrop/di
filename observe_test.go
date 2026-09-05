@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 )
 
 func kinds(evs []di.Event) string {
@@ -61,7 +62,7 @@ func TestObserveOnRootSeesChildAndMiddlewareStopErrors(t *testing.T) {
 	app.Provide(func(s *di.Scope) *User { return &User{} }).Scoped().
 		OnStop(func(context.Context, *User) error { return closeFailed })
 
-	h := app.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := dihttp.Middleware(app)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req, _ := di.FromContext(r.Context())
 		req.Get[*User]()
 	}))

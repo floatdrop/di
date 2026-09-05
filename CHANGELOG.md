@@ -7,6 +7,38 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+Four cuts to the API surface, made before the graph-validation work of
+issue #3 so that it lands on a smaller and more regular API. Each one
+breaks a caller that used the removed name, and each has a one-line
+migration.
+
+### Removed
+
+- **`Binding.Named`, `Scope.Lookup`, `Key` and `di.Named`**, the one
+  stringly-typed corner of the API. A second binding of one type is declared
+  as a distinct type instead -- `type ReplicaDB struct{ *DB }` -- which the
+  compiler checks at every reference, where a misspelt name was a missing key
+  at runtime. The README described `.Named` as registering the key "also"
+  under a name; it registered it under the name only.
+- **`Scope.Add`.** Group membership is a property of a binding, like its
+  lifetime, so it is now `Binding.Group`: `s.Add(ctor)` becomes
+  `s.Provide(ctor).Group()`. `Value(v).Group()` adds a pre-built member,
+  which `Add` could not express; `Bind` followed by `Group` is rejected at
+  freeze, since an alias is never a group member.
+- **`Scope.Middleware`** moved to the `dihttp` package as
+  `dihttp.Middleware(s)`, with the usual `func(http.Handler) http.Handler`
+  shape so a router's `Use` accepts it: `app.Middleware(mux)` becomes
+  `dihttp.Middleware(app)(mux)`. The core package no longer imports net/http
+  and no longer registers anything on a caller's behalf. `WithScope` and
+  `FromContext` stay where they were.
+
+### Changed
+
+- **`Binding.Run` is now `Binding.Worker`.** It shared a name with
+  `Scope.Run`, the main-function helper, for an unrelated thing. Behaviour
+  is unchanged; the error `Stop` returns for a hook that outlasts the
+  deadline now reads "Worker hook did not return".
+
 ## [0.6.0] - 2026-09-04
 
 The six defects of the third September 2026 review, and then the question of

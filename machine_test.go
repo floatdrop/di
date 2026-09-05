@@ -21,7 +21,7 @@ package di_test
 //	I4  A singleton is stable: two successful resolutions of a key from one
 //	    scope return the identical value.
 //	I5  Nothing is stopped more often than it was built.
-//	I6  Once the root is stopped, every Run hook has returned.
+//	I6  Once the root is stopped, every Worker hook has returned.
 //
 // What happens to an instance once it exists is predicted rather than
 // checked against invariants, by the model in lifecyclemodel_test.go. That
@@ -136,7 +136,7 @@ type machine struct {
 	starts map[string]int
 	stops  map[string]int
 
-	runsLive atomic.Int32 // Run hooks currently executing
+	runsLive atomic.Int32 // Worker hooks currently executing
 
 	// values seen per (scope, key), to check singleton stability
 	seen map[string]any
@@ -419,7 +419,7 @@ func (m *machine) finish() {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if n := m.runsLive.Load(); n != 0 {
-		m.fail("%d Run hooks still executing after the root was stopped", n)
+		m.fail("%d Worker hooks still executing after the root was stopped", n)
 	}
 }
 
@@ -458,11 +458,11 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 		b = s.Provide(func(*di.Scope) T { return plain() }).Transient()
 		m.markTransient(int(o.key))
 	case 4:
-		b = s.Add(func(sc *di.Scope) T { return built(sc, plain()) }).
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).Group().
 			OnStart(hook("OnStart")).OnStop(hook("OnStop"))
 	case 6:
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
-			Run(func(ctx context.Context, _ T) error {
+			Worker(func(ctx context.Context, _ T) error {
 				m.runsLive.Add(1)
 				defer m.runsLive.Add(-1)
 				<-ctx.Done()

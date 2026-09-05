@@ -3,8 +3,9 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 `github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
-on generic methods. The whole library is `di.go`; everything else is tests,
-examples, and a separate benchmarks module.
+on generic methods. The whole library is `di.go`, plus the net/http adapter
+in `dihttp/`; everything else is tests, examples, and a separate benchmarks
+module.
 
 ## Commands
 
@@ -309,11 +310,11 @@ with an `OnStop` for an `OnStart` that never finished.
   promise.
 - Nothing in the teardown path may run a user hook against a value another
   hook still holds. That is one rule with three instances: `OnStop` after
-  `OnDrain`, `OnStop` after a `Run` hook (deferred to `releaseAfterRun` when
+  `OnDrain`, `OnStop` after a `Worker` hook (deferred to `releaseAfterWorker` when
   `ctx` expires rather than run alongside it), and a parent's hooks after a
   child's.
 - `Start`'s rollback goes through `Stop` with `context.WithoutCancel`, so it
-  stops child scopes and waits for `Run` hooks.
+  stops child scopes and waits for `Worker` hooks.
 - Whichever `Stop` call queues a handoff owns that teardown's context; a later
   `Stop` must not clobber it.
 
@@ -325,7 +326,7 @@ Four layers, each catching a different class:
   of the library the defect lived in rather than by the review that found it:
   `cycles_test.go` (the resolution path), `wiring_test.go` (registration and
   lookup), `teardown_test.go` (start, stop, rollback), `drain_test.go` and
-  `worker_test.go` (`Run` hooks and `Shutdown`), with the stand-in types they
+  `worker_test.go` (`Worker` hooks and `Shutdown`), with the stand-in types they
   share in `fixtures_test.go`. A new one goes wherever its rule lives.
 
   Provenance moved into a tag on each test -- `(review 2, 5)`, `(pass 4)` --
@@ -406,7 +407,7 @@ Four layers, each catching a different class:
   `di.go` and C9 fails.
 - The three September 2026 reviews are the source of most of those tests: the
   first found eleven defects plus a gap it did not count, the second six plus
-  the `Run`-hook overlap and then two the tightened driver found on its own,
+  the `Worker`-hook overlap and then two the tightened driver found on its own,
   and the third six that were all cross-phase or cross-branch -- a drain hook
   stopping a sibling scope, a release dropped with a missed deadline, a
   shutdown cause published after `Run` had read it, a false cycle through a
@@ -463,7 +464,7 @@ The sequential generators do not explore goroutine interleavings. That is what
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
 - **A teardown finishes after `Stop` returns only when `Stop`'s context
-  expired** -- waiting for a `Run` hook, a start step or a drain hook -- plus
+  expired** -- waiting for a `Worker` hook, a start step or a drain hook -- plus
   the one that undoes a build completing after the scope stopped, which no
   `Stop` issued. The deadline bounds how long `Stop` waits, never whether the
   release is owed, and `Stop` has already taken the instance off its scope's

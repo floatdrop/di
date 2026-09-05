@@ -135,7 +135,7 @@ func TestReviewConcurrentCycle(t *testing.T) {
 func TestReviewGroupAndDirectSameType(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) vI { return &vT{n: 1} })
-	s.Add(func(sc *di.Scope) vI { _ = sc.Get[vI](); return &vT{n: 2} })
+	s.Provide(func(sc *di.Scope) vI { _ = sc.Get[vI](); return &vT{n: 2} }).Group()
 
 	defer func() {
 		if r := recover(); r != nil {

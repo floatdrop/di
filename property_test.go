@@ -68,7 +68,7 @@ func regKind[T any](s *di.Scope, mk func() T, kind string, eager bool) {
 	case "transient":
 		b = s.Provide(func(*di.Scope) T { return mk() }).Transient()
 	case "group":
-		b = s.Add(func(*di.Scope) T { return mk() })
+		b = s.Provide(func(*di.Scope) T { return mk() }).Group()
 	}
 	if eager {
 		b.Eager()

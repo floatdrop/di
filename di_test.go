@@ -42,17 +42,6 @@ func TestResolveChain(t *testing.T) {
 	}
 }
 
-func TestNamed(t *testing.T) {
-	s := newApp()
-	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "pg://replica"} }).Named("replica")
-	if got := s.Lookup(di.Named[*DB]("replica")).dsn; got != "pg://replica" {
-		t.Fatalf("replica: %q", got)
-	}
-	if got := s.Get[*DB]().dsn; got != "pg://primary" {
-		t.Fatalf("unnamed binding was displaced: %q", got)
-	}
-}
-
 func TestBind(t *testing.T) {
 	s := newApp()
 	s.Bind[Reader, *Repo]()
@@ -75,10 +64,10 @@ func TestBindRejectsNonImplementer(t *testing.T) {
 
 func TestGroups(t *testing.T) {
 	s := di.New()
-	s.Add(func(*di.Scope) Handler { return Handler{"users"} })
-	s.Add(func(*di.Scope) Handler { return Handler{"orders"} })
+	s.Provide(func(*di.Scope) Handler { return Handler{"users"} }).Group()
+	s.Provide(func(*di.Scope) Handler { return Handler{"orders"} }).Group()
 	child := s.Child("child")
-	child.Add(func(*di.Scope) Handler { return Handler{"admin"} })
+	child.Provide(func(*di.Scope) Handler { return Handler{"admin"} }).Group()
 	got := child.All[Handler]()
 	if len(got) != 3 {
 		t.Fatalf("got %v", got)
@@ -238,7 +227,7 @@ func TestModifyAfterFreezePanics(t *testing.T) {
 			t.Fatalf("got %v", r)
 		}
 	}()
-	b.Named("late")
+	b.Eager()
 }
 
 func TestLateRegistrationAfterFreeze(t *testing.T) {

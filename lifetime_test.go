@@ -14,10 +14,10 @@ func TestGroupMembersHaveLifecycle(t *testing.T) {
 	var builds atomic.Int32
 	var log []string
 	s := di.New()
-	s.Add(func(*di.Scope) Handler { builds.Add(1); return Handler{"users"} }).
+	s.Provide(func(*di.Scope) Handler { builds.Add(1); return Handler{"users"} }).Group().
 		OnStart(func(context.Context, Handler) error { log = append(log, "start users"); return nil }).
 		OnStop(func(context.Context, Handler) error { log = append(log, "stop users"); return nil })
-	s.Add(func(*di.Scope) Handler { builds.Add(1); return Handler{"orders"} }).
+	s.Provide(func(*di.Scope) Handler { builds.Add(1); return Handler{"orders"} }).Group().
 		OnStop(func(context.Context, Handler) error { log = append(log, "stop orders"); return nil })
 
 	if err := s.Start(context.Background()); err != nil {
@@ -38,7 +38,7 @@ func TestGroupMembersHaveLifecycle(t *testing.T) {
 
 func TestGroupMemberCycle(t *testing.T) {
 	s := di.New()
-	s.Add(func(s *di.Scope) Handler { _ = s.All[Handler](); return Handler{} })
+	s.Provide(func(s *di.Scope) Handler { _ = s.All[Handler](); return Handler{} }).Group()
 	defer func() {
 		if err, _ := recover().(error); !errors.Is(err, di.ErrCycle) {
 			t.Fatalf("got %v", err)

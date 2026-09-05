@@ -22,7 +22,7 @@ repo, err := app.Resolve[*Repo]()
 - **Constructors return `T`, not `(T, error)`.** A missing dependency or a
   failed constructor unwinds to the enclosing `Resolve` or `Start` as an
   `error` that names the full dependency path and the registration site.
-- **Typed lifecycle.** `OnStart`, `OnStop`, `Run` and `Health` hooks are typed
+- **Typed lifecycle.** `OnStart`, `OnStop`, `Worker` and `Health` hooks are typed
   on the service. Nothing is discovered by sniffing interfaces.
 - **Deterministic shutdown.** Reverse build order, child scopes first, every
   error reported.
@@ -102,16 +102,15 @@ registration and must be called before the scope is first resolved.
 | `s.Provide(func(*di.Scope) T)` | A lazily built singleton. `T` is inferred. |
 | `s.Value(v)` | An instance you already have. |
 | `s.Bind[I, T]()` | An alias: `I` is served by `T`'s binding, lifetime and hooks included. |
-| `s.Add(func(*di.Scope) T)` | A member of the group for `T`. |
 
 | Method | Effect |
 |---|---|
-| `.Named("replica")` | Also register under a name. |
 | `.Scoped()` | One instance per resolving scope, built and stopped there. |
 | `.Transient()` | A new, untracked instance on every resolution. |
+| `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
-| `.Run(f)` | A long-running function, cancelled on stop. |
+| `.Worker(f)` | A long-running function, cancelled on stop. |
 | `.Health(f)` | A health check, run by `HealthCheck`. |
 
 Rules the container enforces:
@@ -125,7 +124,7 @@ Rules the container enforces:
 - Combinations that cannot be honoured are rejected when the scope is first
   resolved, whatever order the methods were called in: hooks or `Eager` on a
   transient, `Eager` on a scoped binding, a lifetime on a `Value`, and
-  lifetimes or hooks on an alias.
+  lifetimes, `Group` or hooks on an alias.
 
 ### Resolution
 
@@ -133,7 +132,6 @@ Rules the container enforces:
 |---|---|
 | `s.Get[T]()` | `T`. Inside a constructor a failure unwinds to the caller; at top level it panics with the error. |
 | `s.Resolve[T]()` | `(T, error)`. Never panics on a wiring problem. |
-| `s.Lookup(di.Named[T]("replica"))` | A named binding, through a typed key. |
 | `s.Maybe[T]()` | `(T, bool)`, for optional dependencies. |
 | `s.All[T]()` | Every member of the group for `T`, across the scope chain. |
 | `s.Must(v, err)` | `v`, or aborts the constructor with `err`. |
@@ -235,11 +233,11 @@ and dependencies until they return.
 
 ### Workers
 
-`Run` is for anything that loops until told to stop: consumers, pollers,
+`Worker` is for anything that loops until told to stop: consumers, pollers,
 schedulers.
 
 ```go
-app.Provide(newMailer).Eager().Run(func(ctx context.Context, m *Mailer) error {
+app.Provide(newMailer).Eager().Worker(func(ctx context.Context, m *Mailer) error {
     return m.Loop(ctx) // returns when ctx is cancelled
 })
 ```
@@ -273,11 +271,15 @@ failure wraps `di.ErrUnhealthy` and names the service.
 
 ### Request scopes
 
-`Middleware` gives each request a child scope holding the `*http.Request`,
-attaches it to the request context, and stops it when the handler returns.
+`dihttp.Middleware` gives each request a child scope holding the
+`*http.Request`, attaches it to the request context, and stops it when the
+handler returns. It has the usual `func(http.Handler) http.Handler` shape,
+so a router's `Use` accepts it too.
 
 ```go
-srv := &http.Server{Handler: app.Middleware(mux)}
+import "github.com/floatdrop/di/dihttp"
+
+srv := &http.Server{Handler: dihttp.Middleware(app)(mux)}
 
 mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
     req, _ := di.FromContext(r.Context())

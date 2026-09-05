@@ -1,5 +1,5 @@
 // A complete service: request scopes through middleware, a background
-// worker with a Run hook, a health endpoint, and graceful shutdown.
+// worker with a Worker hook, a health endpoint, and graceful shutdown.
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 )
 
 type DB struct{ dsn string }
@@ -38,7 +39,7 @@ func main() {
 	// DB it depends on is closed. Returning an error stops the application.
 	app.Provide(func(s *di.Scope) *Mailer { _ = s.Get[*DB](); return &Mailer{queue: make(chan string, 16)} }).
 		Eager().
-		Run(func(ctx context.Context, m *Mailer) error {
+		Worker(func(ctx context.Context, m *Mailer) error {
 			for {
 				select {
 				case msg := <-m.queue:
@@ -72,7 +73,7 @@ func main() {
 	})
 
 	app.Provide(func(s *di.Scope) *http.Server {
-		return &http.Server{Addr: ":8080", Handler: app.Middleware(mux)}
+		return &http.Server{Addr: ":8080", Handler: dihttp.Middleware(app)(mux)}
 	}).
 		Eager().
 		OnStart(func(ctx context.Context, srv *http.Server) error {

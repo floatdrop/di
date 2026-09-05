@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 )
 
 // Bind must serve the target's own instance, keeping the target's lifetime.
@@ -53,7 +54,7 @@ func TestRegressionBindKeepsTargetLifetime(t *testing.T) {
 func TestRegressionEagerGroupMember(t *testing.T) {
 	var builds, starts atomic.Int32
 	s := di.New()
-	s.Add(func(*di.Scope) Handler { builds.Add(1); return Handler{} }).Eager().
+	s.Provide(func(*di.Scope) Handler { builds.Add(1); return Handler{} }).Group().Eager().
 		OnStart(func(context.Context, Handler) error { starts.Add(1); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -94,6 +95,10 @@ func TestRegressionInvalidCombinations(t *testing.T) {
 		{"hooks on an alias", "belong on the target binding", func(s *di.Scope) {
 			s.Provide(func(*di.Scope) *Repo { return &Repo{} })
 			s.Bind[Reader, *Repo]().OnStop(func(context.Context, Reader) error { return nil })
+		}},
+		{"group on an alias", "does not apply to a Bind alias", func(s *di.Scope) {
+			s.Provide(func(*di.Scope) *Repo { return &Repo{} })
+			s.Bind[Reader, *Repo]().Group()
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -515,7 +520,7 @@ func TestReviewIntermediateScopeShadow(t *testing.T) {
 func TestReviewNilInterfaceValue(t *testing.T) {
 	s := di.New()
 	s.Value[error](nil)
-	s.Add(func(*di.Scope) error { return nil })
+	s.Provide(func(*di.Scope) error { return nil }).Group()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -574,7 +579,7 @@ func TestReviewMiddlewareInjectedRequestRouting(t *testing.T) {
 		sc, _ := di.FromContext(r.Context())
 		sc.Get[*Handler]()
 	})
-	srv := httptest.NewServer(app.Middleware(mux))
+	srv := httptest.NewServer(dihttp.Middleware(app)(mux))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/users/42")
@@ -588,5 +593,22 @@ func TestReviewMiddlewareInjectedRequestRouting(t *testing.T) {
 	}
 	if !gotScope.Load().(bool) {
 		t.Fatal("the injected request's context has no scope")
+	}
+}
+
+// A pre-built member joins a group like a constructed one, which Add could
+// not express, and the plain registration of the same type is neither
+// shadowed by the members nor counted among them.
+func TestGroupAcceptsValues(t *testing.T) {
+	s := di.New()
+	s.Value(Handler{"users"}).Group()
+	s.Provide(func(*di.Scope) Handler { return Handler{"orders"} }).Group()
+	s.Value(Handler{"plain"})
+	got := s.All[Handler]()
+	if len(got) != 2 || got[0].name != "users" || got[1].name != "orders" {
+		t.Fatalf("All = %v", got)
+	}
+	if got := s.Get[Handler]().name; got != "plain" {
+		t.Fatalf("Get = %q, want the plain registration", got)
 	}
 }
