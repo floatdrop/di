@@ -21,7 +21,7 @@ cd benchmarks && go test -bench . -benchmem   # separate module, see below
 
 go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
 go test -count=1 -coverprofile=all.out .
-go run scripts/generatorgap.go -floor 80 gen.out all.out   # what only hand-written tests reach
+go run scripts/generatorgap.go -floor 85 gen.out all.out   # what only hand-written tests reach
 ```
 
 Run the full gate as a single `&&` chain before committing, the same way CI
@@ -441,8 +441,15 @@ Four layers, each catching a different class:
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
 - `scripts/generatorgap.go` — the map of what only the hand-written tests
   reach, which is the map of where the next review will dig: every defect the
-  three September 2026 reviews found lived on such a line. CI runs it with a
-  floor of 80% generator coverage. When the floor moves, move it up.
+  four September 2026 reviews found lived on such a line. CI runs it with a
+  floor of 85% generator coverage. When the floor moves, move it up.
+
+  CI also checks the script's arithmetic against `go tool cover -func`,
+  because the fourth review found the script wrong: it keyed coverage blocks
+  by line number, and `di.go` has eighteen lines carrying more than one block
+  -- a hook registered and its body declared in a single expression. Reaching
+  the registration made the body look covered. A tool that measures a gap has
+  to be measured itself.
 
 `FuzzMachineConcurrent` is the coverage-guided driver for the concurrent
 oracles; run it with `-race` or it checks almost nothing.
@@ -485,3 +492,11 @@ errors across the examples. golangci-lint v2.13.1+ handles them correctly.
 `.golangci.yml` excludes staticcheck QF1011 because `var get func() *DB = s.Get`
 is not redundant: the declared type is what drives Go 1.27 inference for a
 generic method value.
+
+golangci-lint v2.13.1's staticcheck (honnef.co/go/tools v0.8.0) *crashes* --
+`SA4023: index out of range [1] with length 1`, inside its nilness analysis --
+on a function that compares an error parameter to nil in an `||` and is called
+from two places. `joinCause` in `di.go` is written as two separate `if`s for
+that reason, which is also how it reads best. Recombining them takes the lint
+job down with a panic rather than a finding, which is a confusing way to find
+out.

@@ -38,7 +38,17 @@ jobs:
         run: |
           go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=generators.out .
           go test -count=1 -coverprofile=everything.out .
-          go run scripts/generatorgap.go -floor 80 generators.out everything.out
+          go run scripts/generatorgap.go -floor 85 generators.out everything.out
+          # The gap report is only worth its floor if it reads a profile the
+          # way the toolchain does. It once keyed coverage blocks by line and
+          # merged the eighteen lines of di.go that carry more than one, which
+          # made a hook body look covered because its registration was.
+          want=$(go tool cover -func=generators.out | tail -1 | awk '{print $NF}')
+          got=$(go run scripts/generatorgap.go generators.out everything.out | grep -oE '[0-9]+\.[0-9]+%' | head -1)
+          if [ "$want" != "$got" ]; then
+            echo "::error::generatorgap reports $got where go tool cover reports $want"
+            exit 1
+          fi
       - name: benchmarks compile and run
         working-directory: benchmarks
         run: |

@@ -36,6 +36,11 @@ package di_test
 //	C10 A resolution begun after its scope's Stop has returned fails. Begun,
 //	    not finished: a resolution already in flight may legitimately return
 //	    a value decided before the scope stopped.
+//	C11 A Stop reports the failure of a drain hook of its own scope, whether
+//	    it ran that hook or waited for another Stop that owned the phase.
+//	    Until the fourth review, every drain hook here returned nil, so a
+//	    scope whose Stop swallowed its own hook's failure looked identical
+//	    to one that had nothing to report.
 //
 // C6, C7 and C8 exist because the first version of this driver could not see
 // four of the six defects of the second September 2026 review. Its drain
@@ -215,6 +220,11 @@ type cmachine struct {
 	// stopReturned records the scopes whose Stop has come back, for C10.
 	stopReturned sync.Map // scope name -> struct{}
 
+	// drainFailed records the scopes whose own drain hook returned an error;
+	// stopReports, below, holds what every patient Stop of a scope returned.
+	// C11 is the two compared.
+	drainFailed sync.Map // scope name -> error
+
 	// sched, when set, decides the order the hooks and operations run in.
 	// Nil is the ordinary driver, where the Go scheduler decides.
 	sched *scheduler
@@ -225,23 +235,25 @@ type cmachine struct {
 	// compared once everything has gone quiet.
 	owed sync.Map // built value -> the name of the scope that owes its release
 
-	mu       sync.Mutex
-	builds   map[string]int
-	starts   map[string]int
-	stops    map[string]int
-	released map[any]int
-	verdicts map[string]map[string]bool // scope/key -> the verdicts resolution gave
-	fails    []string
+	mu          sync.Mutex
+	builds      map[string]int
+	starts      map[string]int
+	stops       map[string]int
+	released    map[any]int
+	stopReports map[string][]error         // scope -> what each patient Stop returned
+	verdicts    map[string]map[string]bool // scope/key -> the verdicts resolution gave
+	fails       []string
 }
 
 func newCMachine(t *testing.T, ops []op) *cmachine {
 	m := &cmachine{
 		t: t, ops: ops,
 		builds: map[string]int{}, starts: map[string]int{}, stops: map[string]int{},
-		released: map[any]int{},
-		verdicts: map[string]map[string]bool{},
-		order:    newStopOrder(map[string]string{"c1": "root", "c2": "root", "gc": "c1", "request": "root"}),
-		drain:    newDrainWatch(),
+		released:    map[any]int{},
+		stopReports: map[string][]error{},
+		verdicts:    map[string]map[string]bool{},
+		order:       newStopOrder(map[string]string{"c1": "root", "c2": "root", "gc": "c1", "request": "root"}),
+		drain:       newDrainWatch(),
 	}
 	root := di.New()
 	root.Observe(func(ev di.Event) {
@@ -399,6 +411,10 @@ func (m *cmachine) register(s *di.Scope, o op) {
 // worker that only ever returns nil leaves that whole path unreached.
 var errWorker = errors.New("worker failed")
 
+// errDrain is a drain hook reporting that it could not finish its work, which
+// its own scope's Stop has to pass on.
+var errDrain = errors.New("drain failed")
+
 func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) error, plain func() T, dep func(*di.Scope) T) {
 	down := func(ctx context.Context, v T) error { return stop(ctx, v) }
 	// Every shape gets a worker, so that any instance the sequence starts is
@@ -437,6 +453,14 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		m.buildIntoChild(holder, o.key)
 		time.Sleep(2 * time.Millisecond) // widen the window a bad ordering needs
 		m.drain.end(any(v))
+		if o.key%2 == 1 {
+			// Half the draining shapes fail. A hook that always returns nil
+			// exercises the phase without checking what it does with an
+			// error, which is how a child Stop that dropped its own hook's
+			// failure survived three drivers.
+			m.drainFailed.Store(holder, errDrain)
+			return errDrain
+		}
 		return nil
 	}
 	// own records which scope the constructor ran in, which for every
@@ -646,8 +670,17 @@ func (m *cmachine) step(i int, o op) {
 			defer cancel()
 			err := s.Stop(ctx)
 			m.stopReturned.Store(m.names[o.scope], struct{}{})
+			if !o.eager {
+				// Only a patient Stop is held to C11: one that ran out of
+				// context may return the missed deadline instead of what the
+				// phase went on to report.
+				m.mu.Lock()
+				m.stopReports[m.names[o.scope]] = append(m.stopReports[m.names[o.scope]], err)
+				m.mu.Unlock()
+			}
 			if err != nil && !o.eager && !isDocumentedFailure(err) &&
-				!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errWorker) {
+				!errors.Is(err, context.DeadlineExceeded) &&
+				!errors.Is(err, errWorker) && !errors.Is(err, errDrain) {
 				m.fail("%s: Stop reported an undocumented failure: %v", label, err)
 			}
 		case opShutdown:
@@ -711,7 +744,12 @@ func (m *cmachine) run() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	m.call("final Stop", func() { _ = m.scopes[0].Stop(ctx) })
+	m.call("final Stop", func() {
+		err := m.scopes[0].Stop(ctx)
+		m.mu.Lock()
+		m.stopReports["root"] = append(m.stopReports["root"], err)
+		m.mu.Unlock()
+	})
 	for _, name := range m.names {
 		m.stopReturned.Store(name, struct{}{})
 	}
@@ -816,6 +854,15 @@ func (m *cmachine) check() {
 		case n > 1:
 			m.fails = append(m.fails, fmt.Sprintf(
 				"an instance held by %s was released %d times", scope, n))
+		}
+		return true
+	})
+	m.drainFailed.Range(func(scope, want any) bool { // C11
+		for _, got := range m.stopReports[scope.(string)] {
+			if !errors.Is(got, want.(error)) {
+				m.fails = append(m.fails, fmt.Sprintf(
+					"a drain hook of %s failed and a Stop of that scope reported %v", scope, got))
+			}
 		}
 		return true
 	})
