@@ -1,6 +1,6 @@
 package di_test
 
-// Regressions in Run hooks and Shutdown: how a worker's own failure reaches
+// Regressions in Worker hooks and Shutdown: how a worker's own failure reaches
 // the caller, and what may still be holding the value when OnStop wants it.
 //
 // One test per defect, named for the rule it pins. The tag at the end of a
@@ -8,8 +8,8 @@ package di_test
 // of the first September 2026 review, checked against 12dba3c; review 2 was
 // checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
 // fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor, and (alias
-// refactor) the sweep that made lookup follow Bind chains. An untagged test
+// checked against the code before the instance-phase refactor. An untagged
+// test
 // comes from the first of those passes, or from the generators, which its own
 // comment says. Several fail by hanging rather than by reporting, which is why
 // each bounds its own wait instead of relying on the package timeout.
@@ -26,11 +26,11 @@ import (
 	"github.com/floatdrop/di"
 )
 
-// A Run hook that dies on its own is reported by Stop, not only by Run.
-func TestRegressionRunHookErrorReachesStop(t *testing.T) {
+// A Worker hook that dies on its own is reported by Stop, not only by Run.
+func TestRegressionWorkerHookErrorReachesStop(t *testing.T) {
 	boom := errors.New("queue disconnected")
 	s := di.New()
-	s.Value(&Worker{}).Eager().Run(func(context.Context, *Worker) error { return boom })
+	s.Value(&Worker{}).Eager().Worker(func(context.Context, *Worker) error { return boom })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestRegressionRunHookErrorReachesStop(t *testing.T) {
 func TestRegressionRunErrorWrappingCanceled(t *testing.T) {
 	s := di.New()
 	s.Value(&Worker{}).Eager().
-		Run(func(ctx context.Context, _ *Worker) error { return fmt.Errorf("upstream dial: %w", context.Canceled) })
+		Worker(func(ctx context.Context, _ *Worker) error { return fmt.Errorf("upstream dial: %w", context.Canceled) })
 	done := make(chan error, 1)
 	go func() { done <- s.Run(context.Background()) }()
 	select {
@@ -67,7 +67,7 @@ func TestReviewDetachedChildWorkerFailureReachesRun(t *testing.T) {
 	child := root.Child("c")
 	failed := make(chan struct{})
 	child.Provide(func(*di.Scope) *Worker { return &Worker{} }).Eager().
-		Run(func(context.Context, *Worker) error { defer close(failed); return errors.New("worker died") })
+		Worker(func(context.Context, *Worker) error { defer close(failed); return errors.New("worker died") })
 
 	runDone := make(chan error, 1)
 	go func() { runDone <- root.Run(context.Background(), di.StopTimeout(time.Second)) }()
@@ -95,7 +95,7 @@ func TestReviewDetachedChildWorkerFailureReachesRun(t *testing.T) {
 func TestReviewWorkerFailureIsNotDuplicated(t *testing.T) {
 	boom := errors.New("queue disconnected")
 	s := di.New()
-	s.Value(&Worker{}).Eager().Run(func(context.Context, *Worker) error { return boom })
+	s.Value(&Worker{}).Eager().Worker(func(context.Context, *Worker) error { return boom })
 	err := s.Run(context.Background())
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
@@ -105,11 +105,11 @@ func TestReviewWorkerFailureIsNotDuplicated(t *testing.T) {
 	}
 }
 
-// Reported alongside the six: OnStop must not run while a Run hook that
+// Reported alongside the six: OnStop must not run while a Worker hook that
 // outlasted Stop's context is still using the value. Stop reports the missed
 // deadline and the release follows the worker's own return.
 // (review 2, 9)
-func TestReview2OnStopWaitsForALiveRunHook(t *testing.T) {
+func TestReview2OnStopWaitsForALiveWorkerHook(t *testing.T) {
 	runLive := make(chan struct{})
 	release := make(chan struct{})
 	stopped := make(chan struct{})
@@ -117,7 +117,7 @@ func TestReview2OnStopWaitsForALiveRunHook(t *testing.T) {
 
 	root := di.New()
 	root.Value(&Worker{}).Eager().
-		Run(func(context.Context, *Worker) error { close(runLive); <-release; return nil }).
+		Worker(func(context.Context, *Worker) error { close(runLive); <-release; return nil }).
 		OnStop(func(context.Context, *Worker) error {
 			select {
 			case <-release:
@@ -140,7 +140,7 @@ func TestReview2OnStopWaitsForALiveRunHook(t *testing.T) {
 	}
 	select {
 	case <-stopped:
-		t.Fatal("OnStop ran while the Run hook was still live")
+		t.Fatal("OnStop ran while the Worker hook was still live")
 	default:
 	}
 	close(release)
@@ -151,7 +151,7 @@ func TestReview2OnStopWaitsForALiveRunHook(t *testing.T) {
 		t.Fatal("the release never happened")
 	}
 	if overlap.Load() {
-		t.Fatal("OnStop ran while the Run hook was still live")
+		t.Fatal("OnStop ran while the Worker hook was still live")
 	}
 }
 
@@ -166,7 +166,7 @@ func TestReview3RunReportsAShutdownPublishedDuringStop(t *testing.T) {
 	root := di.New()
 	child := root.Child("worker")
 	child.Value(&r3Worker{}).
-		Run(func(ctx context.Context, _ *r3Worker) error {
+		Worker(func(ctx context.Context, _ *r3Worker) error {
 			<-ctx.Done()
 			root.Shutdown(fail)
 			return fail
@@ -200,7 +200,7 @@ func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
 
 	root := di.New()
 	child := root.Child("worker")
-	child.Value(&Worker{}).Run(func(ctx context.Context, _ *Worker) error {
+	child.Value(&Worker{}).Worker(func(ctx context.Context, _ *Worker) error {
 		<-ctx.Done()
 		root.Shutdown(fail)
 		return fail

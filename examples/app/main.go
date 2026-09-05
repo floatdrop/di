@@ -1,5 +1,5 @@
 // A complete service: request scopes through middleware, a background
-// worker with a Run hook, a health endpoint, and graceful shutdown.
+// worker with a Worker hook, a health endpoint, and graceful shutdown.
 package main
 
 import (
@@ -12,11 +12,20 @@ import (
 	"time"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 )
 
 type DB struct{ dsn string }
 
 func (db *DB) Ping(ctx context.Context) error { return nil }
+
+// Checker is what the health endpoint asks. A service that can report on
+// itself joins the Checker group, and the handler resolves them all.
+type Checker interface {
+	Check(ctx context.Context) error
+}
+
+func (db *DB) Check(ctx context.Context) error { return db.Ping(ctx) }
 
 type User struct{ Name string }
 
@@ -31,14 +40,14 @@ func main() {
 		db := &DB{dsn: "postgres://localhost/app"}
 		return s.Must(db, db.Ping(ctx))
 	}).
-		Health(func(ctx context.Context, db *DB) error { return db.Ping(ctx) }).
 		OnStop(func(ctx context.Context, db *DB) error { log.Println("db closed"); return nil })
+	app.Provide(func(s *di.Scope) Checker { return s.Get[*DB]() }).Group()
 
 	// A worker: started with the app, cancelled by Stop, awaited before the
 	// DB it depends on is closed. Returning an error stops the application.
 	app.Provide(func(s *di.Scope) *Mailer { _ = s.Get[*DB](); return &Mailer{queue: make(chan string, 16)} }).
 		Eager().
-		Run(func(ctx context.Context, m *Mailer) error {
+		Worker(func(ctx context.Context, m *Mailer) error {
 			for {
 				select {
 				case msg := <-m.queue:
@@ -64,15 +73,17 @@ func main() {
 		fmt.Fprintln(w, "hello", user.Name)
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := app.HealthCheck(r.Context()); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
+		for _, c := range app.All[Checker]() {
+			if err := c.Check(r.Context()); err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
 		}
 		fmt.Fprintln(w, "ok")
 	})
 
 	app.Provide(func(s *di.Scope) *http.Server {
-		return &http.Server{Addr: ":8080", Handler: app.Middleware(mux)}
+		return &http.Server{Addr: ":8080", Handler: dihttp.Middleware(app)(mux)}
 	}).
 		Eager().
 		OnStart(func(ctx context.Context, srv *http.Server) error {

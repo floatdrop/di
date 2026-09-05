@@ -3,8 +3,9 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 `github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
-on generic methods. The whole library is `di.go`; everything else is tests,
-examples, and a separate benchmarks module.
+on generic methods. The whole library is `di.go`, plus the net/http adapter
+in `dihttp/`; everything else is tests, examples, and a separate benchmarks
+module.
 
 ## Commands
 
@@ -47,8 +48,7 @@ path attached, which is how cycle detection and error paths work.
 
 **Which state owns an instance.** A singleton lives in the scope that
 registered the binding (`owner`); a `Scoped` instance lives in the scope that
-resolves it (`holder`), so it can see that scope's values; a `Transient` builds
-in the resolving scope and is not tracked at all. `resolve` picks the holder
+resolves it (`holder`), so it can see that scope's values. `resolve` picks the holder
 and the rest of the pipeline works in terms of it.
 
 **The instance phase machine** (`phaseNew` → `Building` → `Built` →
@@ -79,15 +79,13 @@ safe in either order: a waiter that got there first is released by the close;
 an owner that got there first leaves nil behind, and the phase the waiter then
 reads already says the step is done, so it never blocks on a wakeup that has
 been and gone. Nil is the ordinary state, not an edge case -- an uncontended
-build, an unraced start step and an undisputed drain each allocate nothing, and
-a `Transient` instance never allocates one at all.
+build, an unraced start step and an undisputed drain each allocate nothing.
 
 This replaced a `sync.Cond` per scope, where every phase change woke every
 waiter in the scope to re-check a predicate that was almost never theirs, and
 where bounding a wait by a context needed `awaitPhase` to fake it with a
 `context.AfterFunc` that broadcast on expiry. The context-bounded wait in
-`drainIfNeeded` is now an ordinary `select`. A `Transient` instance gets no
-channels at all: it is never cached, so no second resolution can find it.
+`drainIfNeeded` is now an ordinary `select`.
 
 The one broadcast with no channel replacing it is the one `teardown` did after
 `stopped.Store(true)`. Nothing waits on a predicate that mentions `stopped` --
@@ -119,10 +117,7 @@ under one lock to do it.
 resolve from several goroutines and they all share the `*Scope` it was handed.
 A node is identified by binding *and* holder, never by key: that is what
 separates a group member from a plain registration of the same type, and one
-`Scoped` binding across scopes. An alias hop is identified by the alias
-binding and the holder the *route ends at*, not the scope the alias was
-registered in, or one root alias to a `Scoped` target would be the same edge
-in every scope and collapse into a false cycle.
+`Scoped` binding across scopes.
 
 `resolver.done` is the one thing about a node that changes: `resolve` sets it
 as it returns, and `onPath` and `descends` *stop the walk* at a node that has
@@ -252,16 +247,11 @@ set and its rules cannot drift apart.
 
 **A key is served to a whole route, not just to its destination.**
 `binding.used` protects the owner; `markServed` records the key in every scope
-between the resolver and that owner, and does the same for each alias hop.
-Both halves matter: an earlier version marked only the endpoint, and a scope
-in the middle, or one holding an alias's target, could then shadow a key it
-had already handed out.
-
-**Aliases are resolved in `lookup`, not by callers.** `lookup` follows `Bind`
-chains and reports the binding that actually serves a key, never an alias.
-`resolve` has a defensive panic if it ever receives one. This is structural: an
-earlier version relied on three call sites remembering to follow aliases, and
-one forgot.
+between the resolver and that owner. Both halves matter: an earlier version
+marked only the endpoint, and a scope in the middle could then shadow a key
+it had already handed out. `Bind` aliases used to add hops to the route and
+a cycle detector of their own; an interface is now served by a constructor
+returning the implementation, which is an ordinary binding.
 
 **A stopped scope refuses to serve, and that is checked twice.** `resolve`
 checks on the way in, and `await` checks again after the wait, because the
@@ -309,11 +299,11 @@ with an `OnStop` for an `OnStart` that never finished.
   promise.
 - Nothing in the teardown path may run a user hook against a value another
   hook still holds. That is one rule with three instances: `OnStop` after
-  `OnDrain`, `OnStop` after a `Run` hook (deferred to `releaseAfterRun` when
+  `OnDrain`, `OnStop` after a `Worker` hook (deferred to `releaseAfterWorker` when
   `ctx` expires rather than run alongside it), and a parent's hooks after a
   child's.
 - `Start`'s rollback goes through `Stop` with `context.WithoutCancel`, so it
-  stops child scopes and waits for `Run` hooks.
+  stops child scopes and waits for `Worker` hooks.
 - Whichever `Stop` call queues a handoff owns that teardown's context; a later
   `Stop` must not clobber it.
 
@@ -325,7 +315,7 @@ Four layers, each catching a different class:
   of the library the defect lived in rather than by the review that found it:
   `cycles_test.go` (the resolution path), `wiring_test.go` (registration and
   lookup), `teardown_test.go` (start, stop, rollback), `drain_test.go` and
-  `worker_test.go` (`Run` hooks and `Shutdown`), with the stand-in types they
+  `worker_test.go` (`Worker` hooks and `Shutdown`), with the stand-in types they
   share in `fixtures_test.go`. A new one goes wherever its rule lives.
 
   Provenance moved into a tag on each test -- `(review 2, 5)`, `(pass 4)` --
@@ -336,18 +326,18 @@ Four layers, each catching a different class:
   test, and tag it. Several tests here turned out to pass both before and
   after; say so rather than implying coverage.
 - `property_test.go` — random *registration* sequences checked against a model
-  of the eager/alias rules. A predictive model can be wrong in the same way as
+  of the eager rules. A predictive model can be wrong in the same way as
   the code, so treat it as needing its own scrutiny.
 - `machine_test.go` — random *operation* sequences (register, resolve, start,
-  stop, health, shutdown) across a root, two children and a grandchild,
+  stop, shutdown) across a root, two children and a grandchild,
   checked against invariants taken from documented guarantees rather than
   predicted values. This is the layer that catches error-path and cross-scope
-  bugs. Keep the I4 exemptions narrow: exempting every aliased key from value
-  stability, rather than only one whose target is `Transient`, is what hid a
-  scope handing out two live values for one interface.
+  bugs. I4 has no exemptions now that every lifetime is tracked. The old
+  exemption for aliased keys is what once hid a scope handing out two live
+  values for one interface, so do not reintroduce one lightly.
 - `lifecyclemodel_test.go` — the one place that *does* predict, because the
   argument against predicting does not hold for it. What serves a key depends
-  on overrides, aliases and the eager rules, and modelling that would be
+  on overrides and the eager rules, and modelling that would be
   modelling the code twice; what happens to an instance *once it exists* is a
   small state machine the package documents completely, and it is the half
   every review found defects in. So the model takes builds as given -- the
@@ -406,7 +396,7 @@ Four layers, each catching a different class:
   `di.go` and C9 fails.
 - The three September 2026 reviews are the source of most of those tests: the
   first found eleven defects plus a gap it did not count, the second six plus
-  the `Run`-hook overlap and then two the tightened driver found on its own,
+  the `Worker`-hook overlap and then two the tightened driver found on its own,
   and the third six that were all cross-phase or cross-branch -- a drain hook
   stopping a sibling scope, a release dropped with a missed deadline, a
   shutdown cause published after `Run` had read it, a false cycle through a
@@ -470,7 +460,7 @@ The sequential generators do not explore goroutine interleavings. That is what
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
 - **A teardown finishes after `Stop` returns only when `Stop`'s context
-  expired** -- waiting for a `Run` hook, a start step or a drain hook -- plus
+  expired** -- waiting for a `Worker` hook, a start step or a drain hook -- plus
   the one that undoes a build completing after the scope stopped, which no
   `Stop` issued. The deadline bounds how long `Stop` waits, never whether the
   release is owed, and `Stop` has already taken the instance off its scope's

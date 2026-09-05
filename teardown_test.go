@@ -8,8 +8,8 @@ package di_test
 // of the first September 2026 review, checked against 12dba3c; review 2 was
 // checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
 // fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor, and (alias
-// refactor) the sweep that made lookup follow Bind chains. An untagged test
+// checked against the code before the instance-phase refactor. An untagged
+// test
 // comes from the first of those passes, or from the generators, which its own
 // comment says. Several fail by hanging rather than by reporting, which is why
 // each bounds its own wait instead of relying on the package timeout.
@@ -104,12 +104,12 @@ func TestRegressionRollbackStopsChildren(t *testing.T) {
 	}
 }
 
-// Rollback must wait for Run hooks even when the caller's context is done.
-func TestRegressionRollbackAwaitsRunHook(t *testing.T) {
+// Rollback must wait for Worker hooks even when the caller's context is done.
+func TestRegressionRollbackAwaitsWorkerHook(t *testing.T) {
 	returned := make(chan struct{})
 	s := di.New()
 	s.Value(&Worker{}).Eager().
-		Run(func(ctx context.Context, w *Worker) error {
+		Worker(func(ctx context.Context, w *Worker) error {
 			<-ctx.Done()
 			time.Sleep(50 * time.Millisecond)
 			close(returned)
@@ -125,7 +125,7 @@ func TestRegressionRollbackAwaitsRunHook(t *testing.T) {
 	select {
 	case <-returned:
 	default:
-		t.Fatal("rollback returned without awaiting the Run hook")
+		t.Fatal("rollback returned without awaiting the Worker hook")
 	}
 }
 
@@ -135,7 +135,7 @@ func TestRegressionLateUndoHonoursDeadline(t *testing.T) {
 	release := make(chan struct{})
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { close(building); <-release; return &Worker{} }).
-		Run(func(ctx context.Context, w *Worker) error { time.Sleep(3 * time.Second); return nil })
+		Worker(func(ctx context.Context, w *Worker) error { time.Sleep(3 * time.Second); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestStopFromAHookIsReported(t *testing.T) {
 		}},
 		{"Run", func(s *di.Scope, got chan<- error) {
 			s.Value(&DB{}).Eager().
-				Run(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); <-ctx.Done(); return nil })
+				Worker(func(ctx context.Context, _ *DB) error { got <- s.Stop(ctx); <-ctx.Done(); return nil })
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,7 +293,7 @@ func TestStopFromAHookWithItsOwnContextIsBounded(t *testing.T) {
 }
 
 // A Stop whose deadline expires while a start step is in flight must not
-// orphan the instance: its Run hook is cancelled and its OnStop runs. Stop
+// orphan the instance: its Worker hook is cancelled and its OnStop runs. Stop
 // waits for the step, so this is the deadline ending the caller's wait rather
 // than the teardown, which finishes on a goroutine of its own.
 // (pass 3)
@@ -304,7 +304,7 @@ func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).
 		OnStart(func(context.Context, *Worker) error { close(entered); time.Sleep(150 * time.Millisecond); return nil }).
-		Run(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); close(runCancelled); return nil }).
+		Worker(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); close(runCancelled); return nil }).
 		OnStop(func(context.Context, *Worker) error { close(stopped); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
 		select {
 		case <-ch:
 		case <-time.After(5 * time.Second):
-			t.Fatal("the instance was orphaned: its Run hook or OnStop never ran")
+			t.Fatal("the instance was orphaned: its Worker hook or OnStop never ran")
 		}
 	}
 }
@@ -614,27 +614,5 @@ func TestReview2PanickingStartHookIsAFailure(t *testing.T) {
 	}
 	if got := starts.Load(); got != 1 {
 		t.Fatalf("OnStart ran %d times", got)
-	}
-}
-
-// A Transient constructor that finishes after its scope has stopped must
-// not hand the value back: the transient branch skipped the check await makes
-// after its wait.
-// (review 3, 5)
-func TestReview3TransientFinishingAfterStopIsRejected(t *testing.T) {
-	root := di.New()
-	building := make(chan struct{})
-	release := make(chan struct{})
-	root.Provide(func(*di.Scope) *r3T { close(building); <-release; return &r3T{} }).Transient()
-
-	out := make(chan error, 1)
-	go func() { _, err := root.Resolve[*r3T](); out <- err }()
-	<-building
-	if err := root.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	close(release)
-	if err := <-out; !errors.Is(err, di.ErrStopped) {
-		t.Errorf("want ErrStopped, got %v", err)
 	}
 }

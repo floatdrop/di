@@ -21,16 +21,15 @@ package di_test
 //	I4  A singleton is stable: two successful resolutions of a key from one
 //	    scope return the identical value.
 //	I5  Nothing is stopped more often than it was built.
-//	I6  Once the root is stopped, every Run hook has returned.
+//	I6  Once the root is stopped, every Worker hook has returned.
 //
 // What happens to an instance once it exists is predicted rather than
 // checked against invariants, by the model in lifecyclemodel_test.go. That
 // half is a small state machine the package documents completely, and it is
 // the half every review found defects in.
 //
-// Alias identity, and recovering a key whose resolution failed, are pinned
-// by regression tests instead: they need a specific shape rather than a
-// random one.
+// Recovering a key whose resolution failed is pinned by a regression test
+// instead: it needs a specific shape rather than a random one.
 
 import (
 	"context"
@@ -55,8 +54,7 @@ type mkI interface{ marker() }
 func (*mk1) marker() {}
 
 const (
-	numKeys  = 4 // mk1, mk2, mk3, mkI
-	ifaceKey = 3
+	numKeys = 4 // mk1, mk2, mk3, mkI
 	// root, two children and a grandchild. The grandchild is what lets a
 	// scope between a resolver and the owner of a binding shadow a key that
 	// has already been served through it.
@@ -80,7 +78,6 @@ const (
 	opAll
 	opStart
 	opStop
-	opHealth
 	opShutdown
 	opRun
 	numOpKinds
@@ -99,7 +96,7 @@ type op struct {
 }
 
 func (o op) String() string {
-	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Health", "Shutdown", "Run"}
+	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Shutdown", "Run"}
 	if o.kind == opRegister {
 		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v)", o.scope, keyNames[o.key], o.reg, o.eager)
 	}
@@ -116,7 +113,7 @@ func decode(data []byte) []op {
 			kind:  opKind(data[i] % uint8(numOpKinds)),
 			scope: data[i+1] % numScopes,
 			key:   data[i+2] % numKeys,
-			reg:   data[i+3] % 14,
+			reg:   data[i+3] % 12,
 			eager: data[i+4]&1 == 1,
 		})
 	}
@@ -137,7 +134,7 @@ type machine struct {
 	starts map[string]int
 	stops  map[string]int
 
-	runsLive atomic.Int32 // Run hooks currently executing
+	runsLive atomic.Int32 // Worker hooks currently executing
 
 	// values seen per (scope, key), to check singleton stability
 	seen map[string]any
@@ -150,8 +147,6 @@ type machine struct {
 	lc *lifecycle
 
 	failedResolve map[string]bool
-	unstable      map[int]bool // keys that need not resolve to a stable value
-	aliased       bool         // mkI has been aliased to *mk1 at some point
 }
 
 // fail reports a violation together with the sequence that produced it.
@@ -166,7 +161,6 @@ func newMachine(t *testing.T, ops []op) *machine {
 		builds: map[string]int{}, starts: map[string]int{}, stops: map[string]int{},
 		seen: map[string]any{}, failedResolve: map[string]bool{},
 		registeredFrom: map[int]bool{},
-		unstable:       map[int]bool{},
 		stopped:        make([]bool, numScopes),
 	}
 	root := di.New()
@@ -305,9 +299,6 @@ func (m *machine) step(i int, o op) {
 		}
 		_ = out
 
-	case opHealth:
-		m.call(label, func() (any, error) { return nil, s.HealthCheck(context.Background()) })
-
 	case opRun:
 		// Run with a context that is already cancelled: it starts the scope,
 		// finds nothing to wait for, and stops again. That is the only way
@@ -388,27 +379,8 @@ func (m *machine) checkStable(label string, o op, v any) {
 		m.seen[k] = v
 		return
 	}
-	if prev != v && !m.unstable[int(o.key)] {
+	if prev != v {
 		m.fail("%s: %s resolved to a different value than before", label, keyNames[o.key])
-	}
-}
-
-// markTransient and markAliased maintain the set of keys exempt from I4.
-// The exemption is deliberately narrow: an alias resolves to its target's own
-// instance, so it is only unstable when that target is. Exempting every
-// aliased key instead is what hid a scope handing out two live values for one
-// interface, so the model must not give that case away.
-func (m *machine) markTransient(k int) {
-	m.unstable[k] = true
-	if k == 0 && m.aliased {
-		m.unstable[ifaceKey] = true
-	}
-}
-
-func (m *machine) markAliased() {
-	m.aliased = true
-	if m.unstable[0] {
-		m.unstable[ifaceKey] = true
 	}
 }
 
@@ -456,7 +428,7 @@ func (m *machine) finish() {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if n := m.runsLive.Load(); n != 0 {
-		m.fail("%d Run hooks still executing after the root was stopped", n)
+		m.fail("%d Worker hooks still executing after the root was stopped", n)
 	}
 }
 
@@ -468,9 +440,9 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	var b di.Binding[T]
 	// Every modelled shape reports its own build and its own hooks, so the
 	// model knows which instance is which without having to predict what
-	// serves a key. A Value binding has no constructor to report from, and a
-	// Transient one is never tracked, so those two stay outside the model:
-	// hook returns what the model knows about each shape.
+	// serves a key. A Value binding has no constructor to report from, so it
+	// stays outside the model: hook returns what the model knows about each
+	// shape.
 	built := func(sc *di.Scope, v T) T {
 		m.lc.built(m.scopeOf(sc), o.reg, any(v))
 		return v
@@ -492,28 +464,32 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).Scoped().
 			OnStop(hook("OnStop"))
 	case 3:
-		b = s.Provide(func(*di.Scope) T { return plain() }).Transient()
-		m.markTransient(int(o.key))
-	case 4:
-		b = s.Add(func(sc *di.Scope) T { return built(sc, plain()) }).
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).Group().
 			OnStart(hook("OnStart")).OnStop(hook("OnStop"))
-	case 6:
+	case 4:
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
-			Run(func(ctx context.Context, _ T) error {
+			Worker(func(ctx context.Context, _ T) error {
 				m.runsLive.Add(1)
 				defer m.runsLive.Add(-1)
 				<-ctx.Done()
 				return nil
 			}).OnStop(hook("OnStop"))
-	case 7:
-		b = s.Provide(func(*di.Scope) T { return plain() }).Health(noop)
-	case 8:
+	case 5:
 		// A constructor that fails. resolve turns this into an error, so it
 		// exercises the failure paths rather than escaping as a panic.
 		b = s.Provide(func(*di.Scope) T { panic("injected constructor failure") })
-	case 9:
+	case 6:
 		b = s.Provide(dep) // depends on another key, so chains and cycles arise
-	case 12:
+	case 7:
+		// Draining, which the sequential machine had no shape for at all: the
+		// phase was exercised only where two calls overlap, and never where
+		// its boundary is known.
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
+			OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
+	case 8:
+		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
+			OnStart(hook("OnStart")).OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
+	case 9:
 		// A constructor that registers, and resolves what it registered. The
 		// registry is mutable during a resolution, and nothing here was
 		// exercising that: freeze runs inside the nested lookup, on a scope
@@ -523,7 +499,7 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 			_, _ = sc.Resolve[marker]()
 			return built(sc, plain())
 		}).OnStop(hook("OnStop"))
-	case 13:
+	case 10:
 		// The same, over its own key. That has to be rejected: the nested
 		// resolve would be served the replacement while this one goes on to
 		// return the old value, which is two live values for one key.
@@ -532,15 +508,6 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 			_, _ = sc.Resolve[T]()
 			return built(sc, plain())
 		}).OnStop(hook("OnStop"))
-	case 10:
-		// Draining, which the sequential machine had no shape for at all: the
-		// phase was exercised only where two calls overlap, and never where
-		// its boundary is known.
-		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
-			OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
-	case 11:
-		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
-			OnStart(hook("OnStart")).OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
 	default:
 		b = s.Provide(func(*di.Scope) T { return plain() })
 	}
@@ -564,14 +531,6 @@ func (m *machine) register(s *di.Scope, o op) {
 			func() *mk3 { return &mk3{} },
 			func(sc *di.Scope) *mk3 { return &mk3{dep: sc.Get[*mk1]()} })
 	default:
-		if o.reg == 5 { // only the interface key can be aliased
-			m.markAliased()
-			bd := s.Bind[mkI, *mk1]()
-			if o.eager {
-				bd.Eager()
-			}
-			return
-		}
 		regShape(m, s, o,
 			func() mkI { return &mk1{} },
 			func(sc *di.Scope) mkI { _ = sc.Get[*mk2](); return &mk1{} })
@@ -666,9 +625,9 @@ func TestMachineSeeded(t *testing.T) {
 // with: go test -fuzz FuzzMachine -fuzztime 2m
 func FuzzMachine(f *testing.F) {
 	f.Add([]byte{0, 0, 0, 0, 1, 5, 0, 0, 0, 0})                               // register eager, then Start
-	f.Add([]byte{0, 0, 3, 5, 1, 1, 0, 3, 0, 0, 6, 0, 3, 0, 0})                // alias, resolve, stop
-	f.Add([]byte{0, 0, 0, 9, 0, 0, 0, 1, 9, 0, 0, 0, 2, 9, 0, 1, 0, 0, 0, 0}) // a dependency cycle
-	f.Add([]byte{0, 0, 0, 8, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0})                // failing constructor, eager
+	f.Add([]byte{0, 0, 0, 6, 0, 1, 0, 0, 0, 0, 6, 0, 0, 0, 0})                // a dependency on an unprovided key, then stop
+	f.Add([]byte{0, 0, 0, 6, 0, 0, 0, 1, 6, 0, 0, 0, 2, 6, 0, 1, 0, 0, 0, 0}) // a dependency cycle
+	f.Add([]byte{0, 0, 0, 5, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0})                // failing constructor, eager
 	f.Fuzz(func(t *testing.T, data []byte) {
 		ops := decode(data)
 		if len(ops) == 0 {

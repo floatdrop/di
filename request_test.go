@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 )
 
 type User struct{ Name string }
@@ -76,7 +77,7 @@ func TestMiddlewareGivesEachRequestAScope(t *testing.T) {
 	}).Scoped().OnStop(func(context.Context, *User) error { stops++; return nil })
 
 	var seen []string
-	h := app.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := dihttp.Middleware(app)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req, ok := di.FromContext(r.Context())
 		if !ok {
 			t.Fatal("no scope in request context")

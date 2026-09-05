@@ -31,6 +31,61 @@ below says plainly whether an upgrade can break a caller.
   Re-registering after a *failed* resolution still works, which is how a key
   whose constructor failed is recovered.
 
+Nine cuts to the API surface, made before the graph-validation work of
+issue #3 so that it lands on a smaller and more regular API. Each one
+breaks a caller that used the removed name, and each has a one-line
+migration.
+
+### Removed
+
+- **`Binding.Named`, `Scope.Lookup`, `Key` and `di.Named`**, the one
+  stringly-typed corner of the API. A second binding of one type is declared
+  as a distinct type instead -- `type ReplicaDB struct{ *DB }` -- which the
+  compiler checks at every reference, where a misspelt name was a missing key
+  at runtime. The README described `.Named` as registering the key "also"
+  under a name; it registered it under the name only.
+- **`Scope.Add`.** Group membership is a property of a binding, like its
+  lifetime, so it is now `Binding.Group`: `s.Add(ctor)` becomes
+  `s.Provide(ctor).Group()`. `Value(v).Group()` adds a pre-built member,
+  which `Add` could not express; `Bind` followed by `Group` is rejected at
+  freeze, since an alias is never a group member.
+- **`Scope.Middleware`** moved to the `dihttp` package as
+  `dihttp.Middleware(s)`, with the usual `func(http.Handler) http.Handler`
+  shape so a router's `Use` accepts it: `app.Middleware(mux)` becomes
+  `dihttp.Middleware(app)(mux)`. The core package no longer imports net/http
+  and no longer registers anything on a caller's behalf. `WithScope` and
+  `FromContext` stay where they were.
+- **`Scope.Bind`.** An interface is served by a constructor that returns the
+  implementation: `s.Bind[Reader, *Repo]()` becomes
+  `s.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })`, declared
+  `Scoped()` too when the target is. The closure is checked by the compiler
+  where `Bind` checked `Implements` at registration, shares the target's
+  instance because it returns the same pointer, and is an ordinary binding,
+  so the alias machinery goes with it: the route marking for hops, the alias
+  cycle detector and the eager-through-alias rules.
+- **`Binding.Transient`.** A per-resolution value is a factory,
+  `s.Provide(func(s *di.Scope) func() *X { ... })`, or a constructor called
+  directly. Transient instances had no hooks and no tracking, which made
+  them a lifetime in name only, and every teardown oracle carried an
+  exemption for them.
+- **`Binding.Health`, `Scope.HealthCheck`, `ErrUnhealthy` and
+  `EventHealth`.** A health endpoint is a `Group` of checkers in user code;
+  the README's "Health checks" section is now that recipe and
+  `examples/app` uses it. What is lost is `HealthCheck` skipping services
+  not yet built: `All` builds a checker's target instead, which is what an
+  endpoint usually wants.
+- **`Signals`.** `Run` exits on `os.Interrupt` and `SIGTERM`, which is what
+  every caller used. `StopTimeout` stays as the one `RunOption`.
+- **`SlogObserver`.** Four lines in user code, and the one place the package
+  imported `log/slog`.
+
+### Changed
+
+- **`Binding.Run` is now `Binding.Worker`.** It shared a name with
+  `Scope.Run`, the main-function helper, for an unrelated thing. Behaviour
+  is unchanged; the error `Stop` returns for a hook that outlasts the
+  deadline now reads "Worker hook did not return".
+
 ### Testing
 
 The fourth review's findings were all in places the generators still could not

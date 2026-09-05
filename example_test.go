@@ -15,7 +15,7 @@ func Example() {
 	app.Provide(func(s *di.Scope) *DB { return &DB{dsn: s.Get[Config]().DSN} }).
 		OnStop(func(ctx context.Context, db *DB) error { fmt.Println("close", db.dsn); return nil })
 	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
-	app.Bind[Reader, *Repo]()
+	app.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })
 	app.Provide(func(s *di.Scope) *Server { return &Server{repo: s.Get[*Repo]()} }).Eager().
 		OnStart(func(context.Context, *Server) error { fmt.Println("listening"); return nil }).
 		OnStop(func(context.Context, *Server) error { fmt.Println("stopped"); return nil })

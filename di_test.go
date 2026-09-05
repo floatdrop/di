@@ -42,43 +42,12 @@ func TestResolveChain(t *testing.T) {
 	}
 }
 
-func TestNamed(t *testing.T) {
-	s := newApp()
-	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "pg://replica"} }).Named("replica")
-	if got := s.Lookup(di.Named[*DB]("replica")).dsn; got != "pg://replica" {
-		t.Fatalf("replica: %q", got)
-	}
-	if got := s.Get[*DB]().dsn; got != "pg://primary" {
-		t.Fatalf("unnamed binding was displaced: %q", got)
-	}
-}
-
-func TestBind(t *testing.T) {
-	s := newApp()
-	s.Bind[Reader, *Repo]()
-	if s.Get[Reader]().Read() != "pg://primary" {
-		t.Fatal("alias did not resolve")
-	}
-	if any(s.Get[Reader]()) != any(s.Get[*Repo]()) {
-		t.Fatal("alias should share the target singleton")
-	}
-}
-
-func TestBindRejectsNonImplementer(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil || !strings.Contains(r.(string), "does not implement") {
-			t.Fatalf("expected implements panic, got %v", r)
-		}
-	}()
-	di.New().Bind[Reader, *DB]()
-}
-
 func TestGroups(t *testing.T) {
 	s := di.New()
-	s.Add(func(*di.Scope) Handler { return Handler{"users"} })
-	s.Add(func(*di.Scope) Handler { return Handler{"orders"} })
+	s.Provide(func(*di.Scope) Handler { return Handler{"users"} }).Group()
+	s.Provide(func(*di.Scope) Handler { return Handler{"orders"} }).Group()
 	child := s.Child("child")
-	child.Add(func(*di.Scope) Handler { return Handler{"admin"} })
+	child.Provide(func(*di.Scope) Handler { return Handler{"admin"} }).Group()
 	got := child.All[Handler]()
 	if len(got) != 3 {
 		t.Fatalf("got %v", got)
@@ -124,16 +93,6 @@ func TestCycle(t *testing.T) {
 	}
 }
 
-func TestCycleThroughAlias(t *testing.T) {
-	s := di.New()
-	s.Provide(func(s *di.Scope) *Repo { return &Repo{db: &DB{dsn: s.Get[Reader]().Read()}} })
-	s.Bind[Reader, *Repo]()
-	_, err := s.Resolve[*Repo]()
-	if !errors.Is(err, di.ErrCycle) {
-		t.Fatalf("want ErrCycle, got %v", err)
-	}
-}
-
 func TestTopLevelGetPanicsWithError(t *testing.T) {
 	defer func() {
 		r := recover()
@@ -174,16 +133,6 @@ func TestChildSeesParentSingletons(t *testing.T) {
 	child := s.Child("child")
 	if child.Get[*DB]() != s.Get[*DB]() {
 		t.Fatal("child must reuse the parent's singleton")
-	}
-}
-
-func TestTransient(t *testing.T) {
-	s := di.New()
-	var n atomic.Int32
-	s.Provide(func(*di.Scope) *DB { n.Add(1); return &DB{} }).Transient()
-	a, b := s.Get[*DB](), s.Get[*DB]()
-	if a == b || n.Load() != 2 {
-		t.Fatal("transient must build a new instance per Get")
 	}
 }
 
@@ -238,7 +187,7 @@ func TestModifyAfterFreezePanics(t *testing.T) {
 			t.Fatalf("got %v", r)
 		}
 	}()
-	b.Named("late")
+	b.Eager()
 }
 
 func TestLateRegistrationAfterFreeze(t *testing.T) {

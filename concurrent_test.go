@@ -50,7 +50,7 @@ package di_test
 //
 // C9 and C10 exist because the third review found two more the same way. The
 // coverage the generators reached was 78% against the suite's 97%, and the
-// whole gap was the lifecycle: no Run hook, no Shutdown, no context expiring
+// whole gap was the lifecycle: no Worker hook, no Shutdown, no context expiring
 // mid-Stop, and starts kept strictly before stops. Everything the reviews
 // found lived in that gap. It is closed here.
 
@@ -365,7 +365,7 @@ func (m *cmachine) call(what string, f func()) {
 // says a resolution can report. A wiring failure that wraps none of them is a
 // defect, not a legitimate outcome.
 func isDocumentedFailure(err error) bool {
-	for _, sentinel := range []error{di.ErrStopped, di.ErrNotProvided, di.ErrCycle, di.ErrUnhealthy} {
+	for _, sentinel := range []error{di.ErrStopped, di.ErrNotProvided, di.ErrCycle} {
 		if errors.Is(err, sentinel) {
 			return true
 		}
@@ -414,7 +414,7 @@ func (m *cmachine) register(s *di.Scope, o op) {
 	}
 }
 
-// errWorker is a Run hook failing of its own accord rather than because it
+// errWorker is a Worker hook failing of its own accord rather than because it
 // was cancelled, which is what makes the container hand it to Shutdown. A
 // worker that only ever returns nil leaves that whole path unreached.
 var errWorker = errors.New("worker failed")
@@ -503,12 +503,12 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 	build := func(sc *di.Scope) T { return own(sc, plain()) }
 	switch o.reg % 6 {
 	case 0:
-		s.Provide(build).Run(work).OnStop(down)
+		s.Provide(build).Worker(work).OnStop(down)
 	case 1:
-		s.Provide(build).Scoped().Run(work).OnStop(down)
+		s.Provide(build).Scoped().Worker(work).OnStop(down)
 	case 2:
 		s.Provide(func(sc *di.Scope) T { return own(sc, dep(sc)) }).
-			Run(work).
+			Worker(work).
 			OnStop(func(ctx context.Context, v T) error {
 				// Slow enough that an impatient Stop misses its deadline
 				// here, which is the only way this driver reaches the
@@ -527,11 +527,11 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// survived this driver.
 		s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).
 			OnDrain(drainHook).
-			Run(work).
+			Worker(work).
 			OnStop(down)
 	case 4:
 		// The one shape with an OnStart, so its stop step is owed only when
-		// the start step succeeded. Its Run hook is what puts a worker under
+		// the start step succeeded. Its Worker hook is what puts a worker under
 		// a Stop that has to cancel it and wait.
 		s.Provide(build).
 			OnStart(func(_ context.Context, v T) error {
@@ -540,7 +540,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 				m.owed.Store(any(v), m.holderOf(any(v)))
 				return nil
 			}).
-			Run(work).
+			Worker(work).
 			OnStop(down)
 	default:
 		// Scoped *and* draining. Without this shape the driver could not put
@@ -550,7 +550,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// drain defect was unreachable for want of one registration.
 		s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).Scoped().
 			OnDrain(drainHook).
-			Run(work).
+			Worker(work).
 			OnStop(down)
 	}
 }
@@ -716,8 +716,6 @@ func (m *cmachine) step(i int, o op) {
 			cancel()
 			_ = s.Run(ctx, di.StopTimeout(5*time.Second))
 			m.stopReturned.Store(m.names[o.scope], struct{}{})
-		case opHealth:
-			_ = s.HealthCheck(context.Background())
 		default:
 			m.resolve(s, o)
 		}
@@ -739,7 +737,7 @@ func (m *cmachine) run() {
 		switch o.kind {
 		case opRegister:
 			wired = append(wired, o)
-		case opStart, opHealth, opShutdown, opRun:
+		case opStart, opShutdown, opRun:
 			// Run belongs with the lifecycle calls, not with the resolutions.
 			// It fell to the default and was classified as one, so it ran
 			// before the teardown phase was marked -- and the instances its
@@ -806,7 +804,7 @@ func (m *cmachine) run() {
 // release it still owed has happened.
 //
 // The second half cannot be a WaitGroup. A release deferred past a missed
-// deadline is issued by a goroutine that first waits for the Run hook to
+// deadline is issued by a goroutine that first waits for the Worker hook to
 // return, so between that hook finishing and the release starting there is a
 // moment when no hook is running and the work is still owed. Polling for the
 // owed set to empty is what closes that gap, and it keeps C9 to the property
@@ -957,7 +955,7 @@ func TestMachineConcurrentSeeds(t *testing.T) {
 	seeds := [][]byte{
 		{0, 1, 0, 1, 0, 1, 3, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // scoped in gc, then stop c1 and root
 		{0, 0, 0, 2, 1, 5, 0, 0, 0, 0, 1, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // start racing a resolve from a child
-		{0, 0, 0, 3, 1, 5, 0, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // a Run hook, then overlapping stops
+		{0, 0, 0, 3, 1, 5, 0, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // a Worker hook, then overlapping stops
 		{0, 0, 0, 4, 1, 1, 3, 0, 0, 0, 1, 1, 0, 0, 0, 5, 0, 0, 0, 0},    // late build racing Start's hook phase
 		{0, 3, 0, 0, 0, 1, 3, 0, 0, 0, 6, 3, 0, 0, 0, 6, 1, 0, 0, 0, 6}, // stop the grandchild and its ancestors
 		{0, 1, 0, 3, 0, 1, 1, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // a drain hook in c1, then c1 and root stopped at once

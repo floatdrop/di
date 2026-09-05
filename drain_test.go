@@ -8,8 +8,8 @@ package di_test
 // of the first September 2026 review, checked against 12dba3c; review 2 was
 // checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
 // fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor, and (alias
-// refactor) the sweep that made lookup follow Bind chains. An untagged test
+// checked against the code before the instance-phase refactor. An untagged
+// test
 // comes from the first of those passes, or from the generators, which its own
 // comment says. Several fail by hanging rather than by reporting, which is why
 // each bounds its own wait instead of relying on the package timeout.
@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 )
 
 // A request in flight when Stop begins keeps its scope until the server
@@ -51,7 +52,7 @@ func TestReviewRequestSurvivesDrain(t *testing.T) {
 		resolved <- err
 	})
 
-	srv := httptest.NewUnstartedServer(app.Middleware(mux))
+	srv := httptest.NewUnstartedServer(dihttp.Middleware(app)(mux))
 	srv.Start()
 	defer srv.Close()
 	app.Value(srv.Config).
@@ -143,13 +144,6 @@ func TestReviewDrainFailureIsReported(t *testing.T) {
 	if err := s.Stop(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
-}
-
-func TestReviewDrainRejectedOnTransient(t *testing.T) {
-	s := di.New()
-	s.Provide(func(*di.Scope) *DB { return &DB{} }).Transient().
-		OnDrain(func(context.Context, *DB) error { return nil })
-	mustPanic(t, "do not apply to a Transient binding", func() { s.Get[*DB]() })
 }
 
 // A Stop that reaches a scope whose drain another Stop is running must wait
@@ -491,7 +485,7 @@ func TestReview3DrainHookCanStopASiblingScope(t *testing.T) {
 // A Stop whose context runs out while another Stop's drain hook holds the
 // instance still owes the release: it took the instance off the scope's list,
 // so nothing else will reach it. The release is finished off the hook's own
-// return, as it is for a Run hook that outlasts the same deadline.
+// return, as it is for a Worker hook that outlasts the same deadline.
 // (review 3, 2)
 func TestReview3LostDrainWaitStillReleases(t *testing.T) {
 	root := di.New()
