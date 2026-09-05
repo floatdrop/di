@@ -483,8 +483,8 @@ the library itself stays dependency-free. On an Apple M3 Max:
 
 | | Warm resolve | Cold register and build |
 |---|---|---|
-| `di` | 45 ns, 2 allocs | 3.8 µs, 67 allocs |
-| `do` v2.1 | 140 ns, 6 allocs | 6.2 µs, 120 allocs |
+| `di` | 39 ns, 64 B, 2 allocs | 3.6 µs, 4.2 kB, 67 allocs |
+| `do` v2.1 | 129 ns, 192 B, 6 allocs | 6.3 µs, 11.5 kB, 120 allocs |
 
 ```sh
 cd benchmarks && go test -bench . -benchmem

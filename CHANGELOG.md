@@ -7,6 +7,30 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Internal
+
+The API cuts of 0.7.0 left machinery behind that only the removed features
+needed. Nothing here changes behaviour: `go doc -all` is identical to 0.7.0's,
+and so is every error message and every event, checked by rendering each shape
+built from a resolution path on both trees and diffing.
+
+One measurable effect: a resolution path node is 32 bytes rather than 48, so a
+warm resolve allocates 64 B rather than 96 B and runs about 8% faster
+(42.2 ns to 38.7 ns on an Apple M3 Max). The README table is updated.
+
+- The resolution pipeline no longer threads a key alongside the binding it
+  belongs to. `resolve`, `await`, `materialise`, `construct`, `publish` and
+  `startIfRunning` read `b.key`, and `resolver` no longer carries its own
+  copy. The two could differ only on a `Bind` alias hop, where the node's key
+  was the alias and the binding was its target.
+- `lookup` returns the binding and its owning scope rather than a `found`
+  struct, which had earned its name when it also reported the alias route and
+  whether that route looped.
+- Groups are keyed by `key` like the index, now that a key is a type and
+  nothing else.
+- The two top-level entry points that turn an internal abort into a plain
+  error panic share one deferred `unwrapAbort` instead of a copy each.
+
 ## [0.7.0] - 2026-09-05
 
 The API surface cut down ahead of the graph-validation work of
