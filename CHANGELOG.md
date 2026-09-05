@@ -31,6 +31,23 @@ warm resolve allocates 64 B rather than 96 B and runs about 8% faster
 - The two top-level entry points that turn an internal abort into a plain
   error panic share one deferred `unwrapAbort` instead of a copy each.
 
+### Testing
+
+- `TestReview4ChildStopReportsItsOwnDrainFailure` no longer requires the root
+  `Stop` to report a drain failure that a concurrent child `Stop` owned. It
+  failed about one run in eight on `main`, so CI failed at about that rate
+  too. Settling the failure into the child's phase is what releases the
+  child's own `Stop`, which then finishes and detaches the child; if that
+  beats the root's read of its child list, the root has nobody to inherit
+  from. Both orders are correct -- the failure reaches the caller that owned
+  that teardown, and `EventDrain` carries it to observers regardless -- so
+  the assertion, not the container, was wrong. The test still pins what it
+  was written for, that the child's own `Stop` reports it.
+- `TestReview5RootStopReportsAChildsDrainFailure` is the half of that rule
+  which does not depend on an interleaving: a `Stop` that owns a child's
+  teardown reports a drain hook that failed in it. Mutation-tested by making
+  the drain waiter drop the owner's error, which it catches.
+
 ## [0.7.0] - 2026-09-05
 
 The API surface cut down ahead of the graph-validation work of
