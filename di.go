@@ -794,7 +794,7 @@ type state struct {
 	mu        sync.Mutex
 	pending   []*binding // registrations not yet indexed
 	index     map[key]*binding
-	groups    map[reflect.Type][]*binding
+	groups    map[key][]*binding
 	frozen    bool
 	all       []*binding             // every binding, in registration order
 	eager     []*binding             // derived by deriveEager: what Start builds
@@ -837,7 +837,7 @@ func (st *state) freeze() {
 	for _, b := range st.pending {
 		b.validate()
 		if b.group {
-			groups[b.key.t] = append(slices.Clone(groups[b.key.t]), b)
+			groups[b.key] = append(slices.Clone(groups[b.key]), b)
 		} else {
 			// The later registration wins (that is how overrides work), but
 			// only until the key has been resolved; replacing it afterwards
@@ -911,10 +911,11 @@ func deriveEager(all []*binding, index map[key]*binding) []*binding {
 // A node is identified by binding and holder, not by key: a group member and
 // a plain registration of the same type are different bindings, and one
 // Scoped binding is a different node in each scope that holds an instance of
-// it.
+// it. The key is read back from the binding, which is where it lives; the
+// node carried its own copy while a Bind alias could put a hop on the path
+// whose key was not its binding's.
 type resolver struct {
 	parent *resolver
-	key    key
 	b      *binding // nil on the root node, which resolves nothing itself
 	holder *state
 
@@ -927,8 +928,8 @@ type resolver struct {
 	done atomic.Bool
 }
 
-func (r *resolver) child(k key, b *binding, holder *state) *resolver {
-	return &resolver{parent: r, key: k, b: b, holder: holder}
+func (r *resolver) child(b *binding, holder *state) *resolver {
+	return &resolver{parent: r, b: b, holder: holder}
 }
 
 // onPath reports whether this exact binding is still being resolved further
@@ -970,7 +971,7 @@ func (r *resolver) pathStr() string {
 	var parts []string
 	for n := r; n != nil; n = n.parent {
 		if n.b != nil {
-			parts = append(parts, n.key.String())
+			parts = append(parts, n.b.key.String())
 		}
 	}
 	slices.Reverse(parts)
@@ -991,7 +992,7 @@ func newState(name string, parent *state) *state {
 		name:       name,
 		parent:     parent,
 		index:      map[key]*binding{},
-		groups:     map[reflect.Type][]*binding{},
+		groups:     map[key][]*binding{},
 		scoped:     map[*binding]*instance{},
 		shutdownCh: make(chan struct{}),
 	}
@@ -1166,25 +1167,20 @@ func as[T any](v any) T {
 	return v.(T)
 }
 
-// found is what lookup located for a key: the binding that serves it and
-// the scope that owns that binding. A nil b means nothing is registered.
-type found struct {
-	b     *binding
-	owner *state
-}
-
-// lookup finds the binding registered for k in this scope or an ancestor.
-func (s *Scope) lookup(k key) found {
+// lookup finds the binding registered for k in this scope or an ancestor,
+// and the scope that owns it. A nil binding means nothing is registered for
+// k anywhere in the chain.
+func (s *Scope) lookup(k key) (*binding, *state) {
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
 		st.mu.Lock()
 		b, ok := st.index[k]
 		st.mu.Unlock()
 		if ok {
-			return found{b: b, owner: st}
+			return b, st
 		}
 	}
-	return found{}
+	return nil, nil
 }
 
 // inFlight reports whether this Scope is a live view of a resolution: it
@@ -1207,22 +1203,15 @@ func (s *Scope) enter() *Scope {
 // Resolve/Start call.
 func (s *Scope) get(k key) any {
 	if !s.inFlight() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				if a, ok := rec.(abort); ok {
-					panic(a.err)
-				}
-				panic(rec)
-			}
-		}()
+		defer unwrapAbort()
 		return s.enter().get(k)
 	}
-	f := s.lookup(k)
-	if f.b == nil {
+	b, owner := s.lookup(k)
+	if b == nil {
 		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, s.r.path())})
 	}
-	v := s.resolve(f.b, f.owner, k)
-	s.markServed(f.owner, k)
+	v := s.resolve(b, owner)
+	s.markServed(owner, k)
 	return v
 }
 
@@ -1243,9 +1232,9 @@ func (s *Scope) markServed(owner *state, k key) {
 
 // resolve produces b's value for the resolving scope s, honouring the
 // binding's lifetime and starting the instance when the scope is running.
-func (s *Scope) resolve(b *binding, owner *state, k key) any {
+func (s *Scope) resolve(b *binding, owner *state) any {
 	if s.isStopped() {
-		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrStopped, s.r.path())})
+		panic(abort{fmt.Errorf("di: %s: %w%s", b.key, ErrStopped, s.r.path())})
 	}
 	// The holder owns the instance's lifecycle: a singleton lives in the
 	// scope that registered the binding, a scoped one in the scope that
@@ -1255,7 +1244,7 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 		holder = s.state
 	}
 	if s.r.onPath(b, holder) {
-		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.pathStr(), k)})
+		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.pathStr(), b.key)})
 	}
 	if !b.used.Load() {
 		// Hold the key against an override for as long as this resolution
@@ -1265,12 +1254,12 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 		b.resolving.Add(1)
 		defer b.resolving.Add(-1)
 	}
-	sc := s.view(s.r.child(k, b, holder))
+	sc := s.view(s.r.child(b, holder))
 	// The node stops being a dependency when this resolution returns, however
 	// it returns. See resolver.done.
 	defer sc.r.done.Store(true)
 
-	v, err := sc.await(holder.instanceFor(b), holder, k)
+	v, err := sc.await(holder.instanceFor(b), holder)
 	if err != nil {
 		panic(abort{err})
 	}
@@ -1299,13 +1288,13 @@ func (st *state) instanceFor(b *binding) *instance {
 // well, so a resolution of a running scope never hands out a service whose
 // OnStart is still in flight. A wait that would close a cycle between two
 // concurrent builds is reported as ErrCycle rather than deadlocking.
-func (s *Scope) await(in *instance, holder *state, k key) (any, error) {
+func (s *Scope) await(in *instance, holder *state) (any, error) {
 	holder.mu.Lock()
 	for in.ph == phaseNew || !in.settled || in.ph == phaseStarting {
 		if in.ph == phaseNew {
 			in.claimBuild(holder, s.r)
 			holder.mu.Unlock()
-			s.materialise(in, holder, k)
+			s.materialise(in, holder)
 			holder.mu.Lock()
 			continue
 		}
@@ -1321,7 +1310,7 @@ func (s *Scope) await(in *instance, holder *state, k key) (any, error) {
 		}
 		if !s.r.wait(holder.graph, in) {
 			holder.mu.Unlock()
-			return nil, fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.parent.pathStr(), k)
+			return nil, fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.parent.pathStr(), in.b.key)
 		}
 		holder.mu.Unlock()
 		<-ready
@@ -1335,7 +1324,7 @@ func (s *Scope) await(in *instance, holder *state, k key) (any, error) {
 		// scope, which covers the holder (always that scope or an ancestor):
 		// a stopped scope must refuse the request whether or not the value is
 		// still alive above it.
-		value, err = nil, fmt.Errorf("di: %s: %w", k, ErrStopped)
+		value, err = nil, fmt.Errorf("di: %s: %w", in.b.key, ErrStopped)
 	}
 	holder.mu.Unlock()
 	return value, err
@@ -1345,32 +1334,32 @@ func (s *Scope) await(in *instance, holder *state, k key) (any, error) {
 // rather than unwound, so every later resolution reports it identically, and
 // the instance is settled on the way out so waiters are released whatever
 // happened.
-func (s *Scope) materialise(in *instance, holder *state, k key) {
+func (s *Scope) materialise(in *instance, holder *state) {
 	defer in.settle(holder)
-	if err := s.construct(in, holder, k); err != nil {
+	if err := s.construct(in, holder); err != nil {
 		in.fail(holder, err)
 		return
 	}
-	if !in.publish(holder, k) {
+	if !in.publish(holder) {
 		return
 	}
-	in.startIfRunning(holder, k)
+	in.startIfRunning(holder)
 }
 
 // construct runs the constructor, turning a panic or an abort from a nested
 // resolution into an error, and reports the attempt to observers either way.
-func (s *Scope) construct(in *instance, holder *state, k key) (err error) {
+func (s *Scope) construct(in *instance, holder *state) (err error) {
 	b := in.b
 	t0 := time.Now()
 	defer func() {
 		if rec := recover(); rec != nil {
 			if a, ok := rec.(abort); ok {
-				err = fmt.Errorf("di: building %s (provided at %s): %w", k, b.site, a.err)
+				err = fmt.Errorf("di: building %s (provided at %s): %w", b.key, b.site, a.err)
 			} else {
-				err = fmt.Errorf("di: building %s (provided at %s): panic: %v", k, b.site, rec)
+				err = fmt.Errorf("di: building %s (provided at %s): panic: %v", b.key, b.site, rec)
 			}
 		}
-		holder.emit(Event{Kind: EventBuild, Service: k.String(), Scope: holder.name, Site: b.site, Duration: time.Since(t0), Err: err})
+		holder.emit(Event{Kind: EventBuild, Service: b.key.String(), Scope: holder.name, Site: b.site, Duration: time.Since(t0), Err: err})
 	}()
 	in.value = b.build((&Scope{state: holder}).view(s.r))
 	return nil
@@ -1379,7 +1368,7 @@ func (s *Scope) construct(in *instance, holder *state, k key) (err error) {
 // publish adds the instance to its owner's stop list so it will be torn
 // down. If Stop ran while the constructor was in flight its snapshot did not
 // include this instance, so undo it here and report ErrStopped instead.
-func (in *instance) publish(owner *state, k key) bool {
+func (in *instance) publish(owner *state) bool {
 	owner.mu.Lock()
 	stopped := owner.isStopped()
 	in.ph = phaseBuilt
@@ -1390,7 +1379,7 @@ func (in *instance) publish(owner *state, k key) bool {
 	if !stopped {
 		return true
 	}
-	err := errors.Join(fmt.Errorf("di: %s: %w", k, ErrStopped), in.stopIfNeeded(owner.stopContext(), owner))
+	err := errors.Join(fmt.Errorf("di: %s: %w", in.b.key, ErrStopped), in.stopIfNeeded(owner.stopContext(), owner))
 	owner.mu.Lock()
 	in.err = err
 	owner.mu.Unlock()
@@ -1402,7 +1391,7 @@ func (in *instance) publish(owner *state, k key) bool {
 // drains, so either this starts the instance or Start's drain finds it.
 // startClaimed records its own failure on the instance, so a resolution that
 // waited for the step reports it too.
-func (in *instance) startIfRunning(owner *state, k key) {
+func (in *instance) startIfRunning(owner *state) {
 	if sctx, running := owner.runContext(); running && in.claim(owner) {
 		if sctx == nil {
 			sctx = context.Background()
@@ -1414,7 +1403,7 @@ func (in *instance) startIfRunning(owner *state, k key) {
 	if in.err == nil && stopped {
 		// Stop ran while we were starting; it waits for the start step, so
 		// the instance is torn down. Do not hand it out.
-		in.err = fmt.Errorf("di: %s: %w", k, ErrStopped)
+		in.err = fmt.Errorf("di: %s: %w", in.b.key, ErrStopped)
 	}
 	owner.mu.Unlock()
 }
@@ -1436,7 +1425,7 @@ func (s *Scope) Get[T any]() T { return as[T](s.get(key{t: reflect.TypeFor[T]()}
 
 // Maybe resolves T if it is provided anywhere in the scope chain.
 func (s *Scope) Maybe[T any]() (T, bool) {
-	if s.lookup(key{t: reflect.TypeFor[T]()}).b == nil {
+	if b, _ := s.lookup(key{t: reflect.TypeFor[T]()}); b == nil {
 		var zero T
 		return zero, false
 	}
@@ -1448,14 +1437,7 @@ func (s *Scope) Maybe[T any]() (T, bool) {
 // as any other binding.
 func (s *Scope) All[T any]() []T {
 	if !s.inFlight() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				if a, ok := rec.(abort); ok {
-					panic(a.err)
-				}
-				panic(rec)
-			}
-		}()
+		defer unwrapAbort()
 		return s.enter().All[T]()
 	}
 	k := key{t: reflect.TypeFor[T]()}
@@ -1463,10 +1445,10 @@ func (s *Scope) All[T any]() []T {
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
 		st.mu.Lock()
-		bs := slices.Clone(st.groups[k.t])
+		bs := slices.Clone(st.groups[k])
 		st.mu.Unlock()
 		for _, b := range bs {
-			out = append(out, as[T](s.resolve(b, st, k)))
+			out = append(out, as[T](s.resolve(b, st)))
 		}
 	}
 	return out
@@ -1517,6 +1499,20 @@ func (st *state) runContext() (ctx context.Context, running bool) {
 func (s *Scope) Resolve[T any]() (v T, err error) {
 	defer recoverAbort(&err)
 	return as[T](s.enter().get(key{t: reflect.TypeFor[T]()})), nil
+}
+
+// unwrapAbort turns the internal abort panic into a panic carrying the plain
+// error, which is what a top-level Get or All reports. Deferred by the entry
+// points that are not already inside a resolution; a call made from a
+// constructor lets the abort unwind to the enclosing Resolve or Start
+// instead.
+func unwrapAbort() {
+	if rec := recover(); rec != nil {
+		if a, ok := rec.(abort); ok {
+			panic(a.err)
+		}
+		panic(rec)
+	}
 }
 
 func recoverAbort(err *error) {
@@ -1605,7 +1601,7 @@ func (s *Scope) buildEager(eager []*binding) (err error) {
 	for _, b := range eager {
 		if b.group {
 			// A group member is not reachable by key: resolve it directly.
-			s.enter().resolve(b, s.state, b.key)
+			s.enter().resolve(b, s.state)
 			continue
 		}
 		// By key, so whichever registration owns the key is what gets built;

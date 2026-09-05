@@ -117,7 +117,9 @@ under one lock to do it.
 resolve from several goroutines and they all share the `*Scope` it was handed.
 A node is identified by binding *and* holder, never by key: that is what
 separates a group member from a plain registration of the same type, and one
-`Scoped` binding across scopes.
+`Scoped` binding across scopes. It does not carry a key at all -- `pathStr`
+reads `b.key` -- because the only thing that ever put a node on the path whose
+key was not its binding's was a `Bind` alias hop.
 
 `resolver.done` is the one thing about a node that changes: `resolve` sets it
 as it returns, and `onPath` and `descends` *stop the walk* at a node that has
