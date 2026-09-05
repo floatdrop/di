@@ -542,3 +542,45 @@ func TestReview3LostDrainWaitStillReleases(t *testing.T) {
 		t.Errorf("root.Stop: %v", err)
 	}
 }
+
+// A Stop reports the failure of a drain hook of its own scope even when an
+// ancestor's Stop owned the phase and ran the hook. The waiter used to drop
+// the owner's error on the grounds that it reached the caller through the
+// Stop that owned the drain -- true when that is this Stop, and false for a
+// request scope ending while the application shuts down, which is where the
+// failure needed reporting.
+// (review 4, 2)
+func TestReview4ChildStopReportsItsOwnDrainFailure(t *testing.T) {
+	drainFailed := errors.New("drain failed")
+	for range 20 {
+		inDrain := make(chan struct{})
+		release := make(chan struct{})
+
+		root := di.New()
+		child := root.Child("child")
+		root.Provide(func(*di.Scope) *Repo { return &Repo{} }).Scoped().
+			OnDrain(func(context.Context, *Repo) error {
+				close(inDrain)
+				<-release
+				return drainFailed
+			})
+		if _, err := child.Resolve[*Repo](); err != nil {
+			t.Fatal(err)
+		}
+
+		rootErr := make(chan error, 1)
+		go func() { rootErr <- root.Stop(context.Background()) }()
+		<-inDrain
+		childErr := make(chan error, 1)
+		go func() { childErr <- child.Stop(context.Background()) }()
+		time.Sleep(20 * time.Millisecond) // let the child reach the phase
+		close(release)
+
+		if err := <-rootErr; !errors.Is(err, drainFailed) {
+			t.Fatalf("root.Stop: %v", err)
+		}
+		if err := <-childErr; !errors.Is(err, drainFailed) {
+			t.Fatalf("child.Stop hid its own drain failure: %v", err)
+		}
+	}
+}

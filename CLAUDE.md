@@ -21,7 +21,7 @@ cd benchmarks && go test -bench . -benchmem   # separate module, see below
 
 go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
 go test -count=1 -coverprofile=all.out .
-go run scripts/generatorgap.go -floor 80 gen.out all.out   # what only hand-written tests reach
+go run scripts/generatorgap.go -floor 85 gen.out all.out   # what only hand-written tests reach
 ```
 
 Run the full gate as a single `&&` chain before committing, the same way CI
@@ -441,8 +441,15 @@ Four layers, each catching a different class:
   `testdata/fuzz/` is committed; CI runs 90s in its own job.
 - `scripts/generatorgap.go` — the map of what only the hand-written tests
   reach, which is the map of where the next review will dig: every defect the
-  three September 2026 reviews found lived on such a line. CI runs it with a
-  floor of 80% generator coverage. When the floor moves, move it up.
+  four September 2026 reviews found lived on such a line. CI runs it with a
+  floor of 85% generator coverage. When the floor moves, move it up.
+
+  CI also checks the script's arithmetic against `go tool cover -func`,
+  because the fourth review found the script wrong: it keyed coverage blocks
+  by line number, and `di.go` has eighteen lines carrying more than one block
+  -- a hook registered and its body declared in a single expression. Reaching
+  the registration made the body look covered. A tool that measures a gap has
+  to be measured itself.
 
 `FuzzMachineConcurrent` is the coverage-guided driver for the concurrent
 oracles; run it with `-race` or it checks almost nothing.
@@ -485,3 +492,17 @@ errors across the examples. golangci-lint v2.13.1+ handles them correctly.
 `.golangci.yml` excludes staticcheck QF1011 because `var get func() *DB = s.Get`
 is not redundant: the declared type is what drives Go 1.27 inference for a
 generic method value.
+
+golangci-lint v2.13.1's staticcheck (honnef.co/go/tools v0.8.0) *crashes*
+rather than reports on this package: `SA4023: index out of range [1] with
+length 1`, inside its nilness analysis. It takes the whole lint job down, so
+there is no partial result to work from, and the trigger moves as the test
+package grows -- it first appeared on a helper comparing an error parameter to
+nil in an `||`, and came back later on an unrelated switch case. `.golangci.yml`
+disables SA4023 for that reason, with the default check list otherwise intact.
+Drop the exclusion when the upstream crash is fixed and see whether SA4023 has
+anything to say.
+
+Bisecting a lint crash needs care: reverting one file to find the trigger can
+break the build, and golangci-lint then reports "0 issues" for a package it
+never analysed. Check that the package still compiles at each step.

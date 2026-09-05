@@ -188,3 +188,41 @@ func TestReview3RunReportsAShutdownPublishedDuringStop(t *testing.T) {
 		t.Errorf("Run: want the published worker failure, got %v", err)
 	}
 }
+
+// Run joins a cause published through Shutdown on the way out of a failed
+// Start, not only on the way out of an ordinary stop. A rollback runs the
+// drain and stop hooks, so a worker can die there exactly as it can during a
+// shutdown, and the error branch used to return before the cause was read.
+// (review 4, 1)
+func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
+	fail := errors.New("worker died")
+	boom := errors.New("start failed")
+
+	root := di.New()
+	child := root.Child("worker")
+	child.Value(&Worker{}).Run(func(ctx context.Context, _ *Worker) error {
+		<-ctx.Done()
+		root.Shutdown(fail)
+		return fail
+	})
+	if _, err := child.Resolve[*Worker](); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// A drain hook that stops the child and handles its error itself, so the
+	// failure reaches Run only as the published cause.
+	root.Value(&DB{}).Eager().
+		OnDrain(func(ctx context.Context, _ *DB) error { _ = child.Stop(ctx); return nil })
+	root.Value(&Repo{}).Eager().
+		OnStart(func(context.Context, *Repo) error { return boom })
+
+	err := root.Run(context.Background(), di.StopTimeout(5*time.Second))
+	if !errors.Is(err, boom) {
+		t.Fatalf("Run: want the start failure, got %v", err)
+	}
+	if !errors.Is(err, fail) {
+		t.Fatalf("Run dropped the worker failure published during the rollback: %v", err)
+	}
+}

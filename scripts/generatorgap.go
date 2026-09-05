@@ -33,9 +33,15 @@ import (
 	"strings"
 )
 
+// block is one coverage block, identified the way the profile identifies it:
+// by both ends, columns included. Keying it on line numbers alone merges the
+// blocks that share a line -- di.go has eighteen such lines, where a hook is
+// registered and its body declared in the same expression -- and then a
+// generator that reached only the registration makes the body look covered
+// too, which is exactly the gap this command exists to find.
 type block struct {
-	file       string
-	start, end int
+	file                         string
+	start, startCol, end, endCol int
 }
 
 func main() {
@@ -122,11 +128,18 @@ func parse(path string) (counts, stmts map[block]int, pct float64) {
 		if len(fields) != 3 {
 			continue
 		}
-		rng := strings.Split(fields[0], ",")
+		from, to, ok := strings.Cut(fields[0], ",")
+		if !ok {
+			continue
+		}
+		fromLine, fromCol, _ := strings.Cut(from, ".")
+		toLine, toCol, _ := strings.Cut(to, ".")
 		b := block{
-			file:  line[:colon],
-			start: atoi(strings.Split(rng[0], ".")[0]),
-			end:   atoi(strings.Split(rng[1], ".")[0]),
+			file:     line[:colon],
+			start:    atoi(fromLine),
+			startCol: atoi(fromCol),
+			end:      atoi(toLine),
+			endCol:   atoi(toCol),
 		}
 		n, count := atoi(fields[1]), atoi(fields[2])
 		if _, seen := stmts[b]; !seen {
