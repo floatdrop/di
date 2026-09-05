@@ -10,6 +10,27 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+    staticcheck:
+      # SA4023 (impossible nil comparison) crashes rather than reports:
+      # "index out of range [1] with length 1" inside its nilness analysis,
+      # in honnef.co/go/tools v0.8.0 as shipped with golangci-lint v2.13.1.
+      # It takes the whole lint job down with it, so there is no partial
+      # result to work from. The trigger moves as the test package grows --
+      # it first appeared on a helper comparing an error parameter to nil,
+      # and came back on an unrelated switch case -- so contorting code to
+      # dodge it is not a strategy. Drop this exclusion when the upstream
+      # crash is fixed and see whether SA4023 has anything to say.
+      # The list is golangci-lint's own default with -SA4023 appended, so
+      # nothing else changes about which checks run.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -SA4023
     revive:
       # Only these two rules, not revive's default set: they catch the
       # parameters and receivers the standard linters do not look at.

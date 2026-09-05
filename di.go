@@ -166,6 +166,15 @@ type binding struct {
 	// recovered.
 	used atomic.Bool
 
+	// resolving counts the resolutions of this binding that have not served
+	// a value yet, which is the window used cannot cover. A constructor may
+	// register over its own key and resolve the replacement, and then the
+	// nested call is served the new value and the outer call the old one --
+	// two live values for one key, from one goroutine, past a guard that only
+	// looked at used. It is kept only until the first value is served, since
+	// after that used says the same thing and costs nothing to read.
+	resolving atomic.Int32
+
 	single *instance // the singleton; scoped bindings keep one instance per state
 }
 
@@ -836,6 +845,13 @@ func (st *state) freeze() {
 			if prev, ok := index[b.key]; ok && prev.used.Load() {
 				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it has already been resolved",
 					b.key, prev.site, b.site))
+			} else if ok && prev.resolving.Load() > 0 {
+				// A resolution of this key is in flight. Serving the
+				// replacement to anything it goes on to build, while the
+				// resolution that is running returns the old value, is the
+				// same two-live-values defect the check above prevents.
+				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it is being resolved",
+					b.key, prev.site, b.site))
 			}
 			if st.served[b.key] {
 				// This scope already served the key from an outer scope;
@@ -1240,6 +1256,14 @@ func (s *Scope) resolve(b *binding, owner *state, k key) any {
 	}
 	if s.r.onPath(b, holder) {
 		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.pathStr(), k)})
+	}
+	if !b.used.Load() {
+		// Hold the key against an override for as long as this resolution
+		// runs, so a constructor cannot replace the registration it is
+		// itself being built from. used is set before this is dropped, so
+		// the two guards never leave a gap between them.
+		b.resolving.Add(1)
+		defer b.resolving.Add(-1)
 	}
 	sc := s.view(s.r.child(k, b, holder))
 	// The node stops being a dependency when this resolution returns, however
@@ -1710,13 +1734,18 @@ func (s *Scope) teardown(ctx context.Context) error {
 // flight and start releasing what its hooks are using.
 func (s *Scope) drain(ctx context.Context) error {
 	if !s.drainOnce.claim(s.state, nil) {
-		// The owner's error reaches the caller through the Stop that owns
-		// the drain, which this Stop either is or waits for, so it is not
-		// joined again here. Only a failure to wait belongs to this call.
-		if _, finished := s.drainOnce.wait(s.state, ctx); !finished {
+		// Whoever owns the phase settles it with what this scope's own hooks
+		// reported, and that answer belongs to this call too: a Stop must
+		// report the failure of a drain hook of its own scope whether it ran
+		// the hook or waited for someone else to. Reporting it twice inside
+		// one aggregate is what the run avoids, by keeping each scope's
+		// errors out of its own return value and letting them arrive through
+		// that scope's Stop.
+		err, finished := s.drainOnce.wait(s.state, ctx)
+		if !finished {
 			return fmt.Errorf("di: waiting for scope %s to drain: %w", s.name, ctx.Err())
 		}
-		return nil
+		return err
 	}
 	root := &drainScope{st: s.state, ours: true}
 	r := drainRun{root: root, seen: map[*state]*drainScope{s.state: root}}
@@ -1760,6 +1789,15 @@ func (r *drainRun) sweepAll(ctx context.Context) error {
 // is swept on every pass, not only the ones that appeared in it, because a
 // hook may build into a scope already visited.
 //
+// It returns the errors that belong to *this* scope's Stop. A descendant's go
+// into that descendant's phase instead, so its own Stop reports them -- the
+// one that a request handler is holding, say, and not only the application
+// Stop that happened to run the hook. They reach this caller anyway, because
+// teardown stops its children and joins what their Stop returns, and that is
+// the route that keeps one failure to one place in the aggregate. Errors
+// found in a descendant after its phase has ended have nowhere to be settled,
+// so those bubble up here instead of being dropped.
+//
 // A descendant's phase is claimed just before its subtree is swept and ended
 // as soon as that sweep finishes, so while a hook runs the only unended phases
 // this run holds are the scope being swept and its ancestors, which a hook may
@@ -1787,6 +1825,8 @@ func (r *drainRun) visit(ctx context.Context, ds *drainScope, progress *bool) []
 			}
 		}
 		if cs.ours {
+			// Whatever comes back could not be settled into the child's own
+			// phase, so it belongs to this scope's aggregate.
 			errs = append(errs, r.visit(ctx, cs, progress)...)
 		}
 	}
@@ -1799,10 +1839,9 @@ func (r *drainRun) visit(ctx context.Context, ds *drainScope, progress *bool) []
 		errs = append(errs, err)
 	}
 	if ds != r.root && !ds.settled {
-		// A descendant's failures are joined into this run's error, so its
-		// waiters need only the release.
-		ds.st.drainOnce.settle(ds.st, nil)
+		ds.st.drainOnce.settle(ds.st, errors.Join(errs...))
 		ds.settled = true
+		return nil // reported by this scope's own Stop, not by its parent's
 	}
 	return errs
 }
@@ -1920,7 +1959,11 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 	defer cancelSig()
 
 	if err := s.start(ctx, func() (context.Context, func()) { return cfg.stopContext(ctx) }); err != nil {
-		return err
+		// A failed Start rolls back through Stop, which runs the drain and
+		// stop hooks -- so a worker can die and publish its failure here
+		// exactly as it can during an ordinary shutdown. This path used to
+		// return before the cause was ever read.
+		return joinCause(err, s.publishedCause())
 	}
 
 	var cause error
@@ -1940,14 +1983,34 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 		// cancelled ctx. Read it again: the Stop that saw the failure may have
 		// been a child's, called from a drain hook that handled the error
 		// itself.
-		select {
-		case <-s.shutdownCh:
-			cause = s.shutdownErr
-		default:
-		}
+		cause = s.publishedCause()
 	}
-	if cause != nil && errors.Is(stopErr, cause) {
-		return stopErr // the same failure, reached by both routes
+	return joinCause(stopErr, cause)
+}
+
+// publishedCause reports the failure Shutdown recorded, without waiting for
+// one. Run reads it on both ways out, because a worker dies when it dies:
+// during the stop that follows a signal, or during the rollback of a Start
+// that never finished.
+func (s *Scope) publishedCause() error {
+	select {
+	case <-s.shutdownCh:
+		return s.shutdownErr
+	default:
+		return nil
 	}
-	return errors.Join(cause, stopErr)
+}
+
+// joinCause adds a published cause to what Run is already returning, unless
+// that failure is in there already: a worker's error reaches Run by two
+// routes, as the cause and through the Stop that cancelled it, and it is one
+// failure either way.
+func joinCause(err, cause error) error {
+	if cause == nil {
+		return err
+	}
+	if errors.Is(err, cause) {
+		return err // one failure, reached by both routes
+	}
+	return errors.Join(err, cause)
 }

@@ -385,3 +385,37 @@ func TestGroupAcceptsValues(t *testing.T) {
 		t.Fatalf("Get = %q, want the plain registration", got)
 	}
 }
+
+// A key cannot be overridden while a resolution of it is in flight. used is
+// only set once a value has been served, so a constructor could register over
+// its own key and resolve the replacement: the nested call was served the new
+// value and the outer call returned the old one, which is two live values for
+// one key from a single goroutine.
+// (review 4, 3)
+func TestReview4CannotOverrideAKeyBeingResolved(t *testing.T) {
+	s := di.New()
+	var nested *DB
+	s.Provide(func(sc *di.Scope) *DB {
+		sc.Provide(func(*di.Scope) *DB { return &DB{dsn: "new"} })
+		nested, _ = sc.Resolve[*DB]()
+		return &DB{dsn: "old"}
+	})
+	outer, err := s.Resolve[*DB]()
+	if err == nil {
+		t.Fatalf("the re-registration was accepted: nested=%v outer=%q", nested, outer.dsn)
+	}
+	if !strings.Contains(err.Error(), "it is being resolved") {
+		t.Fatalf("want the rejection to say the key is being resolved, got %v", err)
+	}
+
+	// The key is free again once that resolution has failed, which is what
+	// keeps a key whose constructor failed recoverable.
+	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "recovered"} })
+	got, err := s.Resolve[*DB]()
+	if err != nil {
+		t.Fatalf("re-registration after the failure should recover the key: %v", err)
+	}
+	if got.dsn != "recovered" {
+		t.Fatalf("got %q", got.dsn)
+	}
+}

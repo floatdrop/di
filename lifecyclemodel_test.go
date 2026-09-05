@@ -71,6 +71,16 @@ func (l *lifecycle) governedBy(scope int) (int, bool) {
 	return v.(int), true
 }
 
+// refusedAsSecondStart reports the one Start failure that changes nothing:
+// the scope had already been started, so the call was refused before it
+// looked at a single binding.
+func refusedAsSecondStart(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "Start called twice")
+}
+
 type hookSet struct{ start, drain, stop bool }
 
 // hooksOfShape says which hooks each registration shape of the sequential
@@ -80,7 +90,7 @@ func hooksOfShape(reg uint8) hookSet {
 	switch reg {
 	case 0, 3:
 		return hookSet{start: true, stop: true}
-	case 1, 2, 4:
+	case 1, 2, 4, 9, 10:
 		return hookSet{stop: true}
 	case 7:
 		return hookSet{drain: true, stop: true}
@@ -116,7 +126,10 @@ type lifecycle struct {
 	instances []*modelInstance
 	byValue   map[any]*modelInstance
 	phase     [numScopes]scopePhase
-	fails     []string
+	// startUnknown marks the scopes whose start outcome the model could not
+	// determine; see ranAndStopped.
+	startUnknown [numScopes]bool
+	fails        []string
 }
 
 func newLifecycle(m *machine) *lifecycle {
@@ -212,7 +225,7 @@ func (l *lifecycle) started(scope int, err error) {
 		// A failed Start rolls back through Stop, with one exception: a
 		// second Start is refused before anything happens, so it changes
 		// nothing at all.
-		if !strings.Contains(err.Error(), "Start called twice") {
+		if !refusedAsSecondStart(err) {
 			l.stopping(scope)
 		}
 		return
@@ -227,6 +240,25 @@ func (l *lifecycle) started(scope int, err error) {
 			in.expect["OnStart"] = true
 		}
 	}
+}
+
+// ranAndStopped records a Scope.Run: the scope was started and then stopped,
+// and the model cannot tell from outside whether the hook phase was reached
+// before the start failed. Both answers change what OnStart was owed and
+// neither is observable, so the prediction is dropped for that subtree and
+// only that. What M3, M4 and M5 rest on is observed rather than predicted --
+// whether the start step ran, not whether it should have -- so they stay
+// exact through a Run.
+func (l *lifecycle) ranAndStopped(scope int, err error) {
+	if refusedAsSecondStart(err) {
+		return // refused before anything happened
+	}
+	for s := range numScopes {
+		if under(s, scope) {
+			l.startUnknown[s] = true
+		}
+	}
+	l.stopping(scope)
 }
 
 // stopping records a Stop of a scope, and settles what its subtree owed.
@@ -261,6 +293,9 @@ func (l *lifecycle) check() []string {
 	for _, in := range l.instances {
 		where := l.m.names[in.scope]
 		for _, hook := range []string{"OnStart", "OnDrain", "OnStop"} {
+			if hook == "OnStart" && l.startUnknown[in.scope] {
+				continue
+			}
 			want, got := in.expect[hook], in.ran[hook] > 0
 			switch {
 			case want && !got: // M3, M4, M6

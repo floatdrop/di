@@ -79,6 +79,7 @@ const (
 	opStart
 	opStop
 	opShutdown
+	opRun
 	numOpKinds
 )
 
@@ -95,7 +96,7 @@ type op struct {
 }
 
 func (o op) String() string {
-	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Shutdown"}
+	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Shutdown", "Run"}
 	if o.kind == opRegister {
 		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v)", o.scope, keyNames[o.key], o.reg, o.eager)
 	}
@@ -112,7 +113,7 @@ func decode(data []byte) []op {
 			kind:  opKind(data[i] % uint8(numOpKinds)),
 			scope: data[i+1] % numScopes,
 			key:   data[i+2] % numKeys,
-			reg:   data[i+3] % 10,
+			reg:   data[i+3] % 12,
 			eager: data[i+4]&1 == 1,
 		})
 	}
@@ -138,6 +139,11 @@ type machine struct {
 	// values seen per (scope, key), to check singleton stability
 	seen map[string]any
 
+	// registeredFrom remembers the scopes a constructor has already
+	// registered into, so the shape that registers does it once and never
+	// overrides what it registered before.
+	registeredFrom map[int]bool
+
 	lc *lifecycle
 
 	failedResolve map[string]bool
@@ -154,7 +160,8 @@ func newMachine(t *testing.T, ops []op) *machine {
 		t: t, ops: ops,
 		builds: map[string]int{}, starts: map[string]int{}, stops: map[string]int{},
 		seen: map[string]any{}, failedResolve: map[string]bool{},
-		stopped: make([]bool, numScopes),
+		registeredFrom: map[int]bool{},
+		stopped:        make([]bool, numScopes),
 	}
 	root := di.New()
 	root.Observe(func(ev di.Event) {
@@ -292,6 +299,23 @@ func (m *machine) step(i int, o op) {
 		}
 		_ = out
 
+	case opRun:
+		// Run with a context that is already cancelled: it starts the scope,
+		// finds nothing to wait for, and stops again. That is the only way
+		// the generators reach Run at all, and Run is where a worker's
+		// failure and a Stop's errors are joined.
+		ctx, cancel := context.WithCancel(machineStartCtx(int(o.scope)))
+		cancel()
+		out := m.call(label, func() (any, error) {
+			return nil, s.Run(ctx, di.StopTimeout(2*time.Second))
+		})
+		if out.rejected == "" {
+			m.lc.ranAndStopped(int(o.scope), out.err)
+			if out.err == nil || !strings.Contains(out.err.Error(), "Start called twice") {
+				m.markStopped(int(o.scope))
+			}
+		}
+
 	case opShutdown:
 		// Sequentially this only records a cause; it is here so the operation
 		// exists in the shared encoding, and because Shutdown is what a hook
@@ -301,6 +325,19 @@ func (m *machine) step(i int, o op) {
 }
 
 var errShutdown = errors.New("shutdown from the machine")
+
+// marker is what the registering shape registers. It is its own type so that
+// registering it can never override anything else, and registerFrom does it
+// once per scope so it can never override itself either.
+type marker struct{}
+
+func (m *machine) registerFrom(sc *di.Scope, scope int) {
+	if m.registeredFrom[scope] {
+		return
+	}
+	m.registeredFrom[scope] = true
+	sc.Value(marker{})
+}
 
 // checkRepeatable enforces I2. It re-runs the identical operation and
 // requires the same rejection. Only read-only operations are re-run:
@@ -452,6 +489,25 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	case 8:
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
 			OnStart(hook("OnStart")).OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
+	case 9:
+		// A constructor that registers, and resolves what it registered. The
+		// registry is mutable during a resolution, and nothing here was
+		// exercising that: freeze runs inside the nested lookup, on a scope
+		// with a resolution already in flight.
+		b = s.Provide(func(sc *di.Scope) T {
+			m.registerFrom(sc, int(o.scope))
+			_, _ = sc.Resolve[marker]()
+			return built(sc, plain())
+		}).OnStop(hook("OnStop"))
+	case 10:
+		// The same, over its own key. That has to be rejected: the nested
+		// resolve would be served the replacement while this one goes on to
+		// return the old value, which is two live values for one key.
+		b = s.Provide(func(sc *di.Scope) T {
+			sc.Provide(func(*di.Scope) T { return plain() })
+			_, _ = sc.Resolve[T]()
+			return built(sc, plain())
+		}).OnStop(hook("OnStop"))
 	default:
 		b = s.Provide(func(*di.Scope) T { return plain() })
 	}

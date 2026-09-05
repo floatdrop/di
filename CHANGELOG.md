@@ -7,6 +7,30 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Fixed
+
+- `Scope.Run` reports a cause published through `Shutdown` while a failed
+  `Start` was rolling back, not only one published during an ordinary stop. A
+  rollback runs the drain and stop hooks, so a worker can die there exactly as
+  it can during a shutdown; the error branch returned before the cause was
+  ever read.
+- A `Stop` reports the failure of a drain hook of its own scope even when an
+  ancestor's `Stop` owned the phase and ran the hook. The waiter dropped the
+  owner's error on the grounds that it reached the caller through the `Stop`
+  that owned the drain -- true when that is the same call, and false for a
+  request scope ending while the application shuts down, which is exactly
+  where the failure needed reporting. Each scope's drain errors now settle
+  into that scope's phase and reach the aggregate through its own `Stop`, so
+  they are reported to every caller that should hear them and still appear
+  once in any one error.
+- A key cannot be overridden while a resolution of it is in flight. `used` is
+  set only once a value has been served, so a constructor could register over
+  its own key and resolve the replacement: the nested call was served the new
+  value and the outer call returned the old one -- two live values for one
+  key, from a single goroutine, past a guard meant to prevent exactly that.
+  Re-registering after a *failed* resolution still works, which is how a key
+  whose constructor failed is recovered.
+
 Nine cuts to the API surface, made before the graph-validation work of
 issue #3 so that it lands on a smaller and more regular API. Each one
 breaks a caller that used the removed name, and each has a one-line
@@ -61,6 +85,30 @@ migration.
   `Scope.Run`, the main-function helper, for an unrelated thing. Behaviour
   is unchanged; the error `Stop` returns for a hook that outlasts the
   deadline now reads "Worker hook did not return".
+
+### Testing
+
+The fourth review's findings were all in places the generators still could not
+reach, so each fix comes with the shape that would have caught it:
+
+- Drain hooks can fail now, and C11 holds a `Stop` to reporting the failure of
+  a hook of its own scope. Every drain hook in the driver returned nil until
+  now, so a scope that swallowed its own hook's failure looked exactly like
+  one with nothing to report.
+- The machines drive `Scope.Run`, with a context that is already cancelled so
+  it starts and stops again. `Run` was the largest block of code only the
+  hand-written tests reached, and it is where a worker's failure and a stop's
+  errors are joined. Generator coverage: 82.5% to 88.5%.
+- A registration shape whose constructor registers, and one that registers
+  over its own key, so the registry being mutable during a resolution is
+  something the generators exercise rather than something reviews find.
+- `scripts/generatorgap.go` keyed coverage blocks by line number and merged
+  the eighteen lines of `di.go` that carry more than one -- a hook registered
+  and its body declared in a single expression -- so reaching the registration
+  made the body look covered. It now keys on the full block, and CI checks its
+  arithmetic against `go tool cover -func`, because a tool that measures a gap
+  has to be measured itself.
+
 
 ## [0.6.0] - 2026-09-04
 
