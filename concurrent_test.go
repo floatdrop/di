@@ -458,7 +458,15 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 			// exercises the phase without checking what it does with an
 			// error, which is how a child Stop that dropped its own hook's
 			// failure survived three drivers.
-			m.drainFailed.Store(holder, errDrain)
+			if !m.builtLate(any(v)) {
+				// C11 holds only for an instance that existed before the
+				// teardown began. One built during the phase can be drained
+				// by a sweep running above a scope whose own Stop is already
+				// past its drain, and that Stop has nowhere to put the
+				// error: its phase was over before the instance existed.
+				// The same exemption C3 needs, for the same reason.
+				m.drainFailed.Store(holder, errDrain)
+			}
 			return errDrain
 		}
 		return nil
@@ -685,6 +693,15 @@ func (m *cmachine) step(i int, o op) {
 			}
 		case opShutdown:
 			s.Shutdown(errShutdown)
+		case opRun:
+			// Run with a context that is already cancelled: it starts the
+			// scope and stops it again. Without this case the op fell through
+			// to the default and quietly resolved instead, so the driver
+			// never ran Run at all while its sequences said it did.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			_ = s.Run(ctx, di.StopTimeout(5*time.Second))
+			m.stopReturned.Store(m.names[o.scope], struct{}{})
 		case opHealth:
 			_ = s.HealthCheck(context.Background())
 		default:
@@ -859,6 +876,14 @@ func (m *cmachine) check() {
 	})
 	m.drainFailed.Range(func(scope, want any) bool { // C11
 		for _, got := range m.stopReports[scope.(string)] {
+			if errors.Is(got, context.DeadlineExceeded) {
+				// A Stop that ran out of context reports that, and what the
+				// phase went on to conclude is not its answer. The impatient
+				// flavour is not the only way to get here: a patient Stop can
+				// time out too, waiting on a phase another Stop is holding
+				// while a hook of its own resolves.
+				continue
+			}
 			if !errors.Is(got, want.(error)) {
 				m.fails = append(m.fails, fmt.Sprintf(
 					"a drain hook of %s failed and a Stop of that scope reported %v", scope, got))

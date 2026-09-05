@@ -493,10 +493,16 @@ errors across the examples. golangci-lint v2.13.1+ handles them correctly.
 is not redundant: the declared type is what drives Go 1.27 inference for a
 generic method value.
 
-golangci-lint v2.13.1's staticcheck (honnef.co/go/tools v0.8.0) *crashes* --
-`SA4023: index out of range [1] with length 1`, inside its nilness analysis --
-on a function that compares an error parameter to nil in an `||` and is called
-from two places. `joinCause` in `di.go` is written as two separate `if`s for
-that reason, which is also how it reads best. Recombining them takes the lint
-job down with a panic rather than a finding, which is a confusing way to find
-out.
+golangci-lint v2.13.1's staticcheck (honnef.co/go/tools v0.8.0) *crashes*
+rather than reports on this package: `SA4023: index out of range [1] with
+length 1`, inside its nilness analysis. It takes the whole lint job down, so
+there is no partial result to work from, and the trigger moves as the test
+package grows -- it first appeared on a helper comparing an error parameter to
+nil in an `||`, and came back later on an unrelated switch case. `.golangci.yml`
+disables SA4023 for that reason, with the default check list otherwise intact.
+Drop the exclusion when the upstream crash is fixed and see whether SA4023 has
+anything to say.
+
+Bisecting a lint crash needs care: reverting one file to find the trigger can
+break the build, and golangci-lint then reports "0 issues" for a package it
+never analysed. Check that the package still compiles at each step.
