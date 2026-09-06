@@ -172,8 +172,9 @@ type binding struct {
 	group    bool
 	scoped   bool
 	eager    bool
-	override bool // declared to replace an earlier registration of the key
-	isValue  bool // registered with Value: lifetimes do not apply
+	override bool  // declared to replace an earlier registration of the key
+	isValue  bool  // registered with Value: lifetimes do not apply
+	wants    []key // dependencies declared by Wire; nil for a Provide closure
 	build    func(*Scope) any
 	onStart  func(context.Context, any) error
 	onDrain  func(context.Context, any) error
