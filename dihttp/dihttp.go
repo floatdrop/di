@@ -3,9 +3,10 @@
 // A [Middleware] gives every request its own child scope holding the
 // *http.Request, so services that depend on the request are declared once in
 // the application scope as Scoped and built per request. Handlers reach the
-// scope through [di.FromContext]. [Module] registers the middleware as a
-// service, so a server's constructor takes it as a parameter; [NewMiddleware]
-// makes one directly.
+// scope through [di.FromContext], or are made with [Handle], which resolves a
+// handler type from that scope and calls one of its methods. [Module]
+// registers the middleware as a service, so a server's constructor takes it
+// as a parameter; [NewMiddleware] makes one directly.
 package dihttp
 
 import (
@@ -58,4 +59,25 @@ func NewMiddleware(s *di.Scope) Middleware {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// Handle serves each request with a method of H, resolved from the request's
+// scope. A method expression names both, so no type argument is needed:
+//
+//	mux.Handle("GET /users/{id}", dihttp.Handle((*Users).Show))
+//
+// H is a service like any other: declared Scoped when it needs the request,
+// and once for the application when it does not; one type per resource, with
+// a method per route, keeps the dependencies in one place. Resolution follows
+// the lifetime either way. A wiring failure at request time panics with the
+// error, which net/http recovers and logs with the request; checking the
+// graph with Validate at startup is what keeps that from happening.
+func Handle[H any](method func(H, http.ResponseWriter, *http.Request)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, ok := di.FromContext(r.Context())
+		if !ok {
+			panic("dihttp: no request scope on the context; is the Middleware above this handler?")
+		}
+		method(req.Get[H](), w, r)
+	})
 }

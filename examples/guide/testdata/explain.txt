@@ -3,4 +3,4 @@ storage.Store: singleton wrapper in root, not built (provided at internal/cache/
 │   └╌╌ *storage.DB: singleton in root, not built (provided at internal/storage/storage.go:46)
 │       └╌╌ config.Config: value in root, not built (provided at internal/config/config.go:31)
 └╌╌ *cache.Cache: singleton in root, not built (provided at internal/cache/cache.go:55)
-declared by: *api.Handler in root
+declared by: *api.Users in root

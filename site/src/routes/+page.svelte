@@ -72,7 +72,7 @@ internal/config/      <span class="c">settings, registered as a value</span>
 internal/storage/     <span class="c">the database, and the store built on it</span>
 internal/cache/       <span class="c">a cache wrapped around the store</span>
 internal/mail/        <span class="c">a background worker</span>
-internal/api/         <span class="c">the HTTP server and its per-request handler</span></pre>
+internal/api/         <span class="c">the HTTP server and its handlers</span></pre>
 			</figure>
 		</section>
 
@@ -155,7 +155,16 @@ internal/api/         <span class="c">the HTTP server and its per-request handle
 				<code>*http.Request</code>. Services declared <code>Scoped</code> in the application
 				scope are built once per request scope, from singletons and request-scoped values
 				alike, and stopped with it. A handler reaches its scope through
-				<code>di.FromContext</code>.
+				<code>di.FromContext</code>, or through <code>dihttp.Handle</code>, which does that for
+				a handler type's method.
+			</p>
+			<p>
+				A handler type covers one resource, with a method per route, so its dependencies are
+				declared once. <code>dihttp.Handle((*Users).Show)</code> resolves the type from the
+				request scope and calls the method; a method expression names both, so no type
+				argument is needed. <code>Users</code> is <code>Scoped</code> because it needs the
+				caller; <code>Health</code> needs nothing from the request and is an ordinary
+				singleton, and <code>Handle</code> follows either lifetime.
 			</p>
 			<p>
 				The middleware needs the scope itself, to open a child per request, so

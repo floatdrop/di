@@ -1,6 +1,7 @@
-// Package api serves HTTP. The server is a singleton with a lifecycle; what a
-// handler needs per request is Scoped, and is built in the request scope
-// that the dihttp middleware opens for each request.
+// Package api serves HTTP. The server is a singleton with a lifecycle. A
+// handler type covers one resource, with a method per route; it is Scoped
+// when it needs the request, and built in the request scope the dihttp
+// middleware opens, or a plain singleton when it does not.
 package api
 
 import (
@@ -23,44 +24,66 @@ type Caller struct{ Name string }
 
 func NewCaller(r *http.Request) *Caller { return &Caller{Name: r.Header.Get("X-User")} }
 
-// Handler is built once per request, from singletons and request-scoped
-// values alike.
-type Handler struct {
+// Users is built once per request, from singletons and request-scoped values
+// alike, and serves every route about users.
+type Users struct {
 	store  storage.Store
 	mail   *mail.Mailer
 	caller *Caller
 }
 
-func NewHandler(store storage.Store, m *mail.Mailer, caller *Caller) *Handler {
-	return &Handler{store: store, mail: m, caller: caller}
+func NewUsers(store storage.Store, m *mail.Mailer, caller *Caller) *Users {
+	return &Users{store: store, mail: m, caller: caller}
 }
 
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	user, err := h.store.Find(r.Context(), r.PathValue("id"))
+func (u *Users) Show(w http.ResponseWriter, r *http.Request) {
+	user, err := u.store.Find(r.Context(), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	h.mail.Send(h.caller.Name + " looked at " + user.Name)
 	fmt.Fprintln(w, user.Name)
 }
 
-// NewServer builds the routes. The middleware gives each request its scope,
-// which a handler reaches through di.FromContext; dihttp.Module provides it.
+func (u *Users) Greet(w http.ResponseWriter, r *http.Request) {
+	user, err := u.store.Find(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	u.mail.Send(u.caller.Name + " greets " + user.Name)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// Health needs nothing from the request, so it is an ordinary singleton.
+type Health struct{ db *storage.DB }
+
+func NewHealth(db *storage.DB) *Health { return &Health{db: db} }
+
+func (h *Health) Check(w http.ResponseWriter, r *http.Request) {
+	if err := h.db.Ping(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintln(w, "ok")
+}
+
+// NewServer builds the routes. Each one resolves its handler from the
+// request scope the middleware opens; dihttp.Module provides the middleware.
 func NewServer(cfg config.Config, mw dihttp.Middleware) *http.Server {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
-		req, _ := di.FromContext(r.Context())
-		req.Get[*Handler]().ServeHTTP(w, r)
-	})
+	mux.Handle("GET /users/{id}", dihttp.Handle((*Users).Show))
+	mux.Handle("POST /users/{id}/greet", dihttp.Handle((*Users).Greet))
+	mux.Handle("GET /healthz", dihttp.Handle((*Health).Check))
 	return &http.Server{Addr: cfg.Addr, Handler: mw(mux)}
 }
 
-// Module registers the request-scoped values and the server, with the hooks
-// that bind, drain and close it.
+// Module registers the request-scoped values, the handlers and the server,
+// with the hooks that bind, drain and close it.
 func Module(s *di.Scope) {
 	s.Wire[*Caller](NewCaller).Scoped()
-	s.Wire[*Handler](NewHandler).Scoped()
+	s.Wire[*Users](NewUsers).Scoped()
+	s.Wire[*Health](NewHealth)
 	s.Wire[*http.Server](NewServer).
 		Eager().
 		OnStart(func(_ context.Context, srv *http.Server) error {

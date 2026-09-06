@@ -691,15 +691,19 @@ app.Use(dihttp.Module, api.Module)
 
 func NewServer(cfg Config, mw dihttp.Middleware) *http.Server {
     mux := http.NewServeMux()
-    mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
-        req, _ := di.FromContext(r.Context())
-        user := req.Get[*User]()
-    })
+    mux.Handle("GET /users/{id}", dihttp.Handle((*Users).Show))
+    mux.Handle("GET /healthz", dihttp.Handle((*Health).Check))
     return &http.Server{Addr: cfg.Addr, Handler: mw(mux)}
 }
 ```
 
-Outside the container, `dihttp.NewMiddleware(app)` makes one directly.
+`dihttp.Handle` resolves a handler type from the request's scope and calls
+the method; a method expression names both, so one type per resource with a
+method per route keeps its dependencies in one place. The type is declared
+`Scoped()` when it needs the request and once for the application when it
+does not, and `Handle` follows either. A handler written by hand reaches
+the scope with `di.FromContext(r.Context())`. Outside the container,
+`dihttp.NewMiddleware(app)` makes a middleware directly.
 
 Services that depend on the request are declared once, in the root, as
 `Scoped()`; they are built per request, cached for its duration, and stopped

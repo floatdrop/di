@@ -7,6 +7,16 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Added
+
+- `dihttp.Handle(method)` makes an `http.Handler` that resolves a handler
+  type from the request's scope and calls one of its methods, named by a
+  method expression: `mux.Handle("GET /users/{id}", dihttp.Handle((*Users).Show))`.
+  One type per resource with a method per route replaces a type, a
+  registration and a closure per route. The type is `Scoped` when it needs
+  the request and a plain singleton when it does not; `Handle` follows
+  either. Nothing existing changes; an upgrade cannot break a caller.
+
 ## [0.12.0] - 2026-09-06
 
 The request-scope middleware becomes a dependency a server's constructor can
