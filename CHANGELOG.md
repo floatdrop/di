@@ -7,6 +7,12 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-06
+
+One route, one line. `go doc -all` against 0.12.0 leaves `di` untouched and
+adds `dihttp.Handle`; nothing changes shape or behaviour, and an upgrade
+cannot break a caller.
+
 ### Added
 
 - `dihttp.Handle(method)` makes an `http.Handler` that resolves a handler
@@ -850,7 +856,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/floatdrop/di/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/floatdrop/di/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/floatdrop/di/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/floatdrop/di/compare/v0.9.1...v0.10.0
