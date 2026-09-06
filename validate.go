@@ -70,12 +70,19 @@ func (st *state) live() []*binding {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	serving := map[*binding]bool{}
+	// A wrapper serves the key and what it wraps is built underneath it,
+	// so the whole chain is live; a chain an Override replaced is not.
+	chain := func(b *binding) {
+		for ; b != nil && !serving[b]; b = b.inner {
+			serving[b] = true
+		}
+	}
 	for _, b := range st.index {
-		serving[b] = true
+		chain(b)
 	}
 	for _, bs := range st.groups {
 		for _, b := range bs {
-			serving[b] = true
+			chain(b)
 		}
 	}
 	var out []*binding
@@ -122,8 +129,8 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []*binding) {
 		return
 	}
 	path = append(path, b)
-	for _, k := range b.wants {
-		dep, owner := (&Scope{state: holder}).lookup(k)
+	for _, e := range declared(b, holder) {
+		k, dep, owner := e.k, e.b, e.owner
 		switch {
 		case dep == nil:
 			v.missing(k, b, holder, md, path)
@@ -180,6 +187,29 @@ func (v *validator) owed(line string) {
 		v.seen[line] = true
 		v.out.Owed = append(v.out.Owed, line)
 	}
+}
+
+// edge is one declared dependency: the key, and the binding it resolves to
+// from the holder with the scope that registered it, or nil.
+type edge struct {
+	k     key
+	b     *binding
+	owner *state
+}
+
+// declared lists what b declares, in build order: the registration a wrapper
+// composes over, which is bound rather than looked up, and then the
+// parameter types, each looked up from holder as the build would.
+func declared(b *binding, holder *state) []edge {
+	out := make([]edge, 0, len(b.wants)+1)
+	if b.inner != nil {
+		out = append(out, edge{b.key, b.inner, b.innerAt})
+	}
+	for _, k := range b.wants {
+		dep, owner := (&Scope{state: holder}).lookup(k)
+		out = append(out, edge{k, dep, owner})
+	}
+	return out
 }
 
 // keysOf renders a path the way a resolution error does.

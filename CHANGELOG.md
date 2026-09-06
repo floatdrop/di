@@ -7,6 +7,23 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Added
+
+- `Scope.Wrap[T](fn)` composes over whatever serves `T` when it is called,
+  the latest registration in this scope or the one an ancestor provides
+  ([#1]). `fn` takes the wrapped value first and its other dependencies after
+  it, read with reflection as `Wire` reads a constructor, and returns `T` or
+  `(T, error)`. What is wrapped keeps its registration, hooks and lifetime, is
+  built first and stopped after the wrapper; wrappers chain in registration
+  order; a wrapper takes the wrapped lifetime, and `Scoped()` on it makes one
+  per resolving scope over a shared inner. A wrapper in a child scope applies
+  to that scope and its descendants only, which is what uber/fx calls
+  `Decorate`. Nothing to wrap, a group, and the `Group()` or `Override()`
+  markers on a wrapper are rejected. A registration some wrapper composes
+  over can no longer be overridden, in its scope or a descendant's, until an
+  `Override()` replaces the wrapper itself. `Explain` names a wrapper and
+  draws what it wraps beneath it; `Validate` walks the chain.
+
 ## [0.9.1] - 2026-09-06
 
 `Explain` shows the graph `Wire` declared before it is built. `go doc -all`
@@ -785,3 +802,4 @@ events.
 [0.2.0]: https://github.com/floatdrop/di/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/floatdrop/di/releases/tag/v0.1.0
 [#3]: https://github.com/floatdrop/di/issues/3
+[#1]: https://github.com/floatdrop/di/issues/1
