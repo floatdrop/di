@@ -118,9 +118,10 @@ internal/api/         <span class="c">the HTTP server and its per-request handle
 				module cannot rewire another unnoticed.
 			</p>
 			<p>
-				<code>dihttp.Validate</code> walks the declared graph without building anything. A
-				dependency nothing provides, a cycle, or a request-scoped service captured by a
-				singleton fails here, at startup, rather than on the first request. Then
+				<code>Validate</code> walks the declared graph without building anything, told what a
+				request scope will hold. A dependency nothing provides, a cycle, or a request-scoped
+				service captured by a singleton fails here, at startup, rather than on the first
+				request. Then
 				<code>Run</code> starts the eager services, waits for a signal, and stops everything
 				in reverse order within the timeout.
 			</p>

@@ -5,10 +5,10 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
 	"github.com/floatdrop/di/examples/guide/internal/api"
 	"github.com/floatdrop/di/examples/guide/internal/cache"
 	"github.com/floatdrop/di/examples/guide/internal/config"
@@ -21,8 +21,9 @@ func main() {
 	app.Use(config.Module, storage.Module, cache.Module, mail.Module, api.Module)
 
 	// Nothing has been built yet. The constructors declared their
-	// dependencies, so the graph is checked here, request scopes included.
-	if err := dihttp.Validate(app); err != nil {
+	// dependencies, so the graph is checked here, as a request scope holding
+	// an *http.Request would resolve it.
+	if err := app.Validate(di.Provided[*http.Request]()).Err(); err != nil {
 		log.Fatal(err)
 	}
 

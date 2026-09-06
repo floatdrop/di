@@ -236,3 +236,57 @@ func TestValidateCommitsPendingLikeAResolution(t *testing.T) {
 	s.Validate()
 	t.Fatal("Validate accepted a colliding registration")
 }
+
+// The stubs describe the scope that will resolve a Scoped binding, so the
+// check a request scope would make is made from the application scope: what
+// the stubs cover is satisfied, and what remains unmet is an error rather
+// than owed. Without stubs nothing changes.
+func TestValidateWithStubsIsALeaf(t *testing.T) {
+	app := di.New()
+	appGraph(app)
+	v := app.Validate(di.Provided[*valReq]())
+	if err := v.Err(); err != nil || len(v.Owed) != 0 {
+		t.Fatalf("the stub covers the request, yet err=%v owed=%v", err, v.Owed)
+	}
+
+	app.Wire[*valMailer](func(*valUser, *valCfg) *valMailer { return nil }).Scoped() // *valCfg is registered as a value, but a *valCfg is not
+	v = app.Validate(di.Provided[*valReq]())
+	if !errors.Is(v.Err(), di.ErrNotProvided) || !strings.Contains(v.Err().Error(), "valCfg") || !strings.Contains(v.Err().Error(), "stubs") {
+		t.Fatalf("what neither the scope nor the stubs provide is an error at a leaf, got %v", v.Err())
+	}
+	if len(v.Owed) != 0 {
+		t.Fatalf("a leaf owes nothing, got %v", v.Owed)
+	}
+	if v := app.Validate(); v.Err() != nil || len(v.Owed) != 2 {
+		t.Fatalf("without stubs both are owed and neither is an error: %v / %v", v.Err(), v.Owed)
+	}
+}
+
+// A stub is a key, so an interface a request scope provides is stubbed by
+// its interface type, and a stub satisfies only the Scoped path: a singleton
+// that would build a Scoped service in its own scope still fails there.
+func TestValidateStubsAreKeysAndDoNotReachSingletons(t *testing.T) {
+	type principal interface{ Name() string }
+	s := di.New()
+	s.Wire[*valUser](func(principal) *valUser { return nil }).Scoped()
+	if v := s.Validate(di.Provided[principal]()); v.Err() != nil {
+		t.Fatalf("an interface stub should satisfy the interface key: %v", v.Err())
+	}
+
+	app := di.New()
+	appGraph(app)
+	app.Wire[*valMailer](newValMailer) // a singleton capturing the request-scoped *valUser
+	v := app.Validate(di.Provided[*valReq]())
+	if len(v.Errors) != 1 || !strings.Contains(v.Err().Error(), "valMailer") {
+		t.Fatalf("the capture is a failure in root whatever a request scope holds, got %v", v.Errors)
+	}
+}
+
+func TestValidateWithStubsBuildsNothing(t *testing.T) {
+	built := false
+	app := di.New()
+	app.Wire[*valUser](func(*valReq) *valUser { built = true; return nil }).Scoped()
+	if err := app.Validate(di.Provided[*valReq]()).Err(); err != nil || built {
+		t.Fatalf("err=%v built=%v", err, built)
+	}
+}

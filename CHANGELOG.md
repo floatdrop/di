@@ -7,6 +7,28 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+`Validate` no longer needs an adapter to check request scopes: the caller
+says what such a scope will hold. `go doc -all` against 0.10.0 adds `Stub`
+and `Provided`, gives `Scope.Validate` a variadic parameter, which every
+existing call satisfies, and removes `dihttp.Validate`, the one breaking
+change.
+
+### Added
+
+- `di.Provided[T]()` makes a `Stub`, a key the scope resolving a `Scoped`
+  binding will provide. `s.Validate(stubs...)` then makes the check that scope
+  would make: what the stubs cover is satisfied, and what neither the scope
+  nor the stubs provide is an error rather than `Owed`. Stubs apply to the
+  `Scoped` path only; a singleton that would build a `Scoped` service in its
+  own scope still fails there, whatever a request scope holds.
+
+### Removed
+
+- `dihttp.Validate`, which opened a throwaway request scope to do what
+  `app.Validate(di.Provided[*http.Request]())` now does from the application
+  scope, without an HTTP-shaped helper in the way. Replace the call with that
+  expression and `.Err()`.
+
 ## [0.10.0] - 2026-09-06
 
 A service can be wrapped without being replaced ([#1]), which was the last
