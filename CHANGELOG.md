@@ -7,6 +7,8 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-06
+
 `Validate` no longer needs an adapter to check request scopes: the caller
 says what such a scope will hold. `go doc -all` against 0.10.0 adds `Stub`
 and `Provided`, gives `Scope.Validate` a variadic parameter, which every
@@ -817,7 +819,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/floatdrop/di/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/floatdrop/di/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/floatdrop/di/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/floatdrop/di/compare/v0.8.0...v0.9.0
