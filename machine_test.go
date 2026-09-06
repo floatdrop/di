@@ -22,6 +22,9 @@ package di_test
 //	    scope return the identical value.
 //	I5  Nothing is stopped more often than it was built.
 //	I6  Once the root is stopped, every Worker hook has returned.
+//	I7  Explain and Graph render whatever state the sequence reached,
+//	    panicking only where a resolution from the same scope would, and
+//	    never deadlocking against the phase machine they read.
 //
 // What happens to an instance once it exists is predicted rather than
 // checked against invariants, by the model in lifecyclemodel_test.go. That
@@ -239,7 +242,54 @@ func (m *machine) run() {
 	for i, o := range m.ops {
 		m.step(i, o)
 	}
+	m.render()
 	m.finish()
+}
+
+// render enforces I7 against the state the sequence ended in, which is
+// the richest one it reaches: every scope's graph, and every key explained
+// from every scope. Once per sequence rather than once per operation,
+// because the fuzzer runs this millions of times and the shapes a
+// rendering can meet are decided by the registrations, not by where in the
+// sequence it is asked.
+func (m *machine) render() {
+	for i, s := range m.scopes {
+		g := s.Graph()
+		if !strings.HasPrefix(g, "digraph di {") || !strings.HasSuffix(g, "}\n") {
+			m.fail("Graph(s%d) rendered %q", i, g)
+		}
+		for k := range numKeys {
+			m.explain(s, i, k)
+		}
+	}
+}
+
+// explain renders one key from one scope. A configuration rejection is a
+// legitimate outcome, because Explain looks the key up and a lookup commits
+// the pending batch, exactly as a resolution from this scope would; any
+// other panic is a defect.
+func (m *machine) explain(s *di.Scope, scope, k int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, rejected := r.(string); !rejected {
+				m.fail("Explain(s%d, %s) panicked with %v", scope, keyNames[k], r)
+			}
+		}
+	}()
+	var out string
+	switch k {
+	case 0:
+		out = s.Explain[*mk1]()
+	case 1:
+		out = s.Explain[*mk2]()
+	case 2:
+		out = s.Explain[*mk3]()
+	default:
+		out = s.Explain[mkI]()
+	}
+	if !strings.HasSuffix(out, "\n") {
+		m.fail("Explain(s%d, %s) rendered %q", scope, keyNames[k], out)
+	}
 }
 
 func (m *machine) step(i int, o op) {

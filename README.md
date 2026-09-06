@@ -28,6 +28,9 @@ repo, err := app.Resolve[*Repo]()
   error reported.
 - **Scopes for requests and tests.** Child scopes shadow their parent; the
   last registration of a key wins until that key has served a value.
+- **The graph is inspectable.** Dependencies are recorded as constructors
+  resolve them, so `Explain[T]` prints what a service was built from and what
+  needed it, and `Graph` exports the whole thing as Graphviz DOT.
 
 ## Installation
 
@@ -414,6 +417,99 @@ Observers receive an `Event` for every constructor and every `OnStart`,
 `Shutdown`. Each event names the service, its scope, the registration site,
 the duration and the error, if any.
 
+### Inspecting the graph
+
+Constructors are closures, so the container learns a service's dependencies by
+watching it resolve them. What has been built therefore has a graph, and two
+methods render it.
+
+`Explain[T]` is the dependency tree of one service, with each node's lifetime,
+its scope, how far through its lifecycle it is and where it was registered,
+followed by what needed it:
+
+```
+*main.Server: singleton in root, eager, started (provided at main.go:31)
+├── *main.Repo: singleton in root, started (provided at main.go:29)
+│   └── *main.DB: singleton in root, started (provided at main.go:28)
+│       └── main.Config: value in root, started (provided at main.go:27)
+└── *main.Cache: singleton in root, started (provided at main.go:30)
+    └── *main.DB: see above
+
+*main.DB: singleton in root, started (provided at main.go:28)
+└── main.Config: value in root, started (provided at main.go:27)
+needed by: *main.Repo in root, *main.Cache in root
+```
+
+A dependency reached twice is expanded once, so a diamond is drawn as one.
+Registration sites are absolute paths; they are shortened above.
+
+`Graph` renders everything built in a scope and its descendants as Graphviz
+DOT, one cluster per scope:
+
+```sh
+go run ./examples/explain | dot -Tsvg > graph.svg
+```
+
+Neither builds anything. A service that has not been resolved is reported
+with its registration and left alone, which is the other half of the
+[known limitation](#design-notes) below: the graph is what ran, not what could
+run.
+
+[embedmd]:# (examples/explain/main.go go)
+```go
+// Inspecting the graph: what a service was built from, and what needed it.
+//
+// Dependencies are recorded as constructors resolve them, so Explain and
+// Graph describe what actually happened rather than what was registered.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/floatdrop/di"
+)
+
+type Config struct{ DSN string }
+type DB struct{ dsn string }
+type Repo struct{ db *DB }
+type Cache struct{ db *DB }
+type Server struct {
+	repo  *Repo
+	cache *Cache
+}
+
+func main() {
+	app := di.New()
+
+	app.Value(Config{DSN: "postgres://localhost/app"})
+	app.Provide(func(s *di.Scope) *DB { return &DB{dsn: s.Get[Config]().DSN} })
+	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+	app.Provide(func(s *di.Scope) *Cache { return &Cache{db: s.Get[*DB]()} })
+	app.Provide(func(s *di.Scope) *Server {
+		return &Server{repo: s.Get[*Repo](), cache: s.Get[*Cache]()}
+	}).Eager()
+
+	if err := app.Start(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = app.Stop(context.Background()) }()
+
+	// What the server was built from. *DB is reached through both the repo
+	// and the cache, and is expanded once.
+	fmt.Print(app.Explain[*Server]())
+
+	// And the other direction: what needed the database.
+	fmt.Println()
+	fmt.Print(app.Explain[*DB]())
+
+	// Everything built so far, as Graphviz DOT: dot -Tsvg > graph.svg
+	fmt.Println()
+	fmt.Print(app.Graph())
+}
+```
+
 ### Testing your application
 
 `di.Test` wires the production graph into a fresh scope and stops it when the
@@ -483,8 +579,12 @@ the library itself stays dependency-free. On an Apple M3 Max:
 
 | | Warm resolve | Cold register and build |
 |---|---|---|
-| `di` | 39 ns, 64 B, 2 allocs | 3.6 µs, 4.2 kB, 67 allocs |
-| `do` v2.1 | 129 ns, 192 B, 6 allocs | 6.3 µs, 11.5 kB, 120 allocs |
+| `di` | 39 ns, 64 B, 2 allocs | 3.7 µs, 4.3 kB, 70 allocs |
+| `do` v2.1 | 130 ns, 192 B, 6 allocs | 6.5 µs, 11.5 kB, 120 allocs |
+
+The cold figure counts the registration-site strings, so its byte total moves
+with how deep the source sits on disk; compare allocation counts across
+checkouts, not bytes.
 
 ```sh
 cd benchmarks && go test -bench . -benchmem

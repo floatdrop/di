@@ -32,6 +32,7 @@ jobs:
         run: |
           go run ./examples/quickstart
           go run ./examples/scopes
+          go run ./examples/explain
       - name: test
         run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: what only the hand-written tests reach

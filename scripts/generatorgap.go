@@ -28,6 +28,8 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -163,18 +165,25 @@ func atoi(s string) int {
 	return n
 }
 
-// funcIndex maps a line of di.go to the function containing it, so the gap
-// reads as a list of functions rather than of line numbers.
+// funcIndex maps a line of a source file to the function containing it, so
+// the gap reads as a list of functions rather than of line numbers.
+//
+// Keyed by file, not only by line. The package was one file for a long time
+// and this indexed that one; a second file then had every block attributed to
+// whichever function of the first happened to start above the same line
+// number, which is a plausible-looking answer and a wrong one.
 type funcIndex struct {
-	starts []struct {
-		line int
-		name string
-	}
+	byFile map[string][]funcStart
+}
+
+type funcStart struct {
+	line int
+	name string
 }
 
 func (f funcIndex) at(b block) string {
 	name := "?"
-	for _, s := range f.starts {
+	for _, s := range f.byFile[path.Base(b.file)] {
 		if s.line <= b.start {
 			name = s.name
 		}
@@ -183,27 +192,35 @@ func (f funcIndex) at(b block) string {
 }
 
 func newFuncIndex() funcIndex {
-	var idx funcIndex
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "di.go", nil, 0)
+	idx := funcIndex{byFile: map[string][]funcStart{}}
+	names, err := filepath.Glob("*.go")
 	if err != nil {
 		return idx
 	}
-	for _, d := range file.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok {
+	fset := token.NewFileSet()
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		name := fn.Name.Name
-		if fn.Recv != nil {
-			name = recvName(fn.Recv) + "." + name
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			continue
 		}
-		idx.starts = append(idx.starts, struct {
-			line int
-			name string
-		}{fset.Position(fn.Pos()).Line, name})
+		var starts []funcStart
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			fname := fn.Name.Name
+			if fn.Recv != nil {
+				fname = recvName(fn.Recv) + "." + fname
+			}
+			starts = append(starts, funcStart{fset.Position(fn.Pos()).Line, fname})
+		}
+		sort.Slice(starts, func(i, j int) bool { return starts[i].line < starts[j].line })
+		idx.byFile[filepath.Base(name)] = starts
 	}
-	sort.Slice(idx.starts, func(i, j int) bool { return idx.starts[i].line < idx.starts[j].line })
 	return idx
 }
 
