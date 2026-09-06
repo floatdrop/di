@@ -208,14 +208,23 @@ func newMachine(t *testing.T, ops []op) *machine {
 
 // scopeOf names the scope a constructor is running in, which for every
 // lifetime is the scope that holds the instance and will stop it.
-func (m *machine) scopeOf(sc *di.Scope) int {
-	name := sc.Get[scopeName]().name
+func (m *machine) scopeOf(sc *di.Scope) int { return m.indexOf(sc.Get[scopeName]().name) }
+
+func (m *machine) indexOf(name string) int {
 	for i, n := range m.names {
 		if n == name {
 			return i
 		}
 	}
 	return 0
+}
+
+// reported is the build report of a Wire constructor: it has no scope handle,
+// so the scope's name arrives as a dependency, which for a Scoped binding is
+// the scope that resolved it and will hold the instance.
+func reported[T any](m *machine, o op, sn scopeName, v T) T {
+	m.lc.built(m.indexOf(sn.name), o.reg, any(v))
+	return v
 }
 
 // outcome classifies what an operation did.
@@ -536,7 +545,7 @@ func (m *machine) finish() {
 
 // regShape registers one of ten shapes for T, chosen by op.reg, so a random
 // sequence exercises lifetimes, hooks, groups, failures and dependencies.
-func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T, wire any) {
+func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T, wire, wireScoped any) {
 	var b di.Binding[T]
 	// Every modelled shape reports its own build and its own hooks, so the
 	// model knows which instance is which without having to predict what
@@ -569,8 +578,17 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	case 1:
 		b = s.Value(plain()).OnStop(noop)
 	case 2:
-		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).Scoped().
-			OnStop(hook("OnStop"))
+		if o.wire {
+			// Scoped through Wire, with a dependency on another key: built
+			// through reflect in whichever scope resolves it, and the one
+			// shape whose declared dependency Validate has to leave to a
+			// descendant when the resolving scope is not there yet.
+			b = s.Wire[T](wireScoped).Scoped().
+				OnStop(hook("OnStop"))
+		} else {
+			b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).Scoped().
+				OnStop(hook("OnStop"))
+		}
 	case 3:
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).Group().
 			OnStart(hook("OnStart")).OnStop(hook("OnStop"))
@@ -583,6 +601,22 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 				return nil
 			}).OnStop(hook("OnStop"))
 	case 5:
+		if o.wire {
+			// A constructor of the wrong shape, one per key: Wire rejects it
+			// at registration, with a configuration panic the harness
+			// classifies like any other rejection.
+			switch o.key {
+			case 0:
+				b = s.Wire[T](42)
+			case 1:
+				b = s.Wire[T](func(...int) T { return plain() })
+			case 2:
+				b = s.Wire[T](func() {})
+			default:
+				b = s.Wire[T](func() (T, bool) { return plain(), false })
+			}
+			break
+		}
 		// A constructor that fails. resolve turns this into an error, so it
 		// exercises the failure paths rather than escaping as a panic.
 		b = s.Provide(func(*di.Scope) T { panic("injected constructor failure") })
@@ -639,22 +673,26 @@ func (m *machine) register(s *di.Scope, o op) {
 		regShape(m, s, o,
 			func() *mk1 { return &mk1{} },
 			func(sc *di.Scope) *mk1 { return &mk1{dep: sc.Get[*mk2]()} },
-			func(d *mk2) *mk1 { return &mk1{dep: d} })
+			func(d *mk2) *mk1 { return &mk1{dep: d} },
+			func(sn scopeName, d *mk2) *mk1 { return reported(m, o, sn, &mk1{dep: d}) })
 	case 1:
 		regShape(m, s, o,
 			func() *mk2 { return &mk2{} },
 			func(sc *di.Scope) *mk2 { return &mk2{dep: sc.Get[*mk3]()} },
-			func(d *mk3) *mk2 { return &mk2{dep: d} })
+			func(d *mk3) *mk2 { return &mk2{dep: d} },
+			func(sn scopeName, d *mk3) *mk2 { return reported(m, o, sn, &mk2{dep: d}) })
 	case 2:
 		regShape(m, s, o,
 			func() *mk3 { return &mk3{} },
 			func(sc *di.Scope) *mk3 { return &mk3{dep: sc.Get[*mk1]()} },
-			func(d *mk1) *mk3 { return &mk3{dep: d} })
+			func(d *mk1) *mk3 { return &mk3{dep: d} },
+			func(sn scopeName, d *mk1) *mk3 { return reported(m, o, sn, &mk3{dep: d}) })
 	default:
 		regShape(m, s, o,
 			func() mkI { return &mk1{} },
 			func(sc *di.Scope) mkI { _ = sc.Get[*mk2](); return &mk1{} },
-			func(*mk2) mkI { return &mk1{} })
+			func(*mk2) mkI { return &mk1{} },
+			func(sn scopeName, _ *mk2) mkI { return reported(m, o, sn, mkI(&mk1{})) })
 	}
 }
 
@@ -749,6 +787,17 @@ func FuzzMachine(f *testing.F) {
 	f.Add([]byte{0, 0, 0, 6, 0, 1, 0, 0, 0, 0, 6, 0, 0, 0, 0})                // a dependency on an unprovided key, then stop
 	f.Add([]byte{0, 0, 0, 6, 0, 0, 0, 1, 6, 0, 0, 0, 2, 6, 0, 1, 0, 0, 0, 0}) // a dependency cycle
 	f.Add([]byte{0, 0, 0, 5, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0})                // failing constructor, eager
+	// The wired shapes, which a random sequence rarely combines: a cycle of
+	// three Wire singletons, which Validate reports once; a Scoped Wire
+	// binding whose dependency the root cannot provide, owed from the root
+	// and missing from the child that resolves it; a singleton that would
+	// build such a binding in its own scope, the one capture Validate calls
+	// an error; and the four rejected constructor shapes.
+	f.Add([]byte{0, 0, 0, 6, 4, 0, 0, 1, 6, 4, 0, 0, 2, 6, 4, 2, 1, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 2, 4, 2, 1, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 2, 4, 0, 1, 1, 0, 4, 2, 1, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 6, 4, 0, 0, 1, 2, 4, 1, 0, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 5, 4, 0, 0, 1, 5, 4, 0, 0, 2, 5, 4, 0, 0, 3, 5, 4})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		ops := decode(data)
 		if len(ops) == 0 {
