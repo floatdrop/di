@@ -7,9 +7,17 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-06
+
 Constructors can be handed over as they are written, and the graph they
 declare can be checked before anything is built ([#3]). Nothing existing
 changes shape or behaviour; an upgrade cannot break a caller.
+
+`go doc -all` against 0.8.0 adds `Scope.Wire`, `Scope.Validate`, `Validation`
+with its `Err` method, and `dihttp.Validate`, and changes no signature. The
+README no longer promises no reflection at all: `Wire` reads a constructor's
+signature once at registration and calls it through `reflect.Call`; `Provide`
+is as it was.
 
 ### Added
 
@@ -747,7 +755,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/floatdrop/di/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/floatdrop/di/compare/v0.7.0...v0.8.0
 [#2]: https://github.com/floatdrop/di/issues/2
 [#6]: https://github.com/floatdrop/di/issues/6
