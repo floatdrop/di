@@ -35,8 +35,13 @@ func main() {
 	app.Wire[*User](NewUser).Scoped() // one per request scope, where the *http.Request is
 	app.Wire[*Handler](NewHandler).Scoped()
 
-	// Nothing has been built. From the application scope, *User needs an
-	// *http.Request that only a request scope provides: owed, not wrong.
+	// Nothing has been built, but the constructors declared their edges, so
+	// Explain draws them, dashed, down to what only a request scope provides.
+	fmt.Print(app.Explain[*Handler]())
+	fmt.Println()
+
+	// Validate walks the same edges. From the application scope, *User needs
+	// an *http.Request that only a request scope provides: owed, not wrong.
 	v := app.Validate()
 	fmt.Println("errors:", v.Err())
 	fmt.Println("owed:  ", v.Owed)
