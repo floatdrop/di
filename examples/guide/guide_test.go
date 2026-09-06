@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 	"github.com/floatdrop/di/examples/guide/internal/api"
 	"github.com/floatdrop/di/examples/guide/internal/cache"
 	"github.com/floatdrop/di/examples/guide/internal/config"
@@ -25,7 +26,7 @@ import (
 var update = flag.Bool("update", false, "rewrite testdata/explain.txt from the current wiring")
 
 func wire(app *di.Scope) {
-	app.Use(config.Module, storage.Module, cache.Module, mail.Module, api.Module)
+	app.Use(config.Module, storage.Module, cache.Module, mail.Module, dihttp.Module, api.Module)
 }
 
 func TestWiringValidates(t *testing.T) {

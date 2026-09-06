@@ -352,7 +352,7 @@ func TestReviewMiddlewareInjectedRequestRouting(t *testing.T) {
 		sc, _ := di.FromContext(r.Context())
 		sc.Get[*Handler]()
 	})
-	srv := httptest.NewServer(dihttp.Middleware(app)(mux))
+	srv := httptest.NewServer(dihttp.NewMiddleware(app)(mux))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/users/42")

@@ -54,7 +54,7 @@ func TestObserveOnRootSeesChildAndMiddlewareStopErrors(t *testing.T) {
 	app.Provide(func(s *di.Scope) *User { return &User{} }).Scoped().
 		OnStop(func(context.Context, *User) error { return closeFailed })
 
-	h := dihttp.Middleware(app)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := dihttp.NewMiddleware(app)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req, _ := di.FromContext(r.Context())
 		req.Get[*User]()
 	}))

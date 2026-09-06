@@ -52,7 +52,7 @@ func TestReviewRequestSurvivesDrain(t *testing.T) {
 		resolved <- err
 	})
 
-	srv := httptest.NewUnstartedServer(dihttp.Middleware(app)(mux))
+	srv := httptest.NewUnstartedServer(dihttp.NewMiddleware(app)(mux))
 	srv.Start()
 	defer srv.Close()
 	app.Value(srv.Config).

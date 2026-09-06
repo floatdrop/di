@@ -81,6 +81,8 @@ internal/api/         <span class="c">the HTTP server and its per-request handle
 			<p>
 				<code>NewDB</code> and <code>NewPGStore</code> take what they need as parameters and
 				return what they make; <code>NewDB</code> can fail. Neither imports the container.
+				Nothing in this application needs the general form, <code>Provide</code>, which takes
+				a closure over the scope; the two mix freely when something does.
 			</p>
 			<p>
 				<code>Module</code> hands them over with <code>Wire</code>. The type argument is the
@@ -149,17 +151,18 @@ internal/api/         <span class="c">the HTTP server and its per-request handle
 		<section id="http">
 			<h2><span class="n">6</span>HTTP and request scopes</h2>
 			<p>
-				<code>dihttp.Middleware</code> opens a child scope for each request, holding the
+				A <code>dihttp.Middleware</code> opens a child scope for each request, holding the
 				<code>*http.Request</code>. Services declared <code>Scoped</code> in the application
 				scope are built once per request scope, from singletons and request-scoped values
 				alike, and stopped with it. A handler reaches its scope through
 				<code>di.FromContext</code>.
 			</p>
 			<p>
-				The server's constructor needs the scope itself, to make that middleware, so it is a
-				closure: <code>Provide</code> is the general form, <code>Wire</code> the declared one,
-				and they mix freely. <code>OnDrain</code> runs before anything is stopped, so requests
-				in flight keep their scopes while <code>http.Server.Shutdown</code> waits for them.
+				The middleware needs the scope itself, to open a child per request, so
+				<code>dihttp.Module</code> registers it as a service and the server takes it as a
+				parameter like anything else. <code>OnDrain</code> runs before anything is stopped, so
+				requests in flight keep their scopes while <code>http.Server.Shutdown</code> waits for
+				them.
 			</p>
 			<figure>
 				<figcaption>internal/api/api.go</figcaption>

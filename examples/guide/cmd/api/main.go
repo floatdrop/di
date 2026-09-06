@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 	"github.com/floatdrop/di/examples/guide/internal/api"
 	"github.com/floatdrop/di/examples/guide/internal/cache"
 	"github.com/floatdrop/di/examples/guide/internal/config"
@@ -18,7 +19,7 @@ import (
 
 func main() {
 	app := di.New()
-	app.Use(config.Module, storage.Module, cache.Module, mail.Module, api.Module)
+	app.Use(config.Module, storage.Module, cache.Module, mail.Module, dihttp.Module, api.Module)
 
 	// Nothing has been built yet. The constructors declared their
 	// dependencies, so the graph is checked here, as a request scope holding

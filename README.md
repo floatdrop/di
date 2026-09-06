@@ -678,21 +678,28 @@ the worker stopped.
 
 ### Request scopes
 
-`dihttp.Middleware` gives each request a child scope holding the
+A `dihttp.Middleware` gives each request a child scope holding the
 `*http.Request`, attaches it to the request context, and stops it when the
 handler returns. It has the usual `func(http.Handler) http.Handler` shape,
-so a router's `Use` accepts it too.
+so a router's `Use` accepts it too. `dihttp.Module` registers one, so a
+server's constructor takes it as a dependency like any other:
 
 ```go
 import "github.com/floatdrop/di/dihttp"
 
-srv := &http.Server{Handler: dihttp.Middleware(app)(mux)}
+app.Use(dihttp.Module, api.Module)
 
-mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
-    req, _ := di.FromContext(r.Context())
-    user := req.Get[*User]()
-})
+func NewServer(cfg Config, mw dihttp.Middleware) *http.Server {
+    mux := http.NewServeMux()
+    mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
+        req, _ := di.FromContext(r.Context())
+        user := req.Get[*User]()
+    })
+    return &http.Server{Addr: cfg.Addr, Handler: mw(mux)}
+}
 ```
+
+Outside the container, `dihttp.NewMiddleware(app)` makes one directly.
 
 Services that depend on the request are declared once, in the root, as
 `Scoped()`; they are built per request, cached for its duration, and stopped
