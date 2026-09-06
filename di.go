@@ -1293,7 +1293,7 @@ func (b Binding[T]) Group() Binding[T] {
 // noticing. With it the later registration serves the key, and inherits its
 // eagerness, which is the test seam:
 //
-//	s := di.Test(t, app.Wire)
+//	s := di.Test(t, app.Production)
 //	s.Value(&DB{DSN: "sqlite://memory"}).Override()
 //
 // There must be something to override in this scope, or that is rejected too:
@@ -2118,7 +2118,7 @@ type TB interface {
 // errors. Override what you need faked after wiring and before resolving,
 // saying so:
 //
-//	s := di.Test(t, app.Wire)
+//	s := di.Test(t, app.Production)
 //	s.Value(&DB{DSN: "sqlite://memory"}).Override()
 //	repo := s.Get[*Repo]()
 func Test(tb TB, wire ...Module) *Scope {

@@ -34,6 +34,8 @@ type Mailer struct{ queue chan string }
 func main() {
 	app := di.New()
 
+	// A closure, because this constructor needs the scope: the start
+	// deadline from s.Context, and s.Must for the error.
 	app.Provide(func(s *di.Scope) *DB {
 		ctx, cancel := context.WithTimeout(s.Context(), 5*time.Second) // dial with the start deadline
 		defer cancel()
@@ -41,11 +43,11 @@ func main() {
 		return s.Must(db, db.Ping(ctx))
 	}).
 		OnStop(func(ctx context.Context, db *DB) error { log.Println("db closed"); return nil })
-	app.Provide(func(s *di.Scope) Checker { return s.Get[*DB]() }).Group()
+	app.Wire[Checker](func(db *DB) Checker { return db }).Group()
 
 	// A worker: started with the app, cancelled by Stop, awaited before the
 	// DB it depends on is closed. Returning an error stops the application.
-	app.Provide(func(s *di.Scope) *Mailer { _ = s.Get[*DB](); return &Mailer{queue: make(chan string, 16)} }).
+	app.Wire[*Mailer](func(*DB) *Mailer { return &Mailer{queue: make(chan string, 16)} }).
 		Eager().
 		Worker(func(ctx context.Context, m *Mailer) error {
 			for {
@@ -61,9 +63,7 @@ func main() {
 
 	// Request-scoped: declared once here, built once per request scope
 	// created by Middleware, where the *http.Request exists.
-	app.Provide(func(s *di.Scope) *User {
-		return &User{Name: s.Get[*http.Request]().Header.Get("X-User")}
-	}).Scoped()
+	app.Wire[*User](func(r *http.Request) *User { return &User{Name: r.Header.Get("X-User")} }).Scoped()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {

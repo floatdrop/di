@@ -24,20 +24,17 @@ type DB struct{ dsn string }
 func main() {
 	app := di.New()
 
-	app.Provide(func(*di.Scope) *DB { return &DB{dsn: "postgres://localhost/app"} }).
+	app.Wire[*DB](func() *DB { return &DB{dsn: "postgres://localhost/app"} }).
 		OnStop(func(ctx context.Context, db *DB) error { log.Println("db closed"); return nil })
 
-	app.Provide(func(s *di.Scope) http.Handler {
-		db := s.Get[*DB]()
+	app.Wire[http.Handler](func(db *DB) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(2 * time.Second) // simulate slow work that must not be cut short
 			fmt.Fprintln(w, "served by", db.dsn)
 		})
 	})
 
-	app.Provide(func(s *di.Scope) *http.Server {
-		return &http.Server{Addr: ":8080", Handler: s.Get[http.Handler]()}
-	}).
+	app.Wire[*http.Server](func(h http.Handler) *http.Server { return &http.Server{Addr: ":8080", Handler: h} }).
 		Eager().
 		OnStart(func(ctx context.Context, srv *http.Server) error {
 			// Bind synchronously so a busy port fails Start; serve in the background.

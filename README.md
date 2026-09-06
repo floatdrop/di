@@ -15,7 +15,7 @@ so that `Validate` can check the graph before anything is built.
 app := di.New()
 app.Provide(func(s *di.Scope) *DB { return s.Must(sql.Open("postgres", dsn)) }).
     OnStop(func(ctx context.Context, db *DB) error { return db.Close() })
-app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+app.Wire[*Repo](NewRepo) // func NewRepo(db *DB) *Repo
 
 repo, err := app.Resolve[*Repo]()
 ```
@@ -75,17 +75,22 @@ type DB struct{ dsn string }
 type Repo struct{ db *DB }
 type Server struct{ repo *Repo }
 
+// Plain constructors: their parameters are their dependencies.
+func NewDB(cfg Config) *DB         { return &DB{dsn: cfg.DSN} }
+func NewRepo(db *DB) *Repo         { return &Repo{db: db} }
+func NewServer(repo *Repo) *Server { return &Server{repo: repo} }
+
 func main() {
 	app := di.New()
 
 	app.Value(Config{DSN: "postgres://localhost/app"})
 
-	app.Provide(func(s *di.Scope) *DB { return &DB{dsn: s.Get[Config]().DSN} }).
+	app.Wire[*DB](NewDB).
 		OnStop(func(ctx context.Context, db *DB) error { fmt.Println("db closed"); return nil })
 
-	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+	app.Wire[*Repo](NewRepo)
 
-	app.Provide(func(s *di.Scope) *Server { return &Server{repo: s.Get[*Repo]()} }).
+	app.Wire[*Server](NewServer).
 		Eager().
 		OnStart(func(ctx context.Context, srv *Server) error { fmt.Println("listening"); return nil }).
 		OnStop(func(ctx context.Context, srv *Server) error { fmt.Println("server stopped"); return nil })
@@ -132,6 +137,7 @@ An interface is served by a constructor that returns the implementation:
 
 ```go
 app.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })
+app.Wire[Reader](NewRepo) // the same, when NewRepo returns *Repo
 ```
 
 The compiler checks that `*Repo` satisfies `Reader`, and the two keys share
@@ -290,17 +296,17 @@ type Handler struct {
 	user *User
 }
 
+func NewHandler(db *DB, user *User) *Handler { return &Handler{db: db, user: user} }
+
 func main() {
 	app := di.New()
-	app.Provide(func(*di.Scope) *DB { return &DB{dsn: "postgres://localhost/app"} })
+	app.Wire[*DB](func() *DB { return &DB{dsn: "postgres://localhost/app"} })
 
 	// One child per request: request-scoped values live here, shared
 	// singletons such as *DB are reused from app.
 	req := app.Child("request")
 	req.Value(&User{Name: "ada"})
-	req.Provide(func(s *di.Scope) *Handler {
-		return &Handler{db: s.Get[*DB](), user: s.Get[*User]()}
-	})
+	req.Wire[*Handler](NewHandler)
 
 	h := req.Get[*Handler]()
 	fmt.Println(h.user.Name, "->", h.db.dsn)
@@ -322,7 +328,7 @@ decides what healthy means.
 ```go
 type Checker interface{ Check(ctx context.Context) error }
 
-app.Provide(func(s *di.Scope) Checker { return s.Get[*DB]() }).Group()
+app.Wire[Checker](func(db *DB) Checker { return db }).Group()
 
 mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
     for _, c := range app.All[Checker]() {
@@ -348,12 +354,12 @@ order and attributes each registration to the module that made it:
 ```go
 func Storage(s *di.Scope) {
     s.Provide(func(*di.Scope) *DB { return open(storageDSN) })
-    s.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+    s.Wire[*Repo](NewRepo)
 }
 
 func Caching(s *di.Scope) {
     s.Provide(func(*di.Scope) *DB { return open(cacheDSN) }) // also a *DB
-    s.Provide(func(s *di.Scope) *Cache { return &Cache{db: s.Get[*DB]()} })
+    s.Wire[*Cache](NewCache)
 }
 
 app := di.New()
@@ -400,7 +406,7 @@ and in reverse build order, while every scope still resolves normally. It is
 where a service stops taking new work and waits for the work it already has.
 
 ```go
-app.Provide(newServer).Eager().
+app.Wire[*http.Server](newServer).Eager().
     OnDrain(func(ctx context.Context, srv *http.Server) error { return srv.Shutdown(ctx) }).
     OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Close() })
 ```
@@ -418,7 +424,7 @@ return.
 schedulers.
 
 ```go
-app.Provide(newMailer).Eager().Worker(func(ctx context.Context, m *Mailer) error {
+app.Wire[*Mailer](newMailer).Eager().Worker(func(ctx context.Context, m *Mailer) error {
     return m.Loop(ctx) // returns when ctx is cancelled
 })
 ```
@@ -454,9 +460,7 @@ Services that depend on the request are declared once, in the root, as
 with it:
 
 ```go
-app.Provide(func(s *di.Scope) *User {
-    return &User{Name: s.Get[*http.Request]().Header.Get("X-User")}
-}).Scoped()
+app.Wire[*User](func(r *http.Request) *User { return &User{Name: r.Header.Get("X-User")} }).Scoped()
 ```
 
 `di.WithScope` and `di.FromContext` are the primitives if you are not using
@@ -498,20 +502,17 @@ type DB struct{ dsn string }
 func main() {
 	app := di.New()
 
-	app.Provide(func(*di.Scope) *DB { return &DB{dsn: "postgres://localhost/app"} }).
+	app.Wire[*DB](func() *DB { return &DB{dsn: "postgres://localhost/app"} }).
 		OnStop(func(ctx context.Context, db *DB) error { log.Println("db closed"); return nil })
 
-	app.Provide(func(s *di.Scope) http.Handler {
-		db := s.Get[*DB]()
+	app.Wire[http.Handler](func(db *DB) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(2 * time.Second) // simulate slow work that must not be cut short
 			fmt.Fprintln(w, "served by", db.dsn)
 		})
 	})
 
-	app.Provide(func(s *di.Scope) *http.Server {
-		return &http.Server{Addr: ":8080", Handler: s.Get[http.Handler]()}
-	}).
+	app.Wire[*http.Server](func(h http.Handler) *http.Server { return &http.Server{Addr: ":8080", Handler: h} }).
 		Eager().
 		OnStart(func(ctx context.Context, srv *http.Server) error {
 			// Bind synchronously so a busy port fails Start; serve in the background.
@@ -569,15 +570,15 @@ its scope, how far through its lifecycle it is and where it was registered,
 followed by what needed it:
 
 ```
-*main.Server: singleton in root, eager, started (provided at main.go:31)
-├── *main.Repo: singleton in root, started (provided at main.go:29)
-│   └── *main.DB: singleton in root, started (provided at main.go:28)
-│       └── main.Config: value in root, started (provided at main.go:27)
-└── *main.Cache: singleton in root, started (provided at main.go:30)
+*main.Server: singleton in root, eager, started (provided at main.go:36)
+├── *main.Repo: singleton in root, started (provided at main.go:34)
+│   └── *main.DB: singleton in root, started (provided at main.go:33)
+│       └── main.Config: value in root, started (provided at main.go:32)
+└── *main.Cache: singleton in root, started (provided at main.go:35)
     └── *main.DB: see above
 
-*main.DB: singleton in root, started (provided at main.go:28)
-└── main.Config: value in root, started (provided at main.go:27)
+*main.DB: singleton in root, started (provided at main.go:33)
+└── main.Config: value in root, started (provided at main.go:32)
 needed by: *main.Repo in root, *main.Cache in root
 ```
 
@@ -621,16 +622,19 @@ type Server struct {
 	cache *Cache
 }
 
+func NewDB(cfg Config) *DB                       { return &DB{dsn: cfg.DSN} }
+func NewRepo(db *DB) *Repo                       { return &Repo{db: db} }
+func NewCache(db *DB) *Cache                     { return &Cache{db: db} }
+func NewServer(repo *Repo, cache *Cache) *Server { return &Server{repo: repo, cache: cache} }
+
 func main() {
 	app := di.New()
 
 	app.Value(Config{DSN: "postgres://localhost/app"})
-	app.Provide(func(s *di.Scope) *DB { return &DB{dsn: s.Get[Config]().DSN} })
-	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
-	app.Provide(func(s *di.Scope) *Cache { return &Cache{db: s.Get[*DB]()} })
-	app.Provide(func(s *di.Scope) *Server {
-		return &Server{repo: s.Get[*Repo](), cache: s.Get[*Cache]()}
-	}).Eager()
+	app.Wire[*DB](NewDB)
+	app.Wire[*Repo](NewRepo)
+	app.Wire[*Cache](NewCache)
+	app.Wire[*Server](NewServer).Eager()
 
 	if err := app.Start(context.Background()); err != nil {
 		log.Fatal(err)
@@ -668,7 +672,7 @@ import (
 )
 
 func TestRepo(t *testing.T) {
-	s := di.Test(t, Wire)                           // production graph, stopped when the test ends
+	s := di.Test(t, Production)                     // production graph, stopped when the test ends
 	s.Value(&DB{DSN: "sqlite://memory"}).Override() // replaces the production *DB, and says so
 
 	repo := s.Get[*Repo]() // built against the fake DB
