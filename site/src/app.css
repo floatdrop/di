@@ -1,0 +1,206 @@
+/* One page, prerendered. Light and dark follow the system; nothing here
+   needs JavaScript. */
+
+:root {
+	--bg: #fbfbfa;
+	--fg: #1c1c1a;
+	--muted: #6b6b66;
+	--line: #e4e4df;
+	--accent: #1d4ed8;
+	--code-bg: #f3f3ef;
+	--figure-bg: #fff;
+	--measure: 66ch;
+	--sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+	color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #131312;
+		--fg: #e8e8e3;
+		--muted: #9a9a93;
+		--line: #2a2a27;
+		--accent: #93b4ff;
+		--code-bg: #1c1c1a;
+		--figure-bg: #171716;
+	}
+}
+
+* { box-sizing: border-box; }
+
+html { background: var(--bg); color: var(--fg); }
+
+body {
+	margin: 0;
+	font: 17px/1.6 var(--sans);
+	-webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code { font-family: var(--mono); font-size: 0.92em; }
+p code, li code, h2 code, figcaption code {
+	background: var(--code-bg);
+	padding: 0.05em 0.35em;
+	border-radius: 4px;
+}
+
+/* ---- hero ---------------------------------------------------------------- */
+
+.hero {
+	max-width: 60rem;
+	margin: 0 auto;
+	padding: 5rem 1.5rem 3rem;
+}
+
+.kicker {
+	margin: 0 0 1rem;
+	font-family: var(--mono);
+	font-size: 0.85rem;
+	color: var(--muted);
+}
+
+.hero h1 {
+	margin: 0 0 1rem;
+	font-size: clamp(2rem, 5vw, 3.4rem);
+	line-height: 1.1;
+	letter-spacing: -0.02em;
+	font-weight: 700;
+	max-width: 22ch;
+}
+
+.hero .lead {
+	margin: 0 0 1.5rem;
+	font-size: 1.15rem;
+	max-width: var(--measure);
+	color: var(--muted);
+}
+
+.hero .install {
+	display: inline-block;
+	margin: 0 0 1rem;
+	padding: 0.6rem 0.9rem;
+	background: var(--code-bg);
+	border: 1px solid var(--line);
+	border-radius: 6px;
+	font-family: var(--mono);
+	font-size: 0.95rem;
+}
+
+.hero .links { margin: 0; font-size: 0.95rem; color: var(--muted); }
+.hero .links a { margin-right: 1rem; }
+
+/* ---- layout -------------------------------------------------------------- */
+
+.layout {
+	max-width: 60rem;
+	margin: 0 auto;
+	padding: 0 1.5rem 4rem;
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 2rem;
+}
+
+@media (min-width: 64rem) {
+	.layout {
+		grid-template-columns: 14rem minmax(0, 1fr);
+		gap: 3rem;
+	}
+	.toc {
+		position: sticky;
+		top: 2rem;
+		align-self: start;
+	}
+}
+
+.toc { font-size: 0.9rem; }
+.toc ol { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.toc li { margin: 0; }
+.toc a {
+	display: block;
+	padding: 0.25rem 0.9rem;
+	color: var(--muted);
+	border-left: 2px solid transparent;
+	margin-left: -1px;
+}
+.toc a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg); }
+
+main { min-width: 0; }
+
+.intro { margin: 0 0 3rem; max-width: var(--measure); }
+
+section { margin: 0 0 3.5rem; }
+section:target { scroll-margin-top: 2rem; }
+
+h2 {
+	margin: 0 0 0.75rem;
+	font-size: 1.5rem;
+	line-height: 1.25;
+	letter-spacing: -0.01em;
+}
+h2 .n {
+	display: inline-block;
+	min-width: 1.6em;
+	margin-right: 0.35rem;
+	font-family: var(--mono);
+	font-size: 0.8em;
+	font-weight: 500;
+	color: var(--muted);
+}
+
+section p, section ul { max-width: var(--measure); }
+section ul { padding-left: 1.2rem; }
+
+/* ---- code ---------------------------------------------------------------- */
+
+figure {
+	margin: 1.25rem 0 1.5rem;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--figure-bg);
+	overflow: hidden;
+}
+
+figcaption {
+	padding: 0.45rem 0.9rem;
+	font-family: var(--mono);
+	font-size: 0.8rem;
+	color: var(--muted);
+	border-bottom: 1px solid var(--line);
+}
+
+figure pre {
+	margin: 0;
+	padding: 0.9rem 1rem;
+	overflow-x: auto;
+	font-family: var(--mono);
+	font-size: 0.86rem;
+	line-height: 1.55;
+	tab-size: 4;
+}
+
+figure pre.plain, pre.tree { background: transparent; }
+pre.tree { font-family: var(--mono); font-size: 0.86rem; line-height: 1.55; }
+pre.tree .c { color: var(--muted); }
+
+/* Shiki emits both themes as CSS variables; pick one per scheme. */
+.shiki { background-color: var(--shiki-light-bg) !important; }
+.shiki span { color: var(--shiki-light); }
+@media (prefers-color-scheme: dark) {
+	.shiki { background-color: var(--shiki-dark-bg) !important; }
+	.shiki span { color: var(--shiki-dark); }
+}
+
+/* ---- footer -------------------------------------------------------------- */
+
+footer {
+	max-width: 60rem;
+	margin: 0 auto;
+	padding: 2rem 1.5rem 4rem;
+	border-top: 1px solid var(--line);
+	font-size: 0.9rem;
+	color: var(--muted);
+}
+footer p { max-width: var(--measure); }
