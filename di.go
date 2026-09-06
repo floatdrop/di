@@ -30,12 +30,21 @@
 // # Scopes
 //
 // [Scope.Child] creates a scope that resolves through its parent, reuses
-// the parent's singletons and owns the lifecycle of what it builds. The
-// last registration of a key wins, which is the test seam: wire the
-// production graph into a fresh scope, then re-register what you want faked
+// the parent's singletons and owns the lifecycle of what it builds. A child
+// may shadow a key its parent provides; within one scope, a second
+// registration of a key must be marked [Binding.Override], or the next
+// resolution rejects it naming both sites. That marker is the test seam: wire
+// the production graph into a fresh scope, then override what you want faked
 // before anything is resolved ([Test] does the bookkeeping). For HTTP,
 // [github.com/floatdrop/di/dihttp.Middleware] gives each request a child
 // scope holding the *http.Request, reachable through [FromContext].
+//
+// # Modules
+//
+// A [Module] is a function that registers into a scope, and [Scope.Use]
+// applies modules in order. Registrations are attributed to the module that
+// made them, so a collision between two modules is reported as one: "*app.DB
+// is provided at storage (wire.go:12) and again at caching (cache.go:8)".
 //
 // # Lifecycle
 //
@@ -91,6 +100,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -146,6 +156,7 @@ type Event struct {
 	Service  string // the service, e.g. "*github.com/acme/app.DB"; empty for shutdown
 	Scope    string // name of the scope that owns the instance
 	Site     string // file:line of the registration; empty for shutdown
+	Module   string // the Module the service was registered from; empty when none
 	Duration time.Duration
 	Err      error
 }
@@ -155,17 +166,19 @@ type abort struct{ err error }
 // ---- state -----------------------------------------------------------------
 
 type binding struct {
-	key     key
-	site    string
-	group   bool
-	scoped  bool
-	eager   bool
-	isValue bool // registered with Value: lifetimes do not apply
-	build   func(*Scope) any
-	onStart func(context.Context, any) error
-	onDrain func(context.Context, any) error
-	onStop  func(context.Context, any) error
-	worker  func(context.Context, any) error
+	key      key
+	site     string
+	module   string // the Module this was registered from, or ""
+	group    bool
+	scoped   bool
+	eager    bool
+	override bool // declared to replace an earlier registration of the key
+	isValue  bool // registered with Value: lifetimes do not apply
+	build    func(*Scope) any
+	onStart  func(context.Context, any) error
+	onDrain  func(context.Context, any) error
+	onStop   func(context.Context, any) error
+	worker   func(context.Context, any) error
 
 	// used is set once this binding has served a value. From then on the
 	// registration cannot be overridden, since that would leave two live
@@ -186,12 +199,23 @@ type binding struct {
 	single *instance // the singleton; scoped bindings keep one instance per state
 }
 
+// where names the registration for a message: its site, and the module it was
+// registered from when there is one. With modules in play, "provided at
+// storage (wire.go:12) and again at caching (cache.go:8)" is the line that
+// says what happened; two file positions alone do not.
+func (b *binding) where() string {
+	if b.module == "" {
+		return b.site
+	}
+	return b.module + " (" + b.site + ")"
+}
+
 // validate rejects lifetime and hook combinations that cannot be honoured.
 // It runs at freeze, so the order the builder methods were called in does
 // not matter.
 func (b *binding) validate() {
 	bad := func(what, why string) {
-		panic(fmt.Sprintf("di: %s (provided at %s): %s %s", b.key, b.site, what, why))
+		panic(fmt.Sprintf("di: %s (provided at %s): %s %s", b.key, b.where(), what, why))
 	}
 	switch {
 	case b.eager && b.scoped:
@@ -200,6 +224,8 @@ func (b *binding) validate() {
 		bad("Eager", "does not apply to a Scoped binding: it is not built once")
 	case b.isValue && b.scoped:
 		bad("Scoped", "is meaningless for a Value binding: the instance already exists")
+	case b.group && b.override:
+		bad("Override", "does not apply to a group member: members accumulate rather than replace one another")
 	}
 }
 
@@ -450,7 +476,7 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 	if b.onStart != nil {
 		t0 := time.Now()
 		err := b.onStart(inHook(ctx, owner), in.value)
-		owner.emit(Event{Kind: EventStart, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
+		owner.emit(Event{Kind: EventStart, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 		if err != nil {
 			return err
 		}
@@ -499,6 +525,27 @@ func (in *instance) claim(owner *state) bool {
 	return true
 }
 
+// callHook runs a lifecycle hook and reports what it did as an error, a panic
+// included. A hook that panics -- or resolves something whose registration is
+// rejected, which reaches it as a panic -- must not take the teardown down
+// with it: the drain sweep would stop halfway, stopOnce would be claimed and
+// never settled, every later Stop would wait for it until its context ran
+// out, and every instance behind it would never be released. The start step
+// has always been recovered this way; the drain and stop steps were not, and a
+// config rejection raised inside a drain hook was how that showed.
+func callHook(hook func(context.Context, any) error, ctx context.Context, v any) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if a, ok := rec.(abort); ok {
+				err = a.err // a nested resolution failed; report that cause
+			} else {
+				err = fmt.Errorf("panic: %v", rec)
+			}
+		}
+	}()
+	return hook(ctx, v)
+}
+
 // startClaimed runs the start step of an instance already in phaseStarting.
 // The phase is settled even if the hook panics, which is what releases a Stop
 // or a resolution waiting for the step. The failure is recorded on the
@@ -524,7 +571,7 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) (err error) 
 		} else {
 			in.ph = phaseFailed
 			if in.err == nil {
-				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", in.b.key, in.b.site, err)
+				in.err = fmt.Errorf("di: starting %s (provided at %s): %w", in.b.key, in.b.where(), err)
 			}
 		}
 		wake(in.startingCh) // the start step is no longer in flight
@@ -683,8 +730,8 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 	}
 
 	t0 := time.Now()
-	err := b.onDrain(inHook(ctx, owner), in.value)
-	owner.emit(Event{Kind: EventDrain, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
+	err := callHook(b.onDrain, inHook(ctx, owner), in.value)
+	owner.emit(Event{Kind: EventDrain, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 
 	owner.mu.Lock()
 	in.dr = drained
@@ -720,7 +767,7 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 		case <-ctx.Done():
 			err := fmt.Errorf("di: stopping %s: Worker hook did not return: %w", b.key, ctx.Err())
 			if b.onStop == nil {
-				owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
+				owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 				return err
 			}
 			// WithoutCancel keeps the values and drops the spent deadline; the
@@ -730,12 +777,12 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 		}
 	}
 	if b.onStop != nil {
-		if err := b.onStop(inHook(ctx, owner), in.value); err != nil {
+		if err := callHook(b.onStop, inHook(ctx, owner), in.value); err != nil {
 			errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
 		}
 	}
 	err := errors.Join(errs...)
-	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: err})
+	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 	return err
 }
 
@@ -751,10 +798,10 @@ func (in *instance) releaseAfterWorker(ctx context.Context, owner *state, missed
 	if in.runErr != nil {
 		errs = append(errs, in.runErr)
 	}
-	if err := b.onStop(inHook(ctx, owner), in.value); err != nil {
+	if err := callHook(b.onStop, inHook(ctx, owner), in.value); err != nil {
 		errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
 	}
-	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Duration: time.Since(t0), Err: errors.Join(errs...)})
+	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: errors.Join(errs...)})
 }
 
 // once is a teardown phase that runs at most once per scope: the first caller
@@ -865,25 +912,42 @@ func (st *state) freeze() {
 		if b.group {
 			groups[b.key] = append(slices.Clone(groups[b.key]), b)
 		} else {
-			// The later registration wins (that is how overrides work), but
-			// only until the key has been resolved; replacing it afterwards
-			// would leave two live instances.
-			if prev, ok := index[b.key]; ok && prev.used.Load() {
+			prev, ok := index[b.key]
+			switch {
+			case ok && !b.override:
+				// Two registrations of one key in one scope, and the second
+				// did not say it meant to replace the first. Silently
+				// letting the later one win was how an unrelated module
+				// could reroute another module's wiring without a word said;
+				// a replacement is a thing a caller declares.
+				panic(fmt.Sprintf("di: %s is provided at %s and again at %s: a second registration of a key must be marked Override() to replace the first",
+					b.key, prev.where(), b.where()))
+			case !ok && b.override:
+				// An Override with nothing to override is nearly always a
+				// fake for a service that was renamed or removed, and the
+				// test it lives in would otherwise pass against production
+				// wiring. A child shadows its parent without Override: that
+				// is a different registry, not a replacement.
+				panic(fmt.Sprintf("di: %s (provided at %s) is marked Override() but nothing in scope %s provides it; a child scope shadows its parent without Override",
+					b.key, b.where(), st.name))
+			case ok && prev.used.Load():
+				// Replacing a key that has served a value would leave two
+				// live instances of one service.
 				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it has already been resolved",
-					b.key, prev.site, b.site))
-			} else if ok && prev.resolving.Load() > 0 {
+					b.key, prev.where(), b.where()))
+			case ok && prev.resolving.Load() > 0:
 				// A resolution of this key is in flight. Serving the
 				// replacement to anything it goes on to build, while the
 				// resolution that is running returns the old value, is the
 				// same two-live-values defect the check above prevents.
 				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it is being resolved",
-					b.key, prev.site, b.site))
+					b.key, prev.where(), b.where()))
 			}
 			if st.served[b.key] {
 				// This scope already served the key from an outer scope;
 				// shadowing it now would give one key two live values here.
 				panic(fmt.Sprintf("di: %s cannot be registered at %s: this scope has already resolved it from an outer scope",
-					b.key, b.site))
+					b.key, b.where()))
 			}
 			index[b.key] = b
 		}
@@ -920,7 +984,7 @@ func deriveEager(all []*binding, index map[key]*binding) []*binding {
 		if w.scoped {
 			// b itself is caught by validate, so w is an override here.
 			panic(fmt.Sprintf("di: %s is Eager (provided at %s), but the Scoped registration at %s owns the key: eagerness cannot transfer to a per-scope lifetime",
-				b.key, b.site, w.site))
+				b.key, b.where(), w.where()))
 		}
 		seen[w] = true
 		eager = append(eager, w)
@@ -1008,7 +1072,8 @@ func (r *resolver) pathStr() string {
 // the same state that carries the current resolution path.
 type Scope struct {
 	*state
-	r *resolver
+	r      *resolver
+	module string // the Module registering through this handle, or ""
 }
 
 func New() *Scope { return &Scope{state: newState("root", nil)} }
@@ -1043,10 +1108,44 @@ func (s *Scope) Child(name string) *Scope {
 	s.mu.Lock()
 	s.children = append(s.children, st)
 	s.mu.Unlock()
-	return &Scope{state: st, r: s.r}
+	return &Scope{state: st, r: s.r, module: s.module}
 }
 
-func (s *Scope) view(r *resolver) *Scope { return &Scope{state: s.state, r: r} }
+func (s *Scope) view(r *resolver) *Scope { return &Scope{state: s.state, r: r, module: s.module} }
+
+// A Module is a unit of wiring: a function that registers into a scope.
+// Modules compose by ordinary function composition, and [Scope.Use] applies
+// them in order. Every registration a module makes is attributed to it, so a
+// collision between two modules is reported as one.
+type Module func(*Scope)
+
+// Use applies each module to this scope. A registration made while a module
+// runs -- directly, or from a child the module opens, or later from a
+// constructor the module registered -- carries that module's name, which is
+// the name of the function: register modules as named functions rather than
+// closures, or the name is the enclosing function's.
+func (s *Scope) Use(mods ...Module) {
+	for _, m := range mods {
+		m(&Scope{state: s.state, r: s.r, module: moduleName(m)})
+	}
+}
+
+// moduleName is the function's name, package-qualified and without the import
+// path: "app.Storage" for a function Storage in package app.
+func moduleName(m Module) string {
+	if m == nil {
+		return ""
+	}
+	fn := runtime.FuncForPC(reflect.ValueOf(m).Pointer())
+	if fn == nil {
+		return ""
+	}
+	name := fn.Name()
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
+}
 
 // Observe registers fn to receive lifecycle events from this scope and every
 // scope under it. Use it for logging and metrics.
@@ -1084,7 +1183,7 @@ type Binding[T any] struct {
 }
 
 func (s *Scope) register(k key, build func(*Scope) any) *binding {
-	b := &binding{key: k, site: callsite(), build: build}
+	b := &binding{key: k, site: callsite(), module: s.module, build: build}
 	b.single = &instance{b: b}
 	s.mu.Lock()
 	s.pending = append(s.pending, b)
@@ -1109,7 +1208,7 @@ func (b Binding[T]) edit(f func(*binding)) Binding[T] {
 	b.s.mu.Lock()
 	defer b.s.mu.Unlock()
 	if b.s.frozen && !slices.Contains(b.s.pending, b.b) {
-		panic(fmt.Sprintf("di: %s (provided at %s) modified after the scope was first resolved", b.b.key, b.b.site))
+		panic(fmt.Sprintf("di: %s (provided at %s) modified after the scope was first resolved", b.b.key, b.b.where()))
 	}
 	f(b.b)
 	return b
@@ -1121,6 +1220,26 @@ func (b Binding[T]) edit(f func(*binding)) Binding[T] {
 // A member keeps its own lifetime and hooks.
 func (b Binding[T]) Group() Binding[T] {
 	return b.edit(func(b *binding) { b.group = true })
+}
+
+// Override declares that this registration replaces an earlier one of the same
+// key in the same scope. Without it a second registration of a key is rejected
+// at the next resolution, naming both sites, because a duplicate that wins
+// silently is how one module reroutes another module's wiring without anyone
+// noticing. With it the later registration serves the key, and inherits its
+// eagerness, which is the test seam:
+//
+//	s := di.Test(t, app.Wire)
+//	s.Value(&DB{DSN: "sqlite://memory"}).Override()
+//
+// There must be something to override in this scope, or that is rejected too:
+// a fake for a service that has since been renamed would otherwise be a
+// registration nobody resolves, and the test would pass against production
+// wiring. A child scope shadows its parent without Override, since that is a
+// different registry rather than a replacement. A key that has already served
+// a value cannot be overridden at all.
+func (b Binding[T]) Override() Binding[T] {
+	return b.edit(func(b *binding) { b.override = true })
 }
 
 // Scoped makes the binding one-per-scope: each scope that resolves it gets
@@ -1425,14 +1544,14 @@ func (s *Scope) construct(in *instance, holder *state) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			if a, ok := rec.(abort); ok {
-				err = fmt.Errorf("di: building %s (provided at %s): %w", b.key, b.site, a.err)
+				err = fmt.Errorf("di: building %s (provided at %s): %w", b.key, b.where(), a.err)
 			} else {
-				err = fmt.Errorf("di: building %s (provided at %s): panic: %v", b.key, b.site, rec)
+				err = fmt.Errorf("di: building %s (provided at %s): panic: %v", b.key, b.where(), rec)
 			}
 		}
-		holder.emit(Event{Kind: EventBuild, Service: b.key.String(), Scope: holder.name, Site: b.site, Duration: time.Since(t0), Err: err})
+		holder.emit(Event{Kind: EventBuild, Service: b.key.String(), Scope: holder.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 	}()
-	in.value = b.build((&Scope{state: holder}).view(s.r))
+	in.value = b.build((&Scope{state: holder, module: b.module}).view(s.r))
 	return nil
 }
 
@@ -1930,20 +2049,18 @@ type TB interface {
 	Errorf(format string, args ...any)
 }
 
-// Test returns a scope for a test: the wire functions register the graph
-// under test, and the scope is stopped when the test ends, failing it if
-// a stop hook errors. Override what you need faked after wiring and before
-// resolving; the last registration wins.
+// Test returns a scope for a test: the modules register the graph under test,
+// and the scope is stopped when the test ends, failing it if a stop hook
+// errors. Override what you need faked after wiring and before resolving,
+// saying so:
 //
 //	s := di.Test(t, app.Wire)
-//	s.Value(&DB{DSN: "sqlite://memory"})
+//	s.Value(&DB{DSN: "sqlite://memory"}).Override()
 //	repo := s.Get[*Repo]()
-func Test(tb TB, wire ...func(*Scope)) *Scope {
+func Test(tb TB, wire ...Module) *Scope {
 	tb.Helper()
 	s := New()
-	for _, w := range wire {
-		w(s)
-	}
+	s.Use(wire...)
 	tb.Cleanup(func() {
 		if err := s.Stop(context.Background()); err != nil {
 			tb.Errorf("di: stopping test scope: %v", err)

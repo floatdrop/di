@@ -7,6 +7,64 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+Module composition, from [#6](https://github.com/floatdrop/di/issues/6). The
+one behaviour change is breaking: a duplicate registration within a scope no
+longer wins silently.
+
+### Changed
+
+- **A second registration of a key within one scope must be marked
+  `Override()`.** An unmarked one is rejected at the next resolution, naming
+  both registrations and, when they came from modules, both modules. The last
+  registration used to win silently, which meant a module's internal wiring
+  could be rerouted by an unrelated module that happened to provide the same
+  type, and nothing said so. `Override()` is the intent made explicit, and it
+  is the test seam now:
+
+  ```go
+  s := di.Test(t, app.Wire)
+  s.Value(&DB{DSN: "sqlite://memory"}).Override()
+  ```
+
+  An `Override()` with nothing to override in its scope is rejected as well,
+  since a fake for a service that has since been renamed would otherwise be a
+  registration nobody resolves, and the test would pass against production
+  wiring. A child scope still shadows its parent without any marker; that is a
+  different registry, not a replacement. A key that has served a value still
+  cannot be replaced at all, marker or not.
+
+  **Upgrade:** add `.Override()` to every registration that deliberately
+  replaces an earlier one in the same scope. The rejection message names both
+  sites, so the compiler is not needed to find them: run the tests.
+- `Test` takes `...Module` rather than `...func(*Scope)`. A function literal
+  or a named function is assignable to `Module`, so a call that passes them
+  directly compiles unchanged; one that spreads a `[]func(*Scope)` with `...`
+  needs the slice typed `[]Module`. The wire functions are applied with `Use`,
+  so registrations made in a test carry the module's name.
+
+### Fixed
+
+- A panicking `OnDrain` or `OnStop` hook is reported as that hook's failure
+  instead of propagating out of `Stop`. The start step was always recovered
+  this way; the other two were not, so a panic in either abandoned the
+  teardown halfway -- `stopOnce` claimed and never settled, every later `Stop`
+  waiting on it until its context ran out, and every instance behind it never
+  released. The concurrent driver found it the moment it gained a shape that
+  leaves a child scope with a permanently rejected registration: a drain hook
+  resolving through that scope meets the rejection as a panic.
+
+### Added
+
+- `Module`, a named `func(*Scope)`, and `Scope.Use(mods ...Module)`, which
+  applies modules in order and attributes every registration they make -- 
+  directly, from a child the module opens, or later from a constructor the
+  module registered -- to the module's function name. A collision then reads
+  `*app.DB is provided at app.Storage (wire.go:12) and again at app.Caching
+  (cache.go:8)`, and `Event.Module` carries the same name to observers.
+  Modules composed by plain function calls still work exactly as before; they
+  are simply unattributed.
+
+
 ### Added
 
 - **`Scope.Explain[T]` and `Scope.Graph`**, which answer what a service was

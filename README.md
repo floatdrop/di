@@ -26,8 +26,10 @@ repo, err := app.Resolve[*Repo]()
   typed on the service. Nothing is discovered by sniffing interfaces.
 - **Deterministic shutdown.** Reverse build order, child scopes first, every
   error reported.
-- **Scopes for requests and tests.** Child scopes shadow their parent; the
-  last registration of a key wins until that key has served a value.
+- **Scopes for requests and tests.** Child scopes shadow their parent. Within
+  a scope, replacing a registration is explicit -- `Override()` -- and an
+  unmarked duplicate is rejected naming both sites, so one module cannot
+  silently rewire another.
 - **The graph is inspectable.** Dependencies are recorded as constructors
   resolve them, so `Explain[T]` prints what a service was built from and what
   needed it, and `Graph` exports the whole thing as Graphviz DOT.
@@ -126,8 +128,11 @@ one instance because the constructor returns the same pointer. Declare it
 
 Rules the container enforces:
 
-- The last registration of a key wins. That is how a child scope shadows its
-  parent and how a test substitutes a fake.
+- A child scope may shadow a key its parent provides. Within one scope, a
+  second registration of a key must be marked `Override()`, and then it serves
+  the key and inherits its eagerness; an unmarked one is rejected at the next
+  resolution, naming both registrations. An `Override()` with nothing to
+  override is rejected too. That marker is how a test substitutes a fake.
 - Once a key has served a value it can no longer be replaced, in the scope
   that owns it or in any scope that resolved through it. Replacing it would
   leave one key with two live values, so it panics instead. A resolution that
@@ -227,6 +232,37 @@ mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 time it is asked. Members keep their own lifetime and hooks, and a plain
 registration of the same type is neither shadowed by the group nor part of
 it.
+
+### Modules
+
+A module is a function that registers into a scope, and modules compose by
+being called in order. `Use` does that and attributes every registration to
+the module that made it:
+
+```go
+func Storage(s *di.Scope) {
+    s.Provide(func(*di.Scope) *DB { return open(storageDSN) })
+    s.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+}
+
+func Caching(s *di.Scope) {
+    s.Provide(func(*di.Scope) *DB { return open(cacheDSN) }) // also a *DB
+    s.Provide(func(s *di.Scope) *Cache { return &Cache{db: s.Get[*DB]()} })
+}
+
+app := di.New()
+app.Use(Storage, Caching)
+app.Get[*Repo]()
+// di: *app.DB is provided at app.Storage (storage.go:12) and again at
+// app.Caching (caching.go:8): a second registration of a key must be marked
+// Override() to replace the first
+```
+
+Without that rule the second `*DB` would have won silently, and `Storage`'s
+`*Repo` -- wired to `Storage`'s database -- would have been quietly rewired to
+`Caching`'s by a module it has never heard of. Two modules that both need a
+`*DB` of their own declare distinct types (`type CacheDB struct{ *DB }`);
+one that means to replace the other's says `Override()`.
 
 ### Lifecycle
 
@@ -527,8 +563,8 @@ import (
 )
 
 func TestRepo(t *testing.T) {
-	s := di.Test(t, Wire)                // production graph, stopped when the test ends
-	s.Value(&DB{DSN: "sqlite://memory"}) // later registration wins: replaces the production *DB
+	s := di.Test(t, Wire)                           // production graph, stopped when the test ends
+	s.Value(&DB{DSN: "sqlite://memory"}).Override() // replaces the production *DB, and says so
 
 	repo := s.Get[*Repo]() // built against the fake DB
 	if repo.DB.DSN != "sqlite://memory" {

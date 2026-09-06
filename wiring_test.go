@@ -91,14 +91,14 @@ func TestRegressionOverrideAfterResolveRejected(t *testing.T) {
 	s := di.New()
 	s.Value(&DB{dsn: "a"})
 	s.Get[*DB]()
-	s.Value(&DB{dsn: "b"})
+	s.Value(&DB{dsn: "b"}).Override()
 	mustPanic(t, "cannot be overridden", func() { s.Get[*DB]() })
 
-	// Overriding before the key is resolved stays legal: that is how tests
-	// and child scopes substitute dependencies.
+	// Overriding before the key is resolved stays legal: that is how a test
+	// substitutes a fake.
 	ok := di.New()
 	ok.Value(&DB{dsn: "a"})
-	ok.Value(&DB{dsn: "b"})
+	ok.Value(&DB{dsn: "b"}).Override()
 	if got := ok.Get[*DB]().dsn; got != "b" {
 		t.Fatalf("override before resolution must win, got %q", got)
 	}
@@ -111,7 +111,7 @@ func TestRegressionShadowedEagerNotBuilt(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *DB { log = append(log, "real"); return &DB{dsn: "real"} }).Eager().
 		OnStart(func(context.Context, *DB) error { log = append(log, "startReal"); return nil })
-	s.Provide(func(*di.Scope) *DB { log = append(log, "fake"); return &DB{dsn: "fake"} }).Eager().
+	s.Provide(func(*di.Scope) *DB { log = append(log, "fake"); return &DB{dsn: "fake"} }).Eager().Override().
 		OnStart(func(context.Context, *DB) error { log = append(log, "startFake"); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestRegressionOverrideKeepsKeyEager(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *DB { log = append(log, "real"); return &DB{dsn: "real"} }).Eager().
 		OnStart(func(context.Context, *DB) error { log = append(log, "startReal"); return nil })
-	s.Value(&DB{dsn: "fake"}).
+	s.Value(&DB{dsn: "fake"}).Override().
 		OnStart(func(context.Context, *DB) error { log = append(log, "startFake"); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestRegressionEagerCannotTransferToPerScopeLifetime(t *testing.T) {
 			built := false
 			s := di.New()
 			s.Provide(func(*di.Scope) *DB { return &DB{dsn: "real"} }).Eager()
-			tc.apply(s.Provide(func(*di.Scope) *DB { built = true; return &DB{dsn: "fake"} }))
+			tc.apply(s.Provide(func(*di.Scope) *DB { built = true; return &DB{dsn: "fake"} }).Override())
 			mustPanic(t, "eagerness cannot transfer", func() { _ = s.Start(context.Background()) })
 			if built {
 				t.Fatalf("a %s binding was built at Start", tc.name)
@@ -223,9 +223,9 @@ func TestRegressionRejectedBatchIsNotHalfApplied(t *testing.T) {
 	}
 }
 
-// A key whose constructor failed built nothing, so it can be
-// re-registered. Because a failed instance caches its error for good, this
-// is the only way to recover such a key.
+// A key whose constructor failed built nothing, so it can be overridden.
+// Because a failed instance caches its error for good, this is the only way
+// to recover such a key.
 // (pass 7)
 func TestRegressionFailedResolveLeavesKeyReRegisterable(t *testing.T) {
 	s := di.New()
@@ -233,7 +233,7 @@ func TestRegressionFailedResolveLeavesKeyReRegisterable(t *testing.T) {
 	if _, err := s.Resolve[*DB](); err == nil {
 		t.Fatal("expected the constructor panic to surface")
 	}
-	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "recovered"} })
+	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "recovered"} }).Override()
 	got, err := s.Resolve[*DB]()
 	if err != nil {
 		t.Fatalf("re-registration should recover the key: %v", err)
@@ -396,7 +396,7 @@ func TestReview4CannotOverrideAKeyBeingResolved(t *testing.T) {
 	s := di.New()
 	var nested *DB
 	s.Provide(func(sc *di.Scope) *DB {
-		sc.Provide(func(*di.Scope) *DB { return &DB{dsn: "new"} })
+		sc.Provide(func(*di.Scope) *DB { return &DB{dsn: "new"} }).Override()
 		nested, _ = sc.Resolve[*DB]()
 		return &DB{dsn: "old"}
 	})
@@ -410,7 +410,7 @@ func TestReview4CannotOverrideAKeyBeingResolved(t *testing.T) {
 
 	// The key is free again once that resolution has failed, which is what
 	// keeps a key whose constructor failed recoverable.
-	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "recovered"} })
+	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "recovered"} }).Override()
 	got, err := s.Resolve[*DB]()
 	if err != nil {
 		t.Fatalf("re-registration after the failure should recover the key: %v", err)

@@ -22,7 +22,7 @@ cd benchmarks && go test -bench . -benchmem   # separate module, see below
 
 go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
 go test -count=1 -coverprofile=all.out .
-go run scripts/generatorgap.go -floor 85 gen.out all.out   # what only hand-written tests reach
+go run scripts/generatorgap.go -floor 90 gen.out all.out   # what only hand-written tests reach
 ```
 
 Run the full gate as a single `&&` chain before committing, the same way CI
@@ -266,12 +266,37 @@ one batch. The batch is validated against *prospective copies* of
 and keeps being rejected identically. Do not move a mutation of the real maps
 before validation.
 
+**A key names one live value per scope, and four guards each close one way of
+getting two.** In `freeze`: a second registration of a key in the same scope
+must carry `override`, or it is a collision and is rejected naming both sites
+-- last-wins used to be silent, which let one module reroute another's wiring
+without a word said (#6). An `override` with nothing in *this scope* to
+override is rejected too, because a fake for a renamed service is otherwise a
+registration nobody resolves; a child shadows its parent without the marker,
+since that is a different registry. Then `used` (the key has served),
+`resolving` (a resolution is in flight) and `served` (this scope handed the key
+down from an ancestor) each reject a replacement the marker cannot excuse. The
+"nothing to override" check is deliberately same-scope only: checking
+ancestors from inside `freeze` would mean taking a parent's mutex while holding
+the child's, and no two state mutexes are ever ordered against each other.
+
 **Two levels of registration semantics.** Lifetime and hooks belong to one
 registration, because they are typed on that value. Eagerness belongs to the
 *key*: it means the service exists by the time `Start` returns, so it transfers
-to whichever binding owns the key. `deriveEager` is the single place that
-decides what `Eager` means, and it validates in the same loop so the derived
-set and its rules cannot drift apart.
+to whichever binding owns the key -- an `Override()` inherits it. `deriveEager`
+is the single place that decides what `Eager` means, and it validates in the
+same loop so the derived set and its rules cannot drift apart.
+
+**A module is a label on the handle, not a scope.** `Use` calls each `Module`
+through a `Scope` view carrying the function's name; `register` stamps it on
+the binding, `view` and `Child` propagate it, and `construct` hands a
+constructor a view labelled with its own binding's module, so a registration
+made from inside a constructor is attributed to the module that registered the
+constructor. Nothing about lookup changes: modules are attribution for
+messages and events, and privacy -- if it is ever wanted -- must be a
+namespace *within* a scope, never a child scope with exports, because teardown
+is children-first and an exported dependency in a child would be torn down
+before its dependants in the parent (#6, the analysis).
 
 **The graph is recorded by watching, and only while a constructor runs.**
 `resolve` appends the instance it just produced to `deps` on the instance of
@@ -343,6 +368,12 @@ with an `OnStop` for an `OnStart` that never finished.
   `Shutdown`. A hook that passes a context of its own is invisible and waits,
   which is why the fallback still has to be a bounded wait rather than a
   promise.
+- Every user hook is called through `callHook` (or `startClaimed`'s
+  equivalent), which turns a panic into that hook's error. A hook can panic by
+  resolving something whose registration is rejected -- the rejection is a
+  panic, and `Resolve` re-panics anything that is not an `abort`. Letting one
+  escape `Stop` leaves `stopOnce` claimed and never settled, which is a hang
+  for every later `Stop` and a leak of everything behind it.
 - Nothing in the teardown path may run a user hook against a value another
   hook still holds. That is one rule with three instances: `OnStop` after
   `OnDrain`, `OnStop` after a `Worker` hook (deferred to `releaseAfterWorker` when
@@ -372,8 +403,10 @@ Four layers, each catching a different class:
   test, and tag it. Several tests here turned out to pass both before and
   after; say so rather than implying coverage.
 - `property_test.go` — random *registration* sequences checked against a model
-  of the eager rules. A predictive model can be wrong in the same way as
-  the code, so treat it as needing its own scrutiny.
+  of the eager rules and of which registration serves a key: a repeat must be
+  marked `Override`, an `Override` needs a target, a group member does neither.
+  A predictive model can be wrong in the same way as the code, so treat it as
+  needing its own scrutiny; the override half was mutation-tested when added.
 - `machine_test.go` — random *operation* sequences (register, resolve, start,
   stop, shutdown) across a root, two children and a grandchild,
   checked against invariants taken from documented guarantees rather than
@@ -451,6 +484,13 @@ Four layers, each catching a different class:
   the third review's six, which is the same lesson as the second: they need
   shapes the driver does not build.
 
+  The driver's hooks can panic -- a drain hook resolves through child scopes,
+  and one left with a permanently rejected registration meets the rejection
+  as a panic out of `Resolve` -- and the container recovers that into the
+  hook's error, which is right. So every piece of bookkeeping a hook does
+  after its first line must be deferred, or the oracle reads a hook that
+  panicked as one that never ended. C6 reported exactly that once.
+
   The exemptions these oracles need are the most dangerous part of them. C3
   cannot order a release that a missed deadline deferred, so it is switched
   off for scopes where a `Stop` reported one -- and switching C6 off with it,
@@ -485,7 +525,7 @@ Four layers, each catching a different class:
 - `scripts/generatorgap.go` — the map of what only the hand-written tests
   reach, which is the map of where the next review will dig: every defect the
   four September 2026 reviews found lived on such a line. CI runs it with a
-  floor of 85% generator coverage. When the floor moves, move it up.
+  floor of 90% generator coverage. When the floor moves, move it up.
 
   CI also checks the script's arithmetic against `go tool cover -func`,
   because the fourth review found the script wrong: it keyed coverage blocks

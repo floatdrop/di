@@ -33,7 +33,7 @@ func TestTestWiresOverridesAndStops(t *testing.T) {
 	tb := &fakeTB{}
 	stopped := false
 	s := di.Test(tb, wireProd)
-	s.Value(&DB{dsn: "fake"}).OnStop(func(context.Context, *DB) error { stopped = true; return nil })
+	s.Value(&DB{dsn: "fake"}).Override().OnStop(func(context.Context, *DB) error { stopped = true; return nil })
 	if got := s.Get[*Repo]().db.dsn; got != "fake" {
 		t.Fatalf("override not applied: %q", got)
 	}
