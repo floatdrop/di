@@ -418,3 +418,136 @@ func TestExplainLeavesResolutionAlone(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// ---- declared edges --------------------------------------------------------
+
+type (
+	xReq  struct{}
+	xUser struct{}
+	xSvc  struct{}
+)
+
+func newXD(xCfg) *xD            { return &xD{} }
+func newXC(*xD) *xC             { return &xC{} }
+func newXB(*xC) *xB             { return &xB{} }
+func newXUser(*xReq) *xUser     { return &xUser{} }
+func newXSvc(*xC, *xUser) *xSvc { return &xSvc{} }
+
+// A Wire binding that has not been built has no recorded tree, but it has
+// declared one: drawn dashed, down to what is not provided at all.
+func TestExplainDrawsDeclaredEdges(t *testing.T) {
+	s := di.New()
+	s.Value(xCfg{})
+	s.Wire[*xD](newXD)
+	s.Wire[*xC](newXC)
+	s.Wire[*xB](newXB)
+	s.Wire[*xSvc](newXSvc) // *xUser is not provided
+
+	wantExplain(t, s.Explain[*xSvc](), `*xSvc: singleton in root, not built
+├╌╌ *xC: singleton in root, not built
+│   └╌╌ *xD: singleton in root, not built
+│       └╌╌ xCfg: value in root, not built
+└╌╌ *xUser: not provided
+`)
+	wantExplain(t, s.Explain[*xC](), `*xC: singleton in root, not built
+└╌╌ *xD: singleton in root, not built
+    └╌╌ xCfg: value in root, not built
+declared by: *xB in root, *xSvc in root
+`)
+}
+
+// Where a declared edge reaches something already built, the recorded tree
+// takes over: solid below that point, and what has needed it is the built
+// dependents plus the unbuilt declarers.
+func TestExplainDeclaredEdgesMeetTheBuiltGraph(t *testing.T) {
+	s := di.New()
+	s.Value(xCfg{})
+	s.Wire[*xD](newXD)
+	s.Wire[*xC](newXC)
+	s.Wire[*xB](newXB)
+	s.Get[*xC]()
+
+	wantExplain(t, s.Explain[*xB](), `*xB: singleton in root, not built
+└╌╌ *xC: singleton in root, built
+    └── *xD: singleton in root, built
+        └── xCfg: value in root, built
+`)
+	wantExplain(t, s.Explain[*xD](), `*xD: singleton in root, built
+└── xCfg: value in root, built
+needed by: *xC in root
+`)
+	wantExplain(t, s.Explain[*xC](), `*xC: singleton in root, built
+└── *xD: singleton in root, built
+    └── xCfg: value in root, built
+declared by: *xB in root
+`)
+}
+
+// A closure declares nothing, so a declared edge that reaches one ends there.
+func TestExplainDeclaredEdgeEndsAtAClosure(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *xC { _ = sc.Get[*xD](); return &xC{} })
+	s.Wire[*xB](newXB)
+	wantExplain(t, s.Explain[*xB](), `*xB: singleton in root, not built
+└╌╌ *xC: singleton in root, not built
+`)
+}
+
+// A declared cycle, which Validate reports, is drawn once and closed with
+// "see above" rather than followed forever; a diamond is drawn once too.
+func TestExplainDeclaredCycleAndDiamondAreDrawnOnce(t *testing.T) {
+	s := di.New()
+	s.Wire[*xA](func(*xB) *xA { return &xA{} })
+	s.Wire[*xB](func(*xA) *xB { return &xB{} })
+	wantExplain(t, s.Explain[*xA](), `*xA: singleton in root, not built
+└╌╌ *xB: singleton in root, not built
+    └╌╌ *xA: see above
+declared by: *xB in root
+`)
+
+	d := di.New()
+	d.Wire[*xD](func() *xD { return &xD{} })
+	d.Wire[*xC](newXC)
+	d.Wire[*xB](func(*xC, *xD) *xB { return &xB{} })
+	wantExplain(t, d.Explain[*xB](), `*xB: singleton in root, not built
+├╌╌ *xC: singleton in root, not built
+│   └╌╌ *xD: singleton in root, not built
+└╌╌ *xD: see above
+`)
+}
+
+// A Scoped binding's declared edges are looked up from the scope asking, as
+// its build would be: the request scope provides what the root cannot.
+func TestExplainDeclaredEdgesOfAScopedBindingFollowTheScope(t *testing.T) {
+	root := di.New()
+	root.Wire[*xUser](newXUser).Scoped()
+	wantExplain(t, root.Explain[*xUser](), `*xUser: scoped in root, not built
+└╌╌ *xReq: not provided
+`)
+	req := root.Child("request")
+	req.Value(&xReq{})
+	wantExplain(t, req.Explain[*xUser](), `*xUser: scoped in request, not built
+└╌╌ *xReq: value in request, not built
+`)
+	req.Get[*xUser]()
+	wantExplain(t, req.Explain[*xUser](), `*xUser: scoped in request, built
+└── *xReq: value in request, built
+`)
+}
+
+// Declared edges are drawn from what is registered, and drawing them builds
+// nothing and commits nothing in a descendant.
+func TestExplainDeclaredEdgesBuildNothing(t *testing.T) {
+	var builds atomic.Int32
+	s := di.New()
+	s.Wire[*xD](func() *xD { builds.Add(1); return &xD{} })
+	s.Wire[*xC](newXC)
+	child := s.Child("child")
+	child.Wire[*xB](newXB)
+	child.Wire[*xB](newXB) // a collision, pending in the child, not this scope's to reject
+	_ = s.Explain[*xC]()
+	_ = s.Explain[*xD]()
+	if builds.Load() != 0 {
+		t.Fatalf("Explain ran a Wire constructor %d times", builds.Load())
+	}
+}

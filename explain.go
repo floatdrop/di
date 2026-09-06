@@ -1,9 +1,10 @@
 package di
 
-// Rendering the recorded graph. Nothing here participates in resolution or
-// teardown: it reads the edges di.go records while constructors run, under
-// the same mutex that guards every other field of an instance, and never
-// holds two of those at once. It is also the only part of the package that
+// Rendering the graph. Nothing here participates in resolution or teardown:
+// it reads the edges di.go records while constructors run, under the same
+// mutex that guards every other field of an instance, and never holds two of
+// those at once, and it reads the dependency lists Wire declares, which never
+// change after registration. It is also the only part of the package that
 // builds strings for a person rather than for an error.
 
 import (
@@ -17,10 +18,15 @@ import (
 // dependency tree, each node with its lifetime, its scope, the state of its
 // lifecycle and where it was registered, followed by what needed it.
 //
-// Only what has been built has a tree, because a constructor's dependencies
-// are recorded as it resolves them. A service that has not been built yet is
-// reported as such, with its registration, and so is one that is not provided
-// at all. Explain resolves nothing and builds nothing; it commits pending
+// What has been built has a recorded tree, because a constructor's
+// dependencies are recorded as it resolves them. A service that has not been
+// built is reported as such, with its registration; if it was registered
+// with Wire, the dependencies it declares are drawn under it with dashed
+// edges, each continuing as a recorded tree where it has been built and as a
+// declared one where it has not, and "declared by" lists the unbuilt
+// services that declare it. A closure that has not run ends its branch,
+// since nothing is known about it yet, and so does a key nothing provides.
+// Explain resolves nothing and builds nothing; it commits pending
 // registrations the way a resolution from this scope would, so a
 // configuration this scope would reject is reported here by the same panic.
 //
@@ -81,26 +87,117 @@ func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen m
 	holder.mu.Lock()
 	in := holder.instanceAt(b)
 	holder.mu.Unlock()
-	if in == nil {
-		// A Scoped binding this scope has never resolved: the registration
-		// is known, the instance does not exist.
-		sb.WriteString(describe(b, holder, "not built") + "\n")
-		return
+	// A Scoped binding this scope has never resolved has no instance; a
+	// singleton always has one, built or not. Either way an unbuilt service
+	// has no recorded tree, only what Wire declared.
+	phase, deps, fresh := "not built", []dep(nil), true
+	if in != nil {
+		phase, deps, fresh = dep{in: in, holder: holder}.inspect()
 	}
-
-	root := dep{in: in, holder: holder}
-	phase, deps := root.inspect()
 	sb.WriteString(describe(b, holder, phase) + "\n")
-	seen[in] = true
-	explainInto(sb, deps, "", seen)
 
-	if by := dependentsOf(s.root(), in); len(by) > 0 {
+	var by []dep
+	if fresh {
+		s.declaredInto(sb, b, holder, "", seen, map[*binding]bool{b: true})
+	} else {
+		seen[in] = true
+		explainInto(sb, deps, "", seen)
+		by = dependentsOf(s.root(), in)
+	}
+	if len(by) > 0 {
 		names := make([]string, len(by))
 		for i, d := range by {
 			names[i] = d.in.b.key.String() + " in " + d.holder.name
 		}
 		sb.WriteString("needed by: " + strings.Join(names, ", ") + "\n")
 	}
+	if declared := s.declaredBy(b, by); len(declared) > 0 {
+		sb.WriteString("declared by: " + strings.Join(declared, ", ") + "\n")
+	}
+}
+
+// declaredInto draws the dependencies b declares under a node that has not
+// been built, with dashed edges, looking each up from holder as the build
+// would. One that has been built continues as its recorded tree; one that has
+// not continues as its own declaration, or ends the branch if it is a closure,
+// which declares nothing. drawn keeps a declared binding from being expanded
+// twice, which is what a diamond needs and what a cycle needs more.
+func (s *Scope) declaredInto(sb *strings.Builder, b *binding, holder *state, prefix string, seen map[*instance]bool, drawn map[*binding]bool) {
+	for i, k := range b.wants {
+		branch, pad := "├╌╌ ", "│   "
+		if i == len(b.wants)-1 {
+			branch, pad = "└╌╌ ", "    "
+		}
+		sb.WriteString(prefix + branch)
+		target, owner := (&Scope{state: holder}).lookup(k)
+		if target == nil {
+			sb.WriteString(k.String() + ": not provided\n")
+			continue
+		}
+		th := owner
+		if target.scoped {
+			th = holder
+		}
+		th.mu.Lock()
+		in := th.instanceAt(target)
+		th.mu.Unlock()
+		if in != nil {
+			if seen[in] {
+				sb.WriteString(target.key.String() + ": see above\n")
+				continue
+			}
+			if phase, next, fresh := (dep{in: in, holder: th}).inspect(); !fresh {
+				seen[in] = true
+				sb.WriteString(describe(target, th, phase) + "\n")
+				explainInto(sb, next, prefix+pad, seen)
+				continue
+			}
+		}
+		if drawn[target] {
+			sb.WriteString(target.key.String() + ": see above\n")
+			continue
+		}
+		drawn[target] = true
+		sb.WriteString(describe(target, th, "not built") + "\n")
+		s.declaredInto(sb, target, th, prefix+pad, seen, drawn)
+	}
+}
+
+// declaredBy lists the Wire bindings, in any scope of the container, that
+// declare b's key and would resolve it to b from the scope that registered
+// them, leaving out the instances already named as having needed it. A
+// Scoped one is named by the scope declaring it, since the scopes that will
+// resolve it do not exist yet. It reads what is committed and commits
+// nothing, so a descendant's pending registrations neither appear nor get
+// the chance to be rejected here.
+func (s *Scope) declaredBy(b *binding, except []dep) []string {
+	var out []string
+	for _, st := range walkScopes(s.root()) {
+		for _, d := range st.live() {
+			if d == b || !slices.Contains(d.wants, b.key) || peek(st, b.key) != b {
+				continue
+			}
+			if slices.ContainsFunc(except, func(e dep) bool { return e.in.b == d }) {
+				continue
+			}
+			out = append(out, d.key.String()+" in "+st.name)
+		}
+	}
+	return out
+}
+
+// peek is lookup without the freeze: the binding k resolves to from st among
+// the registrations already committed.
+func peek(st *state, k key) *binding {
+	for ; st != nil; st = st.parent {
+		st.mu.Lock()
+		b, ok := st.index[k]
+		st.mu.Unlock()
+		if ok {
+			return b
+		}
+	}
+	return nil
 }
 
 // explainInto writes one level of the tree and recurses, drawing the spine
@@ -120,7 +217,7 @@ func explainInto(sb *strings.Builder, deps []dep, prefix string, seen map[*insta
 			continue
 		}
 		seen[d.in] = true
-		phase, next := d.inspect()
+		phase, next, _ := d.inspect()
 		sb.WriteString(describe(d.in.b, d.holder, phase) + "\n")
 		explainInto(sb, next, prefix+pad, seen)
 	}
@@ -154,7 +251,7 @@ func (s *Scope) Graph() string {
 		st.mu.Unlock()
 		for _, in := range built {
 			d := dep{in: in, holder: st}
-			phase, _ := d.inspect()
+			phase, _, _ := d.inspect()
 			n := node{d: d, id: len(all), phase: phase}
 			ids[in] = n.id
 			all = append(all, n)
@@ -181,7 +278,7 @@ func (s *Scope) Graph() string {
 	// Edges last and outside every cluster: one that crosses a cluster
 	// boundary is drawn wrong if it is declared inside one.
 	for _, n := range all {
-		_, deps := n.d.inspect()
+		_, deps, _ := n.d.inspect()
 		for _, d := range deps {
 			if to, ok := ids[d.in]; ok {
 				fmt.Fprintf(&sb, "  n%d -> n%d;\n", n.id, to)
@@ -198,12 +295,14 @@ func (s *Scope) Graph() string {
 // ---- rendering helpers -----------------------------------------------------
 
 // inspect reads the one instance's phase and edges together, which is the
-// only critical section a rendering takes. Nothing is held across the
-// recursion, so two scopes' mutexes are never held at once.
-func (d dep) inspect() (string, []dep) {
+// only critical section a rendering takes, and says whether the instance is
+// still unbuilt, in which case the edges are not there to read and what the
+// binding declares stands in. Nothing is held across the recursion, so two
+// scopes' mutexes are never held at once.
+func (d dep) inspect() (phase string, deps []dep, fresh bool) {
 	d.holder.mu.Lock()
 	defer d.holder.mu.Unlock()
-	return phaseWord(d.in), slices.Clone(d.in.deps)
+	return phaseWord(d.in), slices.Clone(d.in.deps), d.in.ph == phaseNew
 }
 
 // phaseWord names where an instance is in its lifecycle. Called with the

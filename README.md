@@ -211,8 +211,13 @@ func main() {
 	app.Wire[*User](NewUser).Scoped() // one per request scope, where the *http.Request is
 	app.Wire[*Handler](NewHandler).Scoped()
 
-	// Nothing has been built. From the application scope, *User needs an
-	// *http.Request that only a request scope provides: owed, not wrong.
+	// Nothing has been built, but the constructors declared their edges, so
+	// Explain draws them, dashed, down to what only a request scope provides.
+	fmt.Print(app.Explain[*Handler]())
+	fmt.Println()
+
+	// Validate walks the same edges. From the application scope, *User needs
+	// an *http.Request that only a request scope provides: owed, not wrong.
 	v := app.Validate()
 	fmt.Println("errors:", v.Err())
 	fmt.Println("owed:  ", v.Owed)
@@ -229,6 +234,13 @@ func main() {
 ```
 
 ```
+*main.Handler: scoped in root, not built (provided at main.go:36)
+├╌╌ *main.Repo: singleton in root, not built (provided at main.go:34)
+│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:33)
+│       └╌╌ main.Config: value in root, not built (provided at main.go:32)
+└╌╌ *main.User: scoped in root, not built (provided at main.go:35)
+    └╌╌ *net/http.Request: not provided
+
 errors: <nil>
 owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:35)]
 request scopes: <nil>
@@ -561,9 +573,9 @@ the registration site, the duration and the error, if any.
 
 ### Inspecting the graph
 
-Constructors are closures, so the container learns a service's dependencies by
-watching it resolve them. What has been built therefore has a graph, and two
-methods render it.
+A `Provide` closure's dependencies are learned by watching it resolve them,
+and a `Wire` constructor's are declared. What has been built has a recorded
+graph, what was wired has a declared one, and two methods render them.
 
 `Explain[T]` is the dependency tree of one service, with each node's lifetime,
 its scope, how far through its lifecycle it is and where it was registered,
@@ -593,9 +605,22 @@ go run ./examples/explain | dot -Tsvg > graph.svg
 ```
 
 Neither builds anything. A service that has not been resolved is reported
-with its registration and left alone, which is the other half of the
-[known limitation](#design-notes) below: the graph is what ran, not what could
-run.
+with its registration and left alone; if it was registered with `Wire`, the
+dependencies it declares are drawn under it with dashed edges, each continuing
+as a recorded tree where it has been built and as a declared one where it has
+not, and `declared by:` names the unbuilt services that declare it. A closure
+that has not run ends its branch, which is the other half of the
+[known limitation](#design-notes) below: for closures the graph is what ran,
+not what could run.
+
+```
+*main.Handler: scoped in root, not built (provided at main.go:36)
+├╌╌ *main.Repo: singleton in root, not built (provided at main.go:34)
+│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:33)
+│       └╌╌ main.Config: value in root, not built (provided at main.go:32)
+└╌╌ *main.User: scoped in root, not built (provided at main.go:35)
+    └╌╌ *net/http.Request: not provided
+```
 
 [embedmd]:# (examples/explain/main.go go)
 ```go

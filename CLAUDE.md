@@ -329,7 +329,14 @@ with `E` variants, was prototyped beside it and dropped: fourteen methods to
 save a repeated type argument, with the compiler checking only an arity the
 reflective form cannot get wrong. Every registration method calls `register`
 directly, because `callsite` counts a fixed number of frames; a `Wire` that
-went through `Provide` would record a site inside `di.go`.
+went through `Provide` would record a site inside `di.go`. `Explain` draws
+`wants` under an unbuilt node with dashed edges (`declaredInto`), switching
+back to the recorded tree wherever a declared dependency has been built;
+`declaredBy` is the reverse direction and reads only committed registrations
+(`peek`, a lookup without the freeze), because it walks every scope of the
+container and a root `Explain` must not be the call that rejects a child's
+pending batch. `Graph` is unchanged: it lists built instances only, and a
+built `Wire` instance's recorded edges are its declared ones.
 
 `Validate` walks `wants`. Its node is a binding *in the scope it would be
 built in*, because a `Scoped` binding built in one scope looks its

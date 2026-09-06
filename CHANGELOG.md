@@ -7,6 +7,16 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Changed
+
+- `Explain` draws the dependencies a `Wire` binding declares when it has not
+  been built: dashed edges under the node, each continuing as the recorded
+  tree where the dependency has been built and as a declared one where it has
+  not, ending at a closure or at a key nothing provides. A `declared by:` line
+  names the unbuilt services that declare a key, beside `needed by:` for the
+  built ones. The output for a built service is unchanged, and `Graph` still
+  renders only what was built.
+
 ## [0.9.0] - 2026-09-06
 
 Constructors can be handed over as they are written, and the graph they
