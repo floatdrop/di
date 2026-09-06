@@ -7,9 +7,20 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
-Module composition, from [#6](https://github.com/floatdrop/di/issues/6). The
-one behaviour change is breaking: a duplicate registration within a scope no
-longer wins silently.
+## [0.8.0] - 2026-09-06
+
+Two features and one rule. `Explain` and `Graph` render the dependency graph as
+it was actually built ([#2]). Modules compose by `Use`, with every registration
+attributed to the module that made it ([#6]). And the rule that makes modules
+safe to compose: a second registration of a key within one scope must say so
+with `Override()`, or it is rejected naming both sites -- the one breaking
+change here, and the reason for the minor bump.
+
+`go doc -all` against 0.7.0 adds `Binding.Override`, `Module`, `Scope.Use`,
+`Scope.Explain` and `Scope.Graph`, and changes one signature: `Test` takes
+`...Module`. A call that passes function literals or named functions compiles
+unchanged; one that spreads a `[]func(*Scope)` needs the slice typed
+`[]Module`.
 
 ### Changed
 
@@ -55,18 +66,6 @@ longer wins silently.
 
 ### Added
 
-- `Module`, a named `func(*Scope)`, and `Scope.Use(mods ...Module)`, which
-  applies modules in order and attributes every registration they make -- 
-  directly, from a child the module opens, or later from a constructor the
-  module registered -- to the module's function name. A collision then reads
-  `*app.DB is provided at app.Storage (wire.go:12) and again at app.Caching
-  (cache.go:8)`, and `Event.Module` carries the same name to observers.
-  Modules composed by plain function calls still work exactly as before; they
-  are simply unattributed.
-
-
-### Added
-
 - **`Scope.Explain[T]` and `Scope.Graph`**, which answer what a service was
   built from and what needed it ([#2]). Constructors are closures, so the
   container learns a service's dependencies by watching it resolve them; each
@@ -86,6 +85,15 @@ longer wins silently.
   Not done, and not needed: the issue's optional dependency-aware `Stop`.
   Build order is already a valid reverse topological order, and nothing stops
   instances individually.
+
+- `Module`, a named `func(*Scope)`, and `Scope.Use(mods ...Module)`, which
+  applies modules in order and attributes every registration they make -- 
+  directly, from a child the module opens, or later from a constructor the
+  module registered -- to the module's function name. A collision then reads
+  `*app.DB is provided at app.Storage (wire.go:12) and again at app.Caching
+  (cache.go:8)`, and `Event.Module` carries the same name to observers.
+  Modules composed by plain function calls still work exactly as before; they
+  are simply unattributed.
 
 ### Internal
 
@@ -715,8 +723,10 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/floatdrop/di/compare/v0.7.0...v0.8.0
 [#2]: https://github.com/floatdrop/di/issues/2
+[#6]: https://github.com/floatdrop/di/issues/6
 [0.7.0]: https://github.com/floatdrop/di/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/floatdrop/di/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/floatdrop/di/compare/v0.4.0...v0.5.0
