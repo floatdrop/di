@@ -338,6 +338,29 @@ container and a root `Explain` must not be the call that rejects a child's
 pending batch. `Graph` is unchanged: it lists built instances only, and a
 built `Wire` instance's recorded edges are its declared ones.
 
+**`Wrap` binds at registration.** `Wrap[T]` finds what serves `T` when it
+is called -- `state.current`, which reads this scope's pending batch and
+index *without* freezing, because a freeze here would end the batch for every
+registration made so far and make a later `Eager()` on one of them a
+"modified after the scope was first resolved" panic; then `lookup` from the
+parent, which freezes ancestors as a resolution would -- and stores it as
+`binding.inner`/`innerAt`. The build resolves the inner through
+`resolve(inner, innerAt)` rather than by key, since the key now names the
+wrapper, and calls `markServed` as `get` would; the edge, the build order
+and the cycle check all fall out of that. The wrapper serves the key from
+its scope down, so a child's wrapper is that child's registration of the key
+over the parent's instance, which is what makes it fx's module-scoped
+`Decorate` without a new mechanism. Three guards: `freeze` exempts a wrapper
+from the collision rule and applies the used/resolving/served guards to it
+as to an override, sets `scoped` from the inner there rather than at
+registration because the inner's own `Scoped()` may come later in the
+batch, and rejects an `Override` of a binding whose `wrappedBy` is set --
+the cross-scope case, where a parent's later override would leave a child's
+wrapper composing over a registration nothing else can reach. `validate.go`'s
+`live` follows `inner` chains so the wrapped registration gets its own turn
+though it is no longer in `index`; `declared` puts the inner edge first,
+bound rather than looked up, for both `Validate` and `Explain`.
+
 `Validate` walks `wants`. Its node is a binding *in the scope it would be
 built in*, because a `Scoped` binding built in one scope looks its
 dependencies up from there, so the same binding under two holders is two
@@ -462,6 +485,10 @@ Four layers, each catching a different class:
   at the end of every sequence (I8: builds nothing, repeatable) and inside the
   concurrent render lane; what it *says* is pinned by `validate_test.go`,
   because predicting it here would model the lookup rules a second time.
+  The same bit turns shape 1 (machine) and shape 2 (concurrent) into a
+  wrapper over whatever serves the key, or a registration-time rejection;
+  the property model tracks a per-key chain length, since an eager wrapped
+  key builds every registration in its chain under one name.
 - `lifecyclemodel_test.go` — the one place that *does* predict, because the
   argument against predicting does not hold for it. What serves a key depends
   on overrides and the eager rules, and modelling that would be

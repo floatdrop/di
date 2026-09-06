@@ -16,7 +16,8 @@ package di_test
 //	Within one scope, a second registration of a key must be marked Override
 //	and then replaces the first; an unmarked one is rejected, and so is an
 //	Override with nothing to override. Group members accumulate instead and
-//	never override anything.
+//	never override anything. A wrapper composes over what serves the key,
+//	takes its lifetime, and builds it first; nothing to wrap is rejected.
 
 // The generator starts from a fresh scope each iteration and never touches
 // one again after a rejection, so it cannot see defects in freeze's error
@@ -43,7 +44,7 @@ type pkI interface{ marker() }
 func (*pk1) marker() {}
 
 var (
-	propKinds = []string{"provide", "value", "scoped", "group", "wire"}
+	propKinds = []string{"provide", "value", "scoped", "group", "wire", "wrap"}
 	propNames = []string{"pk1", "pk2", "pk3", "pkI"}
 )
 
@@ -71,6 +72,8 @@ func regKind[T any](s *di.Scope, mk func() T, kind string, eager, override bool)
 		b = s.Provide(func(*di.Scope) T { return mk() }).Group()
 	case "wire":
 		b = s.Wire[T](mk) // a singleton like provide, with its dependencies declared
+	case "wrap":
+		b = s.Wrap[T](func(T) T { return mk() })
 	}
 	if eager {
 		b.Eager()
@@ -101,32 +104,53 @@ type propWant struct {
 // wantEager derives what the container must do with a sequence.
 func wantEager(steps []propStep) propWant {
 	winner := map[int]string{} // the registration that serves the key
+	scoped := map[int]bool{}   // whether that registration is per-scope
+	chain := map[int]int{}     // how many registrations build for the key: the winner and what it wraps
 	for _, st := range steps {
 		switch {
 		case st.kind == "group":
 			if st.override {
 				return propWant{panics: true} // members accumulate; nothing to replace
 			}
+		case st.kind == "wrap":
+			if winner[st.key] == "" || st.override {
+				return propWant{panics: true} // nothing to wrap, or a marker a wrapper rejects
+			}
+			winner[st.key] = "wrap" // takes the wrapped lifetime, so scoped stays
+			chain[st.key]++
 		case winner[st.key] != "" && !st.override:
 			return propWant{panics: true} // a second registration must say so
 		case winner[st.key] == "" && st.override:
 			return propWant{panics: true} // nothing to override
 		default:
-			winner[st.key] = st.kind
+			winner[st.key], scoped[st.key], chain[st.key] = st.kind, st.kind == "scoped", 1
 		}
 	}
 
+	// A registration may not combine Eager with a per-scope lifetime,
+	// override or not; a wrapper's lifetime is the one it inherited at the
+	// point it was registered, so it is replayed.
+	inherited := map[int]bool{}
 	for _, st := range steps {
-		// A registration may not combine Eager with a per-scope lifetime,
-		// override or not.
-		if st.eager && st.kind == "scoped" {
-			return propWant{panics: true}
+		switch st.kind {
+		case "group":
+		case "wrap":
+			if st.eager && inherited[st.key] {
+				return propWant{panics: true}
+			}
+		default:
+			inherited[st.key] = st.kind == "scoped"
+			if st.eager && st.kind == "scoped" {
+				return propWant{panics: true}
+			}
 		}
+	}
+	for _, st := range steps {
 		if !st.eager || st.kind == "group" {
 			continue
 		}
 		// Whatever serves an eager key must be able to honour eagerness.
-		if winner[st.key] == "scoped" {
+		if scoped[st.key] {
 			return propWant{panics: true}
 		}
 	}
@@ -145,7 +169,13 @@ func wantEager(steps []propStep) propWant {
 			continue
 		}
 		seen[id] = true
-		want.builds = append(want.builds, propNames[st.key])
+		n := 1
+		if st.kind != "group" {
+			n = chain[st.key] // a wrapper builds what it wraps first, under the same key
+		}
+		for range n {
+			want.builds = append(want.builds, propNames[st.key])
+		}
 	}
 	return want
 }

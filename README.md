@@ -33,7 +33,8 @@ repo, err := app.Resolve[*Repo]()
   shadow it.
 - **Explicit overrides.** Replacing a registration is `Override()`. A second
   registration without it is rejected, naming both, so one module cannot
-  rewire another unnoticed.
+  rewire another unnoticed. Composing over one is `Wrap`, which keeps what it
+  wraps, hooks and lifetime included.
 - **The graph is inspectable.** Dependencies are recorded as constructors
   resolve them, so `Explain[T]` prints what a service was built from and what
   needed it, and `Graph` exports the whole thing as Graphviz DOT.
@@ -120,6 +121,7 @@ registration and must be called before the scope is first resolved.
 |---|---|
 | `s.Provide(func(*di.Scope) T)` | A lazily built singleton. `T` is inferred. |
 | `s.Wire[T](NewT)` | A lazily built singleton from a plain constructor. Its parameters are its dependencies; see [Wiring plain constructors](#wiring-plain-constructors). |
+| `s.Wrap[T](fn)` | A wrapper over what serves `T`: `fn` takes that value first, then its dependencies; see [Wrapping a service](#wrapping-a-service). |
 | `s.Value(v)` | An instance you already have. |
 | `s.Use(mods...)` | What the modules register, attributed to them by name. |
 
@@ -266,6 +268,96 @@ two allocations per build over a closure; a warm `Get` is the same code for
 both. A slice parameter is a key like any other, not the group for its
 element type, and a constructor that needs the scope itself, for `s.Context()`
 or a conditional dependency, stays a `Provide` closure.
+
+### Wrapping a service
+
+`Wrap[T]` composes over whatever serves `T` when it is called: the latest
+registration in this scope, or the one an ancestor provides. Its function
+takes the value being wrapped first and its other dependencies after it, and
+returns `T` or `(T, error)`, read as `Wire` reads a constructor. The wrapped
+registration keeps its hooks and lifetime; it is built first, as the
+wrapper's dependency, and so stopped after it. Wrappers chain in registration
+order. This is what uber/fx calls `Decorate`.
+
+[embedmd]:# (examples/wrap/main.go go)
+```go
+// Wrap: compose over a service without replacing it. The wrapped
+// registration keeps its hooks and lifetime, and a wrapper in a child scope
+// applies to that scope alone.
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/floatdrop/di"
+)
+
+type Store interface{ Get(key string) string }
+
+type PGStore struct{}
+type Cache struct{ hits int }
+type CachingStore struct {
+	next  Store
+	cache *Cache
+}
+type TracingStore struct{ next Store }
+
+func (*PGStore) Get(key string) string        { return "row " + key }
+func (c *CachingStore) Get(key string) string { c.cache.hits++; return c.next.Get(key) }
+func (t *TracingStore) Get(key string) string { return "traced(" + t.next.Get(key) + ")" }
+
+func NewPGStore() *PGStore                       { return &PGStore{} }
+func NewCachingStore(next Store, c *Cache) Store { return &CachingStore{next: next, cache: c} }
+func NewTracingStore(next Store) Store           { return &TracingStore{next: next} }
+
+func main() {
+	app := di.New()
+	app.Value(&Cache{})
+	app.Wire[Store](NewPGStore).
+		OnStop(func(context.Context, Store) error { fmt.Println("pg closed"); return nil })
+
+	// The first parameter is the value being wrapped; the rest are
+	// dependencies. The store keeps its OnStop, and is stopped after the
+	// wrapper, since it was built first.
+	app.Wrap[Store](NewCachingStore)
+
+	// A wrapper in a child scope wraps the parent's value for that scope and
+	// its descendants; the parent and its other children are untouched.
+	debug := app.Child("debug")
+	debug.Wrap[Store](NewTracingStore)
+
+	fmt.Println("app:  ", app.Get[Store]().Get("1"))
+	fmt.Println("debug:", debug.Get[Store]().Get("1"))
+	fmt.Print(app.Explain[Store]())
+	_ = app.Stop(context.Background())
+}
+```
+
+```
+app:   row 1
+debug: traced(row 1)
+main.Store: singleton wrapper in root, built (provided at main.go:40)
+├── main.Store: singleton in root, built (provided at main.go:34)
+└── *main.Cache: value in root, built (provided at main.go:33)
+needed by: main.Store in debug
+pg closed
+```
+
+Rules the container enforces:
+
+- A wrapper takes the lifetime of what it wraps: over a `Scoped` service it is
+  one per resolving scope. `Scoped()` on the wrapper itself puts one wrapper
+  per resolving scope around a shared singleton.
+- A wrapper in a child scope wraps the parent's value for that child and its
+  descendants. The parent and its other children keep the original.
+- Nothing to wrap is rejected when `Wrap` is called, and a group cannot be
+  wrapped: its members are read with `All`. A key this scope has already
+  resolved cannot be wrapped afterwards, as it cannot be overridden, since
+  callers hold the unwrapped value.
+- `Override()` after a wrapper replaces it and everything it wrapped. A
+  registration some wrapper composes over cannot be overridden while that
+  wrapper stands, in its scope or a descendant's.
 
 ### Resolution
 

@@ -123,15 +123,16 @@ func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen m
 // which declares nothing. drawn keeps a declared binding from being expanded
 // twice, which is what a diamond needs and what a cycle needs more.
 func (s *Scope) declaredInto(sb *strings.Builder, b *binding, holder *state, prefix string, seen map[*instance]bool, drawn map[*binding]bool) {
-	for i, k := range b.wants {
+	edges := declared(b, holder)
+	for i, e := range edges {
 		branch, pad := "├╌╌ ", "│   "
-		if i == len(b.wants)-1 {
+		if i == len(edges)-1 {
 			branch, pad = "└╌╌ ", "    "
 		}
 		sb.WriteString(prefix + branch)
-		target, owner := (&Scope{state: holder}).lookup(k)
+		target, owner := e.b, e.owner
 		if target == nil {
-			sb.WriteString(k.String() + ": not provided\n")
+			sb.WriteString(e.k.String() + ": not provided\n")
 			continue
 		}
 		th := owner
@@ -174,10 +175,10 @@ func (s *Scope) declaredBy(b *binding, except []dep) []string {
 	var out []string
 	for _, st := range walkScopes(s.root()) {
 		for _, d := range st.live() {
-			if d == b || !slices.Contains(d.wants, b.key) || peek(st, b.key) != b {
+			if d == b || slices.ContainsFunc(except, func(e dep) bool { return e.in.b == d }) {
 				continue
 			}
-			if slices.ContainsFunc(except, func(e dep) bool { return e.in.b == d }) {
+			if d.inner != b && (!slices.Contains(d.wants, b.key) || peek(st, b.key) != b) {
 				continue
 			}
 			out = append(out, d.key.String()+" in "+st.name)
@@ -341,6 +342,9 @@ func lifetime(b *binding) string {
 	}
 	if b.group {
 		life += " group member"
+	}
+	if b.inner != nil {
+		life += " wrapper"
 	}
 	return life
 }

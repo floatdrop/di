@@ -176,10 +176,19 @@ type binding struct {
 	isValue  bool  // registered with Value: lifetimes do not apply
 	wants    []key // the parameter types of a Wire constructor; nil for a Provide closure
 	build    func(*Scope) any
-	onStart  func(context.Context, any) error
-	onDrain  func(context.Context, any) error
-	onStop   func(context.Context, any) error
-	worker   func(context.Context, any) error
+
+	// inner is the registration a Wrap composes over, bound when Wrap is
+	// called, and innerAt the scope that registered it; both nil for any
+	// other binding. wrappedBy is set on a binding a Wrap has bound to: an
+	// Override that replaced it would leave the wrapper composing over a
+	// registration that no longer serves the key.
+	inner     *binding
+	innerAt   *state
+	wrappedBy atomic.Pointer[binding]
+	onStart   func(context.Context, any) error
+	onDrain   func(context.Context, any) error
+	onStop    func(context.Context, any) error
+	worker    func(context.Context, any) error
 
 	// used is set once this binding has served a value. From then on the
 	// registration cannot be overridden, since that would leave two live
@@ -227,6 +236,10 @@ func (b *binding) validate() {
 		bad("Scoped", "is meaningless for a Value binding: the instance already exists")
 	case b.group && b.override:
 		bad("Override", "does not apply to a group member: members accumulate rather than replace one another")
+	case b.inner != nil && b.group:
+		bad("Group", "does not apply to a wrapper: it serves the key it wraps")
+	case b.inner != nil && b.override:
+		bad("Override", "does not apply to a wrapper: it composes over the registration it wraps rather than replacing it")
 	}
 }
 
@@ -909,13 +922,23 @@ func (st *state) freeze() {
 	groups := maps.Clone(st.groups)
 	all := slices.Clone(st.all)
 	for _, b := range st.pending {
+		// A wrapper is built where what it wraps is built, so it takes that
+		// lifetime, read here rather than at registration because the
+		// wrapped binding's own Scoped() may come later in the batch.
+		if b.inner != nil && b.inner.scoped {
+			b.scoped = true
+		}
 		b.validate()
 		if b.group {
 			groups[b.key] = append(slices.Clone(groups[b.key]), b)
 		} else {
 			prev, ok := index[b.key]
+			act := "overridden"
+			if b.inner != nil {
+				act = "wrapped"
+			}
 			switch {
-			case ok && !b.override:
+			case ok && !b.override && b.inner == nil:
 				// Two registrations of one key in one scope, and the second
 				// did not say it meant to replace the first. Silently
 				// letting the later one win was how an unrelated module
@@ -932,17 +955,23 @@ func (st *state) freeze() {
 				panic(fmt.Sprintf("di: %s (provided at %s) is marked Override() but nothing in scope %s provides it; a child scope shadows its parent without Override",
 					b.key, b.where(), st.name))
 			case ok && prev.used.Load():
-				// Replacing a key that has served a value would leave two
-				// live instances of one service.
-				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it has already been resolved",
-					b.key, prev.where(), b.where()))
+				// Replacing or wrapping a key that has served a value would
+				// leave two live instances of one service.
+				panic(fmt.Sprintf("di: %s (provided at %s) cannot be %s at %s: it has already been resolved",
+					b.key, prev.where(), act, b.where()))
 			case ok && prev.resolving.Load() > 0:
 				// A resolution of this key is in flight. Serving the
 				// replacement to anything it goes on to build, while the
 				// resolution that is running returns the old value, is the
 				// same two-live-values defect the check above prevents.
-				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it is being resolved",
-					b.key, prev.where(), b.where()))
+				panic(fmt.Sprintf("di: %s (provided at %s) cannot be %s at %s: it is being resolved",
+					b.key, prev.where(), act, b.where()))
+			case ok && b.inner == nil && prev.wrappedBy.Load() != nil:
+				// A wrapper, in this scope or a descendant, composes over
+				// prev. Replacing prev would leave that wrapper serving a
+				// value built from a registration nothing else can reach.
+				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it is wrapped at %s",
+					b.key, prev.where(), b.where(), prev.wrappedBy.Load().where()))
 			}
 			if st.served[b.key] {
 				// This scope already served the key from an outer scope;
@@ -1248,22 +1277,122 @@ func (s *Scope) Wire[T any](ctor any) Binding[T] {
 	b := s.register(key{t: want}, func(s *Scope) any {
 		args := make([]reflect.Value, len(wants))
 		for i, k := range wants {
-			// A nil interface is a legitimate service, and reflect.ValueOf(nil)
-			// is not a value of any type; see as.
-			if v := s.get(k); v != nil {
-				args[i] = reflect.ValueOf(v)
-			} else {
-				args[i] = reflect.Zero(k.t)
-			}
+			args[i] = argument(s.get(k), k.t)
 		}
-		out := fv.Call(args)
-		if fails && !out[1].IsNil() {
-			panic(abort{out[1].Interface().(error)})
-		}
-		return out[0].Interface()
+		return call(fv, args, fails)
 	})
 	b.wants = wants
 	return Binding[T]{s, b}
+}
+
+// Wrap registers a wrapper over the registration that serves T when Wrap is
+// called: the latest one in this scope, or the one an ancestor provides. fn
+// takes the value being wrapped first and its other dependencies after it,
+// read with reflection as Wire reads a constructor, and returns T, or T and
+// an error:
+//
+//	s.Wrap[Store](func(next Store, c *Cache) Store { return &caching{next, c} })
+//
+// What is wrapped keeps its registration, hooks and lifetime: it is built
+// first, as the wrapper's dependency, and so stopped after it. The wrapper
+// serves T from this scope down. In a child scope it wraps the parent's value
+// for that child and its descendants and leaves the parent and its other
+// children as they were, which is what uber/fx calls Decorate. Wrappers
+// chain in registration order, and a wrapper takes the lifetime of what it
+// wraps; Scoped() on the wrapper makes it one per resolving scope over a
+// shared inner value. An Override registered afterwards replaces the wrapper
+// and everything it wrapped. Nothing to wrap is rejected here, and a group
+// cannot be wrapped: its members are read with All. A key this scope has
+// already resolved is rejected at the next resolution, as an Override is,
+// since callers already hold the unwrapped value.
+func (s *Scope) Wrap[T any](fn any) Binding[T] {
+	want := reflect.TypeFor[T]()
+	name := "Wrap[" + typeName(want) + "]"
+	fv := reflect.ValueOf(fn)
+	if !fv.IsValid() || fv.Kind() != reflect.Func {
+		panic(fmt.Sprintf("di: %s: wrapper must be a function, got %T", name, fn))
+	}
+	ft := fv.Type()
+	switch {
+	case ft.IsVariadic():
+		panic(fmt.Sprintf("di: %s: wrapper %s is variadic", name, ft))
+	case ft.NumIn() == 0 || !want.AssignableTo(ft.In(0)):
+		panic(fmt.Sprintf("di: %s: wrapper %s must take the %s it wraps as its first parameter", name, ft, typeName(want)))
+	case ft.NumOut() == 0 || ft.NumOut() > 2:
+		panic(fmt.Sprintf("di: %s: wrapper %s must return T or (T, error)", name, ft))
+	case !ft.Out(0).AssignableTo(want):
+		panic(fmt.Sprintf("di: %s: wrapper %s returns %s", name, ft, typeName(ft.Out(0))))
+	case ft.NumOut() == 2 && ft.Out(1) != errorType:
+		panic(fmt.Sprintf("di: %s: wrapper %s must return T or (T, error)", name, ft))
+	}
+	k := key{t: want}
+	// This scope is read as it is, pending batch included and committed
+	// nothing, because committing it here would end the batch for every
+	// registration made so far. Ancestors are looked up as a resolution
+	// would look them up.
+	inner, at := s.current(k)
+	if inner == nil && s.parent != nil {
+		inner, at = (&Scope{state: s.parent}).lookup(k)
+	}
+	if inner == nil {
+		panic(fmt.Sprintf("di: %s: nothing provides %s in scope %s or above; a group is read with All and cannot be wrapped", name, k, s.name))
+	}
+	wants := make([]key, ft.NumIn()-1)
+	for i := range wants {
+		wants[i] = key{t: ft.In(i + 1)}
+	}
+	fails := ft.NumOut() == 2
+	b := s.register(k, func(s *Scope) any {
+		args := make([]reflect.Value, len(wants)+1)
+		// The wrapped value is resolved as a dependency, which records the
+		// edge, keeps build order and catches a wrapper that reaches back
+		// into itself; served is marked as get would mark it.
+		args[0] = argument(s.resolve(inner, at), ft.In(0))
+		s.markServed(at, k)
+		for i, k := range wants {
+			args[i+1] = argument(s.get(k), k.t)
+		}
+		return call(fv, args, fails)
+	})
+	b.inner, b.innerAt, b.wants, b.scoped = inner, at, wants, inner.scoped
+	inner.wrappedBy.Store(b)
+	return Binding[T]{s, b}
+}
+
+// current is the registration serving k in this scope as of now, pending or
+// committed, read without committing anything.
+func (st *state) current(k key) (*binding, *state) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, b := range slices.Backward(st.pending) {
+		if b.key == k && !b.group {
+			return b, st
+		}
+	}
+	if b, ok := st.index[k]; ok {
+		return b, st
+	}
+	return nil, nil
+}
+
+// argument makes a stored value into an argument of type t. A nil interface
+// is a legitimate service, and reflect.ValueOf(nil) is not a value of any
+// type; see as.
+func argument(v any, t reflect.Type) reflect.Value {
+	if v == nil {
+		return reflect.Zero(t)
+	}
+	return reflect.ValueOf(v)
+}
+
+// call runs a constructor through reflect and turns its error, if it
+// declared one and returned it, into the abort that s.Must would raise.
+func call(fv reflect.Value, args []reflect.Value, fails bool) any {
+	out := fv.Call(args)
+	if fails && !out[1].IsNil() {
+		panic(abort{out[1].Interface().(error)})
+	}
+	return out[0].Interface()
 }
 
 var errorType = reflect.TypeFor[error]()

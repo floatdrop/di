@@ -527,7 +527,17 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 			b = s.Provide(build).Scoped().Worker(work).OnStop(down)
 		}
 	case 2:
-		b = s.Provide(func(sc *di.Scope) T { return own(sc, dep(sc)) }).
+		build := func(sc *di.Scope) T { return own(sc, dep(sc)) }
+		var wrapped di.Binding[T]
+		if o.wire {
+			// A wrapper over whatever serves the key by now, or a rejection
+			// at registration when nothing does; the wrapped value is
+			// resolved as a dependency under every lane at once.
+			wrapped = s.Wrap[T](func(_ T, sn scopeName) T { return ownIn(sn.name, plain()) })
+		} else {
+			wrapped = s.Provide(build)
+		}
+		b = wrapped.
 			Worker(work).
 			OnStop(func(ctx context.Context, v T) error {
 				// Slow enough that an impatient Stop misses its deadline
