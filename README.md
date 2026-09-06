@@ -18,7 +18,8 @@ app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
 repo, err := app.Resolve[*Repo]()
 ```
 
-- **Keys are Go types.** No naming scheme, no string collisions between packages.
+- **Keys are Go types.** No naming scheme, no string collisions between
+  packages.
 - **Constructors return `T`, not `(T, error)`.** A missing dependency or a
   failed constructor unwinds to the enclosing `Resolve` or `Start` as an
   `error` that names the full dependency path and the registration site.
@@ -26,10 +27,11 @@ repo, err := app.Resolve[*Repo]()
   typed on the service. Nothing is discovered by sniffing interfaces.
 - **Deterministic shutdown.** Reverse build order, child scopes first, every
   error reported.
-- **Scopes for requests and tests.** Child scopes shadow their parent. Within
-  a scope, replacing a registration is explicit -- `Override()` -- and an
-  unmarked duplicate is rejected naming both sites, so one module cannot
-  silently rewire another.
+- **Scopes for requests and tests.** A child scope sees its parent and can
+  shadow it.
+- **Explicit overrides.** Replacing a registration is `Override()`. A second
+  registration without it is rejected, naming both, so one module cannot
+  rewire another unnoticed.
 - **The graph is inspectable.** Dependencies are recorded as constructors
   resolve them, so `Explain[T]` prints what a service was built from and what
   needed it, and `Graph` exports the whole thing as Graphviz DOT.
@@ -106,14 +108,14 @@ registration and must be called before the scope is first resolved.
 |---|---|
 | `s.Provide(func(*di.Scope) T)` | A lazily built singleton. `T` is inferred. |
 | `s.Value(v)` | An instance you already have. |
-| `s.Use(mods...)` | Everything the modules register, attributed to each module by name. |
+| `s.Use(mods...)` | What the modules register, attributed to them by name. |
 
 | Method | Effect |
 |---|---|
 | `.Scoped()` | One instance per resolving scope, built and stopped there. |
 | `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
-| `.Override()` | Replace an earlier registration of `T` in this scope. Without it a second registration is rejected, naming both. |
+| `.Override()` | Replace an earlier registration of `T` in this scope; a second one without it is rejected. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
 | `.Worker(f)` | A long-running function, cancelled on stop. |
@@ -131,10 +133,10 @@ one instance because the constructor returns the same pointer. Declare it
 Rules the container enforces:
 
 - A child scope may shadow a key its parent provides. Within one scope, a
-  second registration of a key must be marked `Override()`, and then it serves
-  the key and inherits its eagerness; an unmarked one is rejected at the next
-  resolution, naming both registrations. An `Override()` with nothing to
-  override is rejected too. That marker is how a test substitutes a fake.
+  second registration of a key must be marked `Override()`; it then serves the
+  key and inherits its eagerness. An unmarked duplicate, or an `Override()`
+  with nothing to override, is rejected at the next resolution, naming the
+  registrations involved. The marker is how a test substitutes a fake.
 - Once a key has served a value it can no longer be replaced, in the scope
   that owns it or in any scope that resolved through it. Replacing it would
   leave one key with two live values, so it panics instead. A resolution that
@@ -208,11 +210,10 @@ a parent's singleton. A service that must see child-scoped values is declared
 
 ### Groups
 
-`Group()` makes a registration one member of the group for its type rather
-than the binding for it, and `All` resolves every member across the scope
-chain. A health endpoint is the usual case. There is no health-check hook,
-because a group of checkers is the same thing in user code, and the handler
-decides what healthy means:
+`Group()` makes a registration a member of the group for its type rather than
+the binding for it, and `All` resolves every member across the scope chain. A
+health endpoint is the usual case: a group of checkers, and a handler that
+decides what healthy means.
 
 ```go
 type Checker interface{ Check(ctx context.Context) error }
@@ -237,9 +238,8 @@ it.
 
 ### Modules
 
-A module is a function that registers into a scope, and modules compose by
-being called in order. `Use` does that and attributes every registration to
-the module that made it:
+A module is a function that registers into a scope. `Use` applies modules in
+order and attributes each registration to the module that made it:
 
 ```go
 func Storage(s *di.Scope) {
@@ -260,11 +260,10 @@ app.Get[*Repo]()
 // Override() to replace the first
 ```
 
-Without that rule the second `*DB` would have won silently, and `Storage`'s
-`*Repo` -- wired to `Storage`'s database -- would have been quietly rewired to
-`Caching`'s by a module it has never heard of. Two modules that both need a
-`*DB` of their own declare distinct types (`type CacheDB struct{ *DB }`);
-one that means to replace the other's says `Override()`.
+Without the rule the second `*DB` would have won silently and rewired
+`Storage`'s `*Repo` to `Caching`'s database. Two modules that each need a `*DB`
+of their own declare distinct types (`type CacheDB struct{ *DB }`); a module
+that means to replace another's registration says `Override()`.
 
 ### Lifecycle
 
@@ -286,8 +285,9 @@ the scope down, and the others wait for it and report its result. A hook must
 therefore not call `Stop` on its own scope or an ancestor, which would be a
 wait on itself; call `Shutdown`, which never blocks.
 
-Start hooks must not block. A server binds its listener synchronously, so a
-busy port fails `Start`, then serves in a goroutine.
+`OnStart` should return once the service is ready rather than run it: a server
+binds its listener in the hook, so a busy port fails `Start`, and serves in a
+goroutine.
 
 ### Draining
 
@@ -302,11 +302,11 @@ app.Provide(newServer).Eager().
 ```
 
 An HTTP server is the case that needs it. Its handlers hold request scopes
-that are children of the application scope, so shutting the server down from
-`OnStop` would be racing the teardown of the scopes those handlers are still
-using: a request in flight would start failing with `di.ErrStopped` before the
-server had finished waiting for it. Draining first gives handlers their scopes
-and dependencies until they return.
+under the application scope, so shutting the server down from `OnStop` would
+race the teardown of the scopes those handlers still use, and a request in
+flight would fail with `di.ErrStopped` before the server finished waiting for
+it. Draining first keeps handlers' scopes and dependencies alive until they
+return.
 
 ### Workers
 
@@ -322,11 +322,10 @@ app.Provide(newMailer).Eager().Worker(func(ctx context.Context, m *Mailer) error
 The function runs in its own goroutine from the moment the service starts.
 Its context is cancelled when the service stops, and `Stop` waits for it
 within the stop deadline. Returning an error calls `Shutdown`, so a worker
-that dies takes the application down rather than leaving it half alive. That
-holds even if the worker only reports the failure once shutdown is under way,
-since when an error surfaces says nothing about what caused it; returning
-`context.Canceled` after cancellation is the one case that means nothing more
-than "I stopped".
+that dies takes the application down rather than leaving it half alive, even
+if it reports the failure only once shutdown is under way. The one error that
+does not count is `context.Canceled` after cancellation, which means only that
+the worker stopped.
 
 ### Request scopes
 
@@ -452,8 +451,8 @@ app.Observe(func(ev di.Event) {
 
 Observers receive an `Event` for every constructor and every `OnStart`,
 `OnDrain` and `OnStop` hook in the scope and its descendants, plus one per
-`Shutdown`. Each event names the service, its scope, the registration site,
-the duration and the error, if any.
+`Shutdown`. Each event names the service, its scope, its module if it has one,
+the registration site, the duration and the error, if any.
 
 ### Inspecting the graph
 
@@ -552,7 +551,7 @@ func main() {
 
 `di.Test` wires the production graph into a fresh scope and stops it when the
 test ends, failing the test if a stop hook errors. Override what you need
-before anything is resolved.
+before anything is resolved, marking it `Override()`.
 
 [embedmd]:# (examples/testing/repo_test.go go)
 ```go
