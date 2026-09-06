@@ -106,12 +106,14 @@ registration and must be called before the scope is first resolved.
 |---|---|
 | `s.Provide(func(*di.Scope) T)` | A lazily built singleton. `T` is inferred. |
 | `s.Value(v)` | An instance you already have. |
+| `s.Use(mods...)` | Everything the modules register, attributed to each module by name. |
 
 | Method | Effect |
 |---|---|
 | `.Scoped()` | One instance per resolving scope, built and stopped there. |
 | `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
+| `.Override()` | Replace an earlier registration of `T` in this scope. Without it a second registration is rejected, naming both. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
 | `.Worker(f)` | A long-running function, cancelled on stop. |
