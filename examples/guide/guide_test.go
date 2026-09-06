@@ -6,6 +6,7 @@ package guide
 import (
 	"context"
 	"flag"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
 	"github.com/floatdrop/di/examples/guide/internal/api"
 	"github.com/floatdrop/di/examples/guide/internal/cache"
 	"github.com/floatdrop/di/examples/guide/internal/config"
@@ -31,7 +31,7 @@ func wire(app *di.Scope) {
 func TestWiringValidates(t *testing.T) {
 	app := di.New()
 	wire(app)
-	if err := dihttp.Validate(app); err != nil {
+	if err := app.Validate(di.Provided[*http.Request]()).Err(); err != nil {
 		t.Fatal(err)
 	}
 }

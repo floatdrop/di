@@ -781,6 +781,7 @@ func (m *cmachine) render(label string, s *di.Scope) {
 	_ = s.Explain[*mk1]()
 	_ = s.Explain[mkI]()
 	_ = s.Validate()
+	_ = s.Validate(di.Provided[*mk2]())
 }
 
 // run executes the sequence in three phases: wiring sequentially, then the

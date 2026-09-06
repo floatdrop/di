@@ -188,7 +188,6 @@ import (
 	"net/http"
 
 	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
 )
 
 type Config struct{ DSN string }
@@ -227,8 +226,9 @@ func main() {
 	fmt.Println("errors:", v.Err())
 	fmt.Println("owed:  ", v.Owed)
 
-	// A request scope provides it, so checked from there nothing is owed.
-	fmt.Println("request scopes:", dihttp.Validate(app))
+	// Told what a request scope holds, the check is the one that scope
+	// would make, and nothing is owed.
+	fmt.Println("request scopes:", app.Validate(di.Provided[*http.Request]()).Err())
 
 	// A singleton depending on a request-scoped service would be built in
 	// app, where there is no request. A closure would fail on first use;
@@ -239,15 +239,15 @@ func main() {
 ```
 
 ```
-*main.Handler: scoped in root, not built (provided at main.go:36)
-├╌╌ *main.Repo: singleton in root, not built (provided at main.go:34)
-│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:33)
-│       └╌╌ main.Config: value in root, not built (provided at main.go:32)
-└╌╌ *main.User: scoped in root, not built (provided at main.go:35)
+*main.Handler: scoped in root, not built (provided at main.go:35)
+├╌╌ *main.Repo: singleton in root, not built (provided at main.go:33)
+│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:32)
+│       └╌╌ main.Config: value in root, not built (provided at main.go:31)
+└╌╌ *main.User: scoped in root, not built (provided at main.go:34)
     └╌╌ *net/http.Request: not provided
 
 errors: <nil>
-owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:35)]
+owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:34)]
 request scopes: <nil>
 di: *net/http.Request: not provided in scope root (needed by [*main.Mailer *main.User]; *main.User is Scoped, so the singleton *main.Mailer would build it there)
 ```
@@ -255,14 +255,15 @@ di: *net/http.Request: not provided in scope root (needed by [*main.Mailer *main
 | Call | Returns |
 |---|---|
 | `s.Validate()` | A `Validation`. `Err()` joins `Errors`, the failures the declared graph proves. `Owed` lists what a `Scoped` binding needs that this scope does not provide, left to the scope that resolves it. `Unchecked` lists the `Provide` closures. |
-| `dihttp.Validate(app)` | `error`. Validates from a throwaway request scope holding an `*http.Request`, so what is owed there is reported as missing. |
+| `s.Validate(di.Provided[T]()...)` | The same check as the resolving scope would make it, told that it holds a `T`. With stubs nothing is owed: what neither the scope nor the stubs provide is an error. |
 
 A singleton is checked against the scope that registered it, since that is
 where it is built. A `Scoped` binding is built in whichever scope resolves it,
 so it is checked as if resolved from the scope calling `Validate`, and what
 that scope does not provide is owed rather than wrong: a descendant may
 provide it, as request scopes provide the request. Call `Validate` from that
-descendant, or `dihttp.Validate` for request scopes, to have those checked.
+descendant, or say what it will hold with `di.Provided[T]()` stubs, to have
+those checked.
 
 `Wire` reads the signature with reflection once, at registration, and a
 constructor of the wrong shape is rejected there with the other configuration
@@ -571,8 +572,8 @@ Rules and traps:
 
 - Use `Wire` for the selector rather than `Provide`. Its parameter declares
   the key, so `Validate` reports the key in `Owed` — the obligation the
-  resolving scope carries — and `dihttp.Validate` discharges it from a
-  request scope. A `Provide` closure behaves identically at run time and
+  resolving scope carries — and `Validate(di.Provided[T]())` discharges it
+  as a request scope would. A `Provide` closure behaves identically at run time and
   declares nothing, so the missing key is found by the first request that
   needs it.
 - One key resolves to one value per scope. A caller that needs two shards at
@@ -840,11 +841,11 @@ that has not run ends its branch, which is the other half of the
 not what could run.
 
 ```
-*main.Handler: scoped in root, not built (provided at main.go:36)
-├╌╌ *main.Repo: singleton in root, not built (provided at main.go:34)
-│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:33)
-│       └╌╌ main.Config: value in root, not built (provided at main.go:32)
-└╌╌ *main.User: scoped in root, not built (provided at main.go:35)
+*main.Handler: scoped in root, not built (provided at main.go:35)
+├╌╌ *main.Repo: singleton in root, not built (provided at main.go:33)
+│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:32)
+│       └╌╌ main.Config: value in root, not built (provided at main.go:31)
+└╌╌ *main.User: scoped in root, not built (provided at main.go:34)
     └╌╌ *net/http.Request: not provided
 ```
 

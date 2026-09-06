@@ -372,9 +372,13 @@ dependency means: a singleton on its own turn is `strict`; a `Scoped` binding
 as the validating scope would resolve it is `lenient`, and what is missing is
 `Owed` rather than an error, because a descendant may provide it and no
 scope-position rule can tell an intermediate scope from a leaf -- only the
-caller knows it is one, which is what `dihttp.Validate` knows about a request
-scope; a singleton reached from anything else is `cyclesOnly`, since its own
-turn reports what it misses. A `Scoped` dependency is walked in the caller's
+caller knows it is one, and says so with `Provided` stubs, which name what
+the resolving scope will hold and make everything else it lacks an error
+(`leaf`); a stub is honoured on the `lenient` path only, since a singleton
+builds in its own scope where a descendant's values are not; a singleton
+reached from anything else is `cyclesOnly`, since its own turn reports what
+it misses. `dihttp.Validate` was the throwaway-child version of this and
+went in 0.11.0. A `Scoped` dependency is walked in the caller's
 mode under the same holder, which is how a singleton that would build a
 `Scoped` service its scope cannot satisfy becomes an error -- the one definite
 failure a singleton-captures-Scoped shape has; a capture that is satisfiable

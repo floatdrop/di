@@ -9,6 +9,7 @@ package di
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 )
 
@@ -21,8 +22,8 @@ type Validation struct {
 	Errors []error
 	// Owed lists the dependencies of Scoped bindings that this scope does not
 	// provide. A Scoped service is built in the scope that resolves it, so
-	// these are left to that scope: call Validate there, or dihttp.Validate
-	// for request scopes, to have them checked as errors.
+	// these are left to that scope: call Validate from there, or say what it
+	// will hold with Provided stubs, and they are checked as errors instead.
 	Owed []string
 	// Unchecked lists the Provide constructors in the chain, whose
 	// dependencies are known only once they run.
@@ -34,18 +35,32 @@ func (v Validation) Err() error { return errors.Join(v.Errors...) }
 
 // Validate checks the wiring visible from this scope without building
 // anything. A singleton is checked against the scope that registered it,
-// since that is where it is built; a Scoped binding is checked as if resolved
+// since that is where it is built. A Scoped binding is checked as if resolved
 // from this scope, and what this scope does not provide for it is reported as
-// Owed rather than as an error, because a descendant may. Like Explain, it
-// commits pending registrations the way a resolution would, so a
-// configuration this scope would reject is reported by the same panic.
-func (s *Scope) Validate() Validation {
+// Owed rather than as an error, because a descendant may:
+//
+//	v := app.Validate() // *http.Request is owed to a request scope
+//
+// The stubs say what such a descendant will hold, so that the check can be
+// made from the application scope as that descendant would make it. With
+// stubs the caller has described the resolving scope, and a dependency neither
+// this scope nor the stubs provide is an error:
+//
+//	err := app.Validate(di.Provided[*http.Request]()).Err()
+//
+// Like Explain, Validate commits pending registrations the way a resolution
+// would, so a configuration this scope would reject is reported by the same
+// panic.
+func (s *Scope) Validate(stubs ...Stub) Validation {
 	var chain []*state
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
 		chain = append(chain, st)
 	}
-	v := &validator{seen: map[string]bool{}, done: map[visit]bool{}}
+	v := &validator{seen: map[string]bool{}, done: map[visit]bool{}, stubs: map[key]bool{}, leaf: len(stubs) > 0}
+	for _, st := range stubs {
+		v.stubs[st.k] = true
+	}
 	// Ancestors first, so a report reads top-down like the scope tree.
 	for _, st := range slices.Backward(chain) {
 		for _, b := range st.live() {
@@ -95,10 +110,20 @@ func (st *state) live() []*binding {
 }
 
 type validator struct {
-	out  Validation
-	seen map[string]bool // lines already reported, and cycles by their members
-	done map[visit]bool  // nodes fully explored, so a diamond is walked once
+	out   Validation
+	seen  map[string]bool // lines already reported, and cycles by their members
+	done  map[visit]bool  // nodes fully explored, so a diamond is walked once
+	stubs map[key]bool    // what the resolving scope will hold, by the caller's word
+	leaf  bool            // stubs were given: the resolving scope is described, so nothing is owed
 }
+
+// Stub names a key the scope resolving a Scoped binding will provide, for
+// Validate to take as given. Make one with Provided.
+type Stub struct{ k key }
+
+// Provided is a Stub for T: the resolving scope will hold a T, as a request
+// scope holds an *http.Request.
+func Provided[T any]() Stub { return Stub{k: key{t: reflect.TypeFor[T]()}} }
 
 // A node of the declared graph is a binding in the scope it would be built
 // in. The same binding is a different node under a different holder, since a
@@ -132,6 +157,10 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []*binding) {
 	for _, e := range declared(b, holder) {
 		k, dep, owner := e.k, e.b, e.owner
 		switch {
+		case dep == nil && md == lenient && v.stubs[k]:
+			// The resolving scope will hold it, the caller says, and a value
+			// declares nothing further. Only on the Scoped path: a singleton
+			// builds in its own scope, where that scope's values are not.
 		case dep == nil:
 			v.missing(k, b, holder, md, path)
 		case slices.Contains(path, dep):
@@ -150,6 +179,8 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []*binding) {
 func (v *validator) missing(k key, b *binding, holder *state, md mode, path []*binding) {
 	switch {
 	case md == cyclesOnly:
+	case md == lenient && v.leaf:
+		v.err(fmt.Errorf("di: %s: %w by this scope or the stubs (needed by %s; scoped, provided at %s)", k, ErrNotProvided, keysOf(path), b.site))
 	case md == lenient:
 		v.owed(fmt.Sprintf("%s: needed by %s (scoped, provided at %s)", k, b.key, b.site))
 	case len(path) > 1:

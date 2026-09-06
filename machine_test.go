@@ -301,14 +301,19 @@ func (m *machine) validate(s *di.Scope, scope int) {
 		}
 	}()
 	before := m.totalBuilds()
-	first := s.Validate()
-	second := s.Validate()
-	if m.totalBuilds() != before {
-		m.fail("Validate(s%d) built something", scope)
-	}
-	if fmt.Sprint(first.Err()) != fmt.Sprint(second.Err()) ||
-		len(first.Owed) != len(second.Owed) || len(first.Unchecked) != len(second.Unchecked) {
-		m.fail("Validate(s%d) was not repeatable:\n  %+v\n  %+v", scope, first, second)
+	for _, stubs := range [][]di.Stub{nil, {di.Provided[*mk2](), di.Provided[mkI]()}} {
+		first := s.Validate(stubs...)
+		second := s.Validate(stubs...)
+		if m.totalBuilds() != before {
+			m.fail("Validate(s%d) built something", scope)
+		}
+		if fmt.Sprint(first.Err()) != fmt.Sprint(second.Err()) ||
+			len(first.Owed) != len(second.Owed) || len(first.Unchecked) != len(second.Unchecked) {
+			m.fail("Validate(s%d) was not repeatable:\n  %+v\n  %+v", scope, first, second)
+		}
+		if len(stubs) > 0 && len(first.Owed) > 0 {
+			m.fail("Validate(s%d) with stubs owes nothing by definition, got %v", scope, first.Owed)
+		}
 	}
 }
 

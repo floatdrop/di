@@ -7,7 +7,6 @@ import (
 	"net/http"
 
 	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
 )
 
 type Config struct{ DSN string }
@@ -46,8 +45,9 @@ func main() {
 	fmt.Println("errors:", v.Err())
 	fmt.Println("owed:  ", v.Owed)
 
-	// A request scope provides it, so checked from there nothing is owed.
-	fmt.Println("request scopes:", dihttp.Validate(app))
+	// Told what a request scope holds, the check is the one that scope
+	// would make, and nothing is owed.
+	fmt.Println("request scopes:", app.Validate(di.Provided[*http.Request]()).Err())
 
 	// A singleton depending on a request-scoped service would be built in
 	// app, where there is no request. A closure would fail on first use;
