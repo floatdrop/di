@@ -616,3 +616,66 @@ func TestReview2PanickingStartHookIsAFailure(t *testing.T) {
 		t.Fatalf("OnStart ran %d times", got)
 	}
 }
+
+// A hook that panics must not take the teardown down with it. The start step
+// was always recovered this way; the drain and stop steps were not, so a panic
+// in either propagated out of Stop halfway through -- stopOnce claimed and
+// never settled, so every later Stop waited for it until its context ran out,
+// and every instance behind it was never released. Found by the concurrent
+// driver the moment it gained a shape that leaves a child scope with a
+// permanently rejected registration: a drain hook resolving through that scope
+// meets the rejection as a panic.
+func TestPanickingTeardownHooksAreReported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wire func(*di.Scope, *bool)
+	}{
+		{"OnDrain", func(s *di.Scope, _ *bool) {
+			s.Value(&DB{}).OnDrain(func(context.Context, *DB) error { panic("drain hook exploded") })
+		}},
+		{"OnStop", func(s *di.Scope, _ *bool) {
+			s.Value(&DB{}).OnStop(func(context.Context, *DB) error { panic("stop hook exploded") })
+		}},
+		{"a rejected registration met inside OnDrain", func(s *di.Scope, _ *bool) {
+			poisoned := s.Child("poisoned")
+			poisoned.Value(&Repo{}).Override() // nothing to override: rejected at every freeze
+			s.Value(&DB{}).OnDrain(func(context.Context, *DB) error {
+				_, err := poisoned.Resolve[*Repo]() // the rejection reaches the hook as a panic
+				return err
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			released := false
+			s := di.New()
+			// Registered first, so it is released last: it is what a teardown
+			// abandoned halfway would leave behind.
+			s.Value(&Worker{}).OnStop(func(context.Context, *Worker) error { released = true; return nil })
+			s.Get[*Worker]()
+			tc.wire(s, &released)
+			s.Get[*DB]()
+
+			done := make(chan error, 1)
+			go func() { done <- s.Stop(context.Background()) }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Stop never returned")
+			}
+			if err == nil {
+				t.Fatal("the hook's failure was not reported")
+			}
+			if !released {
+				t.Fatal("the teardown was abandoned: an earlier instance was never released")
+			}
+			// A second Stop reports the same result at once rather than
+			// waiting on a teardown that never settled.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if again := s.Stop(ctx); again == nil || errors.Is(again, context.DeadlineExceeded) {
+				t.Fatalf("second Stop: %v", again)
+			}
+		})
+	}
+}

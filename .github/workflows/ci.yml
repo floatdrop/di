@@ -39,7 +39,7 @@ jobs:
         run: |
           go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=generators.out .
           go test -count=1 -coverprofile=everything.out .
-          go run scripts/generatorgap.go -floor 85 generators.out everything.out
+          go run scripts/generatorgap.go -floor 90 generators.out everything.out
           # The gap report is only worth its floor if it reads a profile the
           # way the toolchain does. It once keyed coverage blocks by line and
           # merged the eighteen lines of di.go that carry more than one, which

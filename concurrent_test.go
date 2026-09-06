@@ -454,13 +454,20 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		m.inHook.Add(1)
 		defer m.inHook.Add(-1)
 		m.drain.begin(any(v))
+		// Deferred, because this hook can panic: buildIntoChild resolves
+		// through a child scope, and a child left with a permanently
+		// rejected registration -- an Override with nothing to override --
+		// meets the rejection as a panic out of Resolve. The container
+		// recovers it into the hook's error, which is right; a driver whose
+		// bookkeeping was not deferred then reported the recovered stop
+		// hook as beginning inside a drain hook that had "never ended".
+		defer m.drain.end(any(v))
 		holder := m.holderOf(any(v))
 		m.sched.pause("OnDrain in " + holder)
 		defer m.sched.pause("OnDrain returns in " + holder)
 		m.resolveDuringDrain(holder)
 		m.buildIntoChild(holder, o.key)
 		time.Sleep(2 * time.Millisecond) // widen the window a bad ordering needs
-		m.drain.end(any(v))
 		if o.key%2 == 1 {
 			// Half the draining shapes fail. A hook that always returns nil
 			// exercises the phase without checking what it does with an
@@ -501,13 +508,14 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		return v
 	}
 	build := func(sc *di.Scope) T { return own(sc, plain()) }
+	var b di.Binding[T]
 	switch o.reg % 6 {
 	case 0:
-		s.Provide(build).Worker(work).OnStop(down)
+		b = s.Provide(build).Worker(work).OnStop(down)
 	case 1:
-		s.Provide(build).Scoped().Worker(work).OnStop(down)
+		b = s.Provide(build).Scoped().Worker(work).OnStop(down)
 	case 2:
-		s.Provide(func(sc *di.Scope) T { return own(sc, dep(sc)) }).
+		b = s.Provide(func(sc *di.Scope) T { return own(sc, dep(sc)) }).
 			Worker(work).
 			OnStop(func(ctx context.Context, v T) error {
 				// Slow enough that an impatient Stop misses its deadline
@@ -525,7 +533,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// value, which the phase promises still works (C7). A hook that
 		// returned nil and touched nothing is how three drain defects
 		// survived this driver.
-		s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).
+		b = s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).
 			OnDrain(drainHook).
 			Worker(work).
 			OnStop(down)
@@ -533,7 +541,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// The one shape with an OnStart, so its stop step is owed only when
 		// the start step succeeded. Its Worker hook is what puts a worker under
 		// a Stop that has to cancel it and wait.
-		s.Provide(build).
+		b = s.Provide(build).
 			OnStart(func(_ context.Context, v T) error {
 				// The one shape whose release is owed only once the start
 				// step has succeeded, so the hook itself is what tells C9.
@@ -548,10 +556,13 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// OnDrain shape is a plain singleton, so resolving it from a child
 		// hands back the instance the owner already holds. A whole class of
 		// drain defect was unreachable for want of one registration.
-		s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).Scoped().
+		b = s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).Scoped().
 			OnDrain(drainHook).
 			Worker(work).
 			OnStop(down)
+	}
+	if o.override {
+		b.Override()
 	}
 }
 
@@ -705,9 +716,13 @@ func (m *cmachine) step(i int, o op) {
 				m.stopAt[m.names[o.scope]] = append(m.stopAt[m.names[o.scope]], m.clock)
 				m.mu.Unlock()
 			}
+			// A rejection a hook met by resolving through a misconfigured
+			// scope reaches Stop as that hook's error, "panic: di: ...", and
+			// is a legitimate outcome here: the generator builds such scopes.
 			if err != nil && !o.eager && !isDocumentedFailure(err) &&
 				!errors.Is(err, context.DeadlineExceeded) &&
-				!errors.Is(err, errWorker) && !errors.Is(err, errDrain) {
+				!errors.Is(err, errWorker) && !errors.Is(err, errDrain) &&
+				!strings.Contains(err.Error(), "panic: di: ") {
 				m.fail("%s: Stop reported an undocumented failure: %v", label, err)
 			}
 		case opShutdown:

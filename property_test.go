@@ -10,6 +10,13 @@ package di_test
 //	the first such registration. A group member is its own entry. A binding
 //	that serves an eager key may not have a per-scope lifetime, nor may a
 //	single registration combine Eager with one.
+//
+// And the rule that decides which registration serves a key at all:
+//
+//	Within one scope, a second registration of a key must be marked Override
+//	and then replaces the first; an unmarked one is rejected, and so is an
+//	Override with nothing to override. Group members accumulate instead and
+//	never override anything.
 
 // The generator starts from a fresh scope each iteration and never touches
 // one again after a rejection, so it cannot see defects in freeze's error
@@ -41,16 +48,17 @@ var (
 )
 
 type propStep struct {
-	key   int
-	kind  string
-	eager bool
+	key      int
+	kind     string
+	eager    bool
+	override bool
 }
 
 func (st propStep) String() string {
-	return fmt.Sprintf("%s/%s/eager=%v", propNames[st.key], st.kind, st.eager)
+	return fmt.Sprintf("%s/%s/eager=%v/override=%v", propNames[st.key], st.kind, st.eager, st.override)
 }
 
-func regKind[T any](s *di.Scope, mk func() T, kind string, eager bool) {
+func regKind[T any](s *di.Scope, mk func() T, kind string, eager, override bool) {
 	var b di.Binding[T]
 	switch kind {
 	case "provide":
@@ -65,18 +73,21 @@ func regKind[T any](s *di.Scope, mk func() T, kind string, eager bool) {
 	if eager {
 		b.Eager()
 	}
+	if override {
+		b.Override()
+	}
 }
 
 func applyStep(s *di.Scope, st propStep) {
 	switch st.key {
 	case 0:
-		regKind(s, func() *pk1 { return &pk1{} }, st.kind, st.eager)
+		regKind(s, func() *pk1 { return &pk1{} }, st.kind, st.eager, st.override)
 	case 1:
-		regKind(s, func() *pk2 { return &pk2{} }, st.kind, st.eager)
+		regKind(s, func() *pk2 { return &pk2{} }, st.kind, st.eager, st.override)
 	case 2:
-		regKind(s, func() *pk3 { return &pk3{} }, st.kind, st.eager)
+		regKind(s, func() *pk3 { return &pk3{} }, st.kind, st.eager, st.override)
 	case 3:
-		regKind(s, func() pkI { return &pk1{} }, st.kind, st.eager)
+		regKind(s, func() pkI { return &pk1{} }, st.kind, st.eager, st.override)
 	}
 }
 
@@ -87,9 +98,18 @@ type propWant struct {
 
 // wantEager derives what the container must do with a sequence.
 func wantEager(steps []propStep) propWant {
-	winner := map[int]string{} // last non-group registration serves the key
+	winner := map[int]string{} // the registration that serves the key
 	for _, st := range steps {
-		if st.kind != "group" {
+		switch {
+		case st.kind == "group":
+			if st.override {
+				return propWant{panics: true} // members accumulate; nothing to replace
+			}
+		case winner[st.key] != "" && !st.override:
+			return propWant{panics: true} // a second registration must say so
+		case winner[st.key] == "" && st.override:
+			return propWant{panics: true} // nothing to override
+		default:
 			winner[st.key] = st.kind
 		}
 	}
@@ -155,9 +175,10 @@ func TestPropertyEagerSet(t *testing.T) {
 		steps := make([]propStep, 1+rng.IntN(6))
 		for i := range steps {
 			steps[i] = propStep{
-				key:   rng.IntN(len(propNames)),
-				kind:  propKinds[rng.IntN(len(propKinds))],
-				eager: rng.IntN(2) == 0,
+				key:      rng.IntN(len(propNames)),
+				kind:     propKinds[rng.IntN(len(propKinds))],
+				eager:    rng.IntN(2) == 0,
+				override: rng.IntN(3) == 0,
 			}
 		}
 		want := wantEager(steps)

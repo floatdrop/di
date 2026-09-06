@@ -96,12 +96,17 @@ type op struct {
 	// context is far too short for the hooks it will run, which is how the
 	// deadline paths are reached at all.
 	eager bool
+	// override marks a registration Override(). Without it a repeated key in
+	// one scope is a rejection, which is a legitimate outcome and a shallow
+	// one; with it the sequence goes on to exercise what a replacement does
+	// to eagerness, resolution and teardown.
+	override bool
 }
 
 func (o op) String() string {
 	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Shutdown", "Run"}
 	if o.kind == opRegister {
-		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v)", o.scope, keyNames[o.key], o.reg, o.eager)
+		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v, override=%v)", o.scope, keyNames[o.key], o.reg, o.eager, o.override)
 	}
 	if o.kind == opStop && o.eager {
 		return fmt.Sprintf("Stop(s%d, impatient)", o.scope)
@@ -113,11 +118,12 @@ func decode(data []byte) []op {
 	var ops []op
 	for i := 0; i+4 < len(data) && len(ops) < 24; i += 5 {
 		ops = append(ops, op{
-			kind:  opKind(data[i] % uint8(numOpKinds)),
-			scope: data[i+1] % numScopes,
-			key:   data[i+2] % numKeys,
-			reg:   data[i+3] % 12,
-			eager: data[i+4]&1 == 1,
+			kind:     opKind(data[i] % uint8(numOpKinds)),
+			scope:    data[i+1] % numScopes,
+			key:      data[i+2] % numKeys,
+			reg:      data[i+3] % 12,
+			eager:    data[i+4]&1 == 1,
+			override: data[i+4]&2 == 2,
 		})
 	}
 	return ops
@@ -298,7 +304,10 @@ func (m *machine) step(i int, o op) {
 
 	switch o.kind {
 	case opRegister:
-		m.call(label, func() (any, error) { m.register(s, o); return nil, nil })
+		// Registered through Use, so the generators exercise attribution too:
+		// every binding the machine makes carries a module name, and the
+		// collision rejections it provokes name it.
+		m.call(label, func() (any, error) { s.Use(func(sc *di.Scope) { m.register(sc, o) }); return nil, nil })
 
 	case opResolve:
 		f := func() (any, error) { return m.resolve(s, o) }
@@ -563,6 +572,9 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	}
 	if o.eager {
 		b.Eager()
+	}
+	if o.override {
+		b.Override()
 	}
 }
 
