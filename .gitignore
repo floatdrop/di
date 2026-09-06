@@ -30,3 +30,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Site (SvelteKit)
+site/node_modules/
+site/.svelte-kit/
+site/build/

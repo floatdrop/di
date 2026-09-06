@@ -1,0 +1,57 @@
+name: Site
+
+# The landing page and guide under site/, built with SvelteKit and deployed
+# to GitHub Pages. The guide's code blocks are the files of examples/guide,
+# imported at build time, so a change there rebuilds the site, and the Go CI
+# is what keeps them compiling.
+
+on:
+  push:
+    branches: [main]
+    paths: [site/**, examples/guide/**, .github/workflows/pages.yml]
+  pull_request:
+    paths: [site/**, examples/guide/**, .github/workflows/pages.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+        working-directory: site
+      - run: npm run check
+        working-directory: site
+      - run: npm run build
+        working-directory: site
+        env:
+          BASE_PATH: /di
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/build
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

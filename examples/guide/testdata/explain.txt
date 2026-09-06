@@ -1,0 +1,6 @@
+storage.Store: singleton wrapper in root, not built (provided at internal/cache/cache.go:56)
+├╌╌ storage.Store: singleton in root, not built (provided at internal/storage/storage.go:49)
+│   └╌╌ *storage.DB: singleton in root, not built (provided at internal/storage/storage.go:46)
+│       └╌╌ config.Config: value in root, not built (provided at internal/config/config.go:31)
+└╌╌ *cache.Cache: singleton in root, not built (provided at internal/cache/cache.go:55)
+declared by: *api.Handler in root

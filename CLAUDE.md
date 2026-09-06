@@ -21,6 +21,9 @@ go run github.com/campoy/embedmd@v1.0.0 -d README.md   # README in sync?
 go run github.com/campoy/embedmd@v1.0.0 -w README.md   # re-embed after editing examples/
 cd benchmarks && go test -bench . -benchmem   # separate module, see below
 
+cd site && npm ci && npm run check && npm run build   # the guide site; BASE_PATH=/di for Pages
+go test ./examples/guide -update                       # rewrite testdata/explain.txt after rewiring the guide app
+
 go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
 go test -count=1 -coverprofile=all.out .
 go run scripts/generatorgap.go -floor 90 gen.out all.out   # what only hand-written tests reach
@@ -628,6 +631,16 @@ The sequential generators do not explore goroutine interleavings. That is what
   fails on the sync check.
 - **`benchmarks/` is a separate module** with a `replace ../` directive, so the
   library itself stays dependency-free. `samber/do` is a dependency there only.
+- **`site/` is the landing page and guide**, a SvelteKit project prerendered
+  to static HTML with no client-side JavaScript, deployed to GitHub Pages by
+  `.github/workflows/pages.yml` on pushes to `main` that touch it or
+  `examples/guide/`. Its code blocks are the files of `examples/guide`,
+  imported as raw text at build time, so the guide cannot drift from code the
+  Go CI compiles and tests; the `Explain` tree it shows is
+  `examples/guide/testdata/explain.txt`, pinned by a golden test with an
+  `-update` flag. `examples/guide` is a multi-package application (config,
+  storage, cache, mail, api) whose `cmd/api` blocks on signals like the other
+  servers; its tests start it on a random port instead.
 - **`examples/app` and `examples/server` block on signals.** To exercise them,
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,

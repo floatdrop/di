@@ -11,6 +11,9 @@ resolve them with `s.Get[T]()`. No code generation, no dependencies, and
 reflection only where you ask for it: `Wire` reads a constructor's signature
 so that `Validate` can check the graph before anything is built.
 
+[**The guide**](https://floatdrop.github.io/di/) walks through one application
+top to bottom, a file at a time: how it is structured and what it looks like.
+
 ```go
 app := di.New()
 app.Provide(func(s *di.Scope) *DB { return s.Must(sql.Open("postgres", dsn)) }).
