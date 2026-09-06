@@ -77,7 +77,7 @@ func TestMiddlewareGivesEachRequestAScope(t *testing.T) {
 	}).Scoped().OnStop(func(context.Context, *User) error { stops++; return nil })
 
 	var seen []string
-	h := dihttp.Middleware(app)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := dihttp.NewMiddleware(app)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req, ok := di.FromContext(r.Context())
 		if !ok {
 			t.Fatal("no scope in request context")

@@ -62,7 +62,7 @@ func main() {
 		})
 
 	// Request-scoped: declared once here, built once per request scope
-	// created by Middleware, where the *http.Request exists.
+	// the middleware creates, where the *http.Request exists.
 	app.Wire[*User](func(r *http.Request) *User { return &User{Name: r.Header.Get("X-User")} }).Scoped()
 
 	mux := http.NewServeMux()
@@ -83,7 +83,7 @@ func main() {
 	})
 
 	app.Provide(func(s *di.Scope) *http.Server {
-		return &http.Server{Addr: ":8080", Handler: dihttp.Middleware(app)(mux)}
+		return &http.Server{Addr: ":8080", Handler: dihttp.NewMiddleware(app)(mux)}
 	}).
 		Eager().
 		OnStart(func(ctx context.Context, srv *http.Server) error {

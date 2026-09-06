@@ -7,6 +7,19 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Changed
+
+- `dihttp.Middleware` is now the type, `func(http.Handler) http.Handler`, so
+  a server's constructor can take one as a parameter; the function that
+  makes one is `dihttp.NewMiddleware`. A call `dihttp.Middleware(app)` no
+  longer compiles: rename it, or take the middleware as a dependency.
+
+### Added
+
+- `dihttp.Module` registers a `Middleware` over the scope it is applied to.
+  With it the guide's server is a wired constructor with its dependencies
+  declared, and the guide application uses no `Provide` closure at all.
+
 ## [0.11.0] - 2026-09-06
 
 `Validate` no longer needs an adapter to check request scopes: the caller

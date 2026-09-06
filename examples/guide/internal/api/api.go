@@ -1,6 +1,6 @@
 // Package api serves HTTP. The server is a singleton with a lifecycle; what a
 // handler needs per request is Scoped, and is built in the request scope
-// that dihttp.Middleware opens for each request.
+// that the dihttp middleware opens for each request.
 package api
 
 import (
@@ -45,26 +45,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, user.Name)
 }
 
-// NewServer builds the routes. requests is the middleware that gives each
-// request its scope; a handler reaches it through di.FromContext.
-func NewServer(cfg config.Config, requests func(http.Handler) http.Handler) *http.Server {
+// NewServer builds the routes. The middleware gives each request its scope,
+// which a handler reaches through di.FromContext; dihttp.Module provides it.
+func NewServer(cfg config.Config, mw dihttp.Middleware) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
 		req, _ := di.FromContext(r.Context())
 		req.Get[*Handler]().ServeHTTP(w, r)
 	})
-	return &http.Server{Addr: cfg.Addr, Handler: requests(mux)}
+	return &http.Server{Addr: cfg.Addr, Handler: mw(mux)}
 }
 
-// Module registers the request-scoped values and the server. The server's
-// constructor needs the scope itself, to open a request scope per request,
-// so it is a closure rather than a wired constructor.
+// Module registers the request-scoped values and the server, with the hooks
+// that bind, drain and close it.
 func Module(s *di.Scope) {
 	s.Wire[*Caller](NewCaller).Scoped()
 	s.Wire[*Handler](NewHandler).Scoped()
-	s.Provide(func(s *di.Scope) *http.Server {
-		return NewServer(s.Get[config.Config](), dihttp.Middleware(s))
-	}).
+	s.Wire[*http.Server](NewServer).
 		Eager().
 		OnStart(func(_ context.Context, srv *http.Server) error {
 			// Bind synchronously, so a busy port fails Start; serve in the

@@ -1,9 +1,11 @@
 // Package dihttp connects a di.Scope to net/http.
 //
-// [Middleware] gives every request its own child scope holding the
+// A [Middleware] gives every request its own child scope holding the
 // *http.Request, so services that depend on the request are declared once in
 // the application scope as Scoped and built per request. Handlers reach the
-// scope through [di.FromContext].
+// scope through [di.FromContext]. [Module] registers the middleware as a
+// service, so a server's constructor takes it as a parameter; [NewMiddleware]
+// makes one directly.
 package dihttp
 
 import (
@@ -13,14 +15,35 @@ import (
 	"github.com/floatdrop/di"
 )
 
-// Middleware returns a middleware that gives every request its own child
-// scope of s: the *http.Request is registered in it, the scope is attached to
-// the request context, and it is stopped (and detached from s) when the
-// handler returns. Stop failures reach s's observers as EventStop with Err set.
+// Middleware gives every request its own child scope of the application
+// scope: the *http.Request is registered in it, the scope is attached to the
+// request context, and it is stopped (and detached) when the handler returns.
+// Stop failures reach the application scope's observers as EventStop with Err
+// set.
 //
-// The returned function has the usual middleware shape, so it wraps a handler
-// directly or goes into a router's Use.
-func Middleware(s *di.Scope) func(http.Handler) http.Handler {
+// It has the usual middleware shape, so it wraps a handler directly or goes
+// into a router's Use. Take it as a dependency after Module has registered
+// it, or make one with NewMiddleware.
+type Middleware func(http.Handler) http.Handler
+
+// Module registers a Middleware over the scope it is applied to, so that a
+// constructor wired into that scope can take one as a parameter:
+//
+//	app.Use(dihttp.Module, api.Module)
+//
+//	func NewServer(cfg Config, mw dihttp.Middleware) *http.Server {
+//		return &http.Server{Addr: cfg.Addr, Handler: mw(mux)}
+//	}
+//
+// The middleware needs the scope itself, to open a child per request, which
+// is why this is the one closure in the package rather than a wired
+// constructor.
+func Module(s *di.Scope) {
+	s.Provide(func(s *di.Scope) Middleware { return NewMiddleware(s) })
+}
+
+// NewMiddleware makes a Middleware whose request scopes are children of s.
+func NewMiddleware(s *di.Scope) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			req := s.Child("request")

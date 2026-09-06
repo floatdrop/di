@@ -644,7 +644,9 @@ The sequential generators do not explore goroutine interleavings. That is what
   `examples/guide/testdata/explain.txt`, pinned by a golden test with an
   `-update` flag. `examples/guide` is a multi-package application (config,
   storage, cache, mail, api) whose `cmd/api` blocks on signals like the other
-  servers; its tests start it on a random port instead.
+  servers; its tests start it on a random port instead. It uses no `Provide`
+  closure: the one thing that needs the scope, the request-scope middleware,
+  comes from `dihttp.Module` as a `dihttp.Middleware` dependency.
 - **`examples/app` and `examples/server` block on signals.** To exercise them,
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,
