@@ -7,6 +7,12 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-06
+
+`Explain` shows the graph `Wire` declared before it is built. `go doc -all`
+against 0.9.0 adds no symbol and changes no signature, and an upgrade cannot
+break a caller; only the rendering of an unbuilt `Wire` service gains lines.
+
 ### Changed
 
 - `Explain` draws the dependencies a `Wire` binding declares when it has not
@@ -765,7 +771,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/floatdrop/di/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/floatdrop/di/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/floatdrop/di/compare/v0.7.0...v0.8.0
 [#2]: https://github.com/floatdrop/di/issues/2
