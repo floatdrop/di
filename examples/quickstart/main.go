@@ -14,17 +14,22 @@ type DB struct{ dsn string }
 type Repo struct{ db *DB }
 type Server struct{ repo *Repo }
 
+// Plain constructors: their parameters are their dependencies.
+func NewDB(cfg Config) *DB         { return &DB{dsn: cfg.DSN} }
+func NewRepo(db *DB) *Repo         { return &Repo{db: db} }
+func NewServer(repo *Repo) *Server { return &Server{repo: repo} }
+
 func main() {
 	app := di.New()
 
 	app.Value(Config{DSN: "postgres://localhost/app"})
 
-	app.Provide(func(s *di.Scope) *DB { return &DB{dsn: s.Get[Config]().DSN} }).
+	app.Wire[*DB](NewDB).
 		OnStop(func(ctx context.Context, db *DB) error { fmt.Println("db closed"); return nil })
 
-	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+	app.Wire[*Repo](NewRepo)
 
-	app.Provide(func(s *di.Scope) *Server { return &Server{repo: s.Get[*Repo]()} }).
+	app.Wire[*Server](NewServer).
 		Eager().
 		OnStart(func(ctx context.Context, srv *Server) error { fmt.Println("listening"); return nil }).
 		OnStop(func(ctx context.Context, srv *Server) error { fmt.Println("server stopped"); return nil })

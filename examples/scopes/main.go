@@ -14,17 +14,17 @@ type Handler struct {
 	user *User
 }
 
+func NewHandler(db *DB, user *User) *Handler { return &Handler{db: db, user: user} }
+
 func main() {
 	app := di.New()
-	app.Provide(func(*di.Scope) *DB { return &DB{dsn: "postgres://localhost/app"} })
+	app.Wire[*DB](func() *DB { return &DB{dsn: "postgres://localhost/app"} })
 
 	// One child per request: request-scoped values live here, shared
 	// singletons such as *DB are reused from app.
 	req := app.Child("request")
 	req.Value(&User{Name: "ada"})
-	req.Provide(func(s *di.Scope) *Handler {
-		return &Handler{db: s.Get[*DB](), user: s.Get[*User]()}
-	})
+	req.Wire[*Handler](NewHandler)
 
 	h := req.Get[*Handler]()
 	fmt.Println(h.user.Name, "->", h.db.dsn)

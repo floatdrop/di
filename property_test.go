@@ -43,7 +43,7 @@ type pkI interface{ marker() }
 func (*pk1) marker() {}
 
 var (
-	propKinds = []string{"provide", "value", "scoped", "group"}
+	propKinds = []string{"provide", "value", "scoped", "group", "wire"}
 	propNames = []string{"pk1", "pk2", "pk3", "pkI"}
 )
 
@@ -69,6 +69,8 @@ func regKind[T any](s *di.Scope, mk func() T, kind string, eager, override bool)
 		b = s.Provide(func(*di.Scope) T { return mk() }).Scoped()
 	case "group":
 		b = s.Provide(func(*di.Scope) T { return mk() }).Group()
+	case "wire":
+		b = s.Wire[T](mk) // a singleton like provide, with its dependencies declared
 	}
 	if eager {
 		b.Eager()

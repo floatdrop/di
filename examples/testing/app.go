@@ -7,8 +7,8 @@ import "github.com/floatdrop/di"
 type DB struct{ DSN string }
 type Repo struct{ DB *DB }
 
-// Wire registers the production graph into s.
-func Wire(s *di.Scope) {
-	s.Provide(func(*di.Scope) *DB { return &DB{DSN: "postgres://localhost/app"} })
-	s.Provide(func(s *di.Scope) *Repo { return &Repo{DB: s.Get[*DB]()} })
+// Production registers the production graph into s.
+func Production(s *di.Scope) {
+	s.Wire[*DB](func() *DB { return &DB{DSN: "postgres://localhost/app"} })
+	s.Wire[*Repo](func(db *DB) *Repo { return &Repo{DB: db} })
 }

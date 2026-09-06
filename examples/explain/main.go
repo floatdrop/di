@@ -21,16 +21,19 @@ type Server struct {
 	cache *Cache
 }
 
+func NewDB(cfg Config) *DB                       { return &DB{dsn: cfg.DSN} }
+func NewRepo(db *DB) *Repo                       { return &Repo{db: db} }
+func NewCache(db *DB) *Cache                     { return &Cache{db: db} }
+func NewServer(repo *Repo, cache *Cache) *Server { return &Server{repo: repo, cache: cache} }
+
 func main() {
 	app := di.New()
 
 	app.Value(Config{DSN: "postgres://localhost/app"})
-	app.Provide(func(s *di.Scope) *DB { return &DB{dsn: s.Get[Config]().DSN} })
-	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
-	app.Provide(func(s *di.Scope) *Cache { return &Cache{db: s.Get[*DB]()} })
-	app.Provide(func(s *di.Scope) *Server {
-		return &Server{repo: s.Get[*Repo](), cache: s.Get[*Cache]()}
-	}).Eager()
+	app.Wire[*DB](NewDB)
+	app.Wire[*Repo](NewRepo)
+	app.Wire[*Cache](NewCache)
+	app.Wire[*Server](NewServer).Eager()
 
 	if err := app.Start(context.Background()); err != nil {
 		log.Fatal(err)

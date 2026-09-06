@@ -172,8 +172,9 @@ type binding struct {
 	group    bool
 	scoped   bool
 	eager    bool
-	override bool // declared to replace an earlier registration of the key
-	isValue  bool // registered with Value: lifetimes do not apply
+	override bool  // declared to replace an earlier registration of the key
+	isValue  bool  // registered with Value: lifetimes do not apply
+	wants    []key // the parameter types of a Wire constructor; nil for a Provide closure
 	build    func(*Scope) any
 	onStart  func(context.Context, any) error
 	onDrain  func(context.Context, any) error
@@ -1204,6 +1205,69 @@ func (s *Scope) Value[T any](v T) Binding[T] {
 	return Binding[T]{s, b}
 }
 
+// Wire registers a lazily built singleton from a constructor of any arity,
+// whose parameters are its dependencies:
+//
+//	s.Wire[*Server](NewServer) // func NewServer(cfg Config, repo *Repo) *Server
+//
+// ctor must be a non-variadic function returning T, or T and an error, and is
+// read with reflection once, here. Each parameter type is resolved from the
+// same scope view a Provide closure would see, so lifetimes, cycles, hooks and
+// error paths are unchanged; what Wire adds is that the dependencies are known
+// at registration, before anything is built. A non-nil error from ctor aborts
+// the build exactly as s.Must does.
+//
+// T cannot be inferred from an untyped argument, so it is spelled out, and a
+// constructor whose result is not assignable to T is rejected here, with the
+// other configuration errors. A concrete constructor may therefore serve an
+// interface key directly: s.Wire[Repository](NewPGRepo). The build calls ctor
+// through reflect, which costs about 150ns and two allocations per build over
+// a Provide closure; a warm Get is the same code for both.
+func (s *Scope) Wire[T any](ctor any) Binding[T] {
+	fv := reflect.ValueOf(ctor)
+	if !fv.IsValid() || fv.Kind() != reflect.Func {
+		panic(fmt.Sprintf("di: Wire[%s]: constructor must be a function, got %T", typeName(reflect.TypeFor[T]()), ctor))
+	}
+	ft := fv.Type()
+	want := reflect.TypeFor[T]()
+	switch {
+	case ft.IsVariadic():
+		panic(fmt.Sprintf("di: Wire[%s]: constructor %s is variadic", typeName(want), ft))
+	case ft.NumOut() == 0 || ft.NumOut() > 2:
+		panic(fmt.Sprintf("di: Wire[%s]: constructor %s must return T or (T, error)", typeName(want), ft))
+	case !ft.Out(0).AssignableTo(want):
+		panic(fmt.Sprintf("di: Wire[%s]: constructor %s returns %s", typeName(want), ft, typeName(ft.Out(0))))
+	case ft.NumOut() == 2 && ft.Out(1) != errorType:
+		panic(fmt.Sprintf("di: Wire[%s]: constructor %s must return T or (T, error)", typeName(want), ft))
+	}
+	wants := make([]key, ft.NumIn())
+	for i := range wants {
+		wants[i] = key{t: ft.In(i)}
+	}
+	fails := ft.NumOut() == 2
+	b := s.register(key{t: want}, func(s *Scope) any {
+		args := make([]reflect.Value, len(wants))
+		for i, k := range wants {
+			// A nil interface is a legitimate service, and reflect.ValueOf(nil)
+			// is not a value of any type; see as.
+			if v := s.get(k); v != nil {
+				args[i] = reflect.ValueOf(v)
+			} else {
+				args[i] = reflect.Zero(k.t)
+			}
+		}
+		out := fv.Call(args)
+		if fails && !out[1].IsNil() {
+			panic(abort{out[1].Interface().(error)})
+		}
+		return out[0].Interface()
+	})
+	b.wants = wants
+	return Binding[T]{s, b}
+}
+
+var errorType = reflect.TypeFor[error]()
+
 func (b Binding[T]) edit(f func(*binding)) Binding[T] {
 	b.s.mu.Lock()
 	defer b.s.mu.Unlock()
@@ -1229,7 +1293,7 @@ func (b Binding[T]) Group() Binding[T] {
 // noticing. With it the later registration serves the key, and inherits its
 // eagerness, which is the test seam:
 //
-//	s := di.Test(t, app.Wire)
+//	s := di.Test(t, app.Production)
 //	s.Value(&DB{DSN: "sqlite://memory"}).Override()
 //
 // There must be something to override in this scope, or that is rejected too:
@@ -2054,7 +2118,7 @@ type TB interface {
 // errors. Override what you need faked after wiring and before resolving,
 // saying so:
 //
-//	s := di.Test(t, app.Wire)
+//	s := di.Test(t, app.Production)
 //	s.Value(&DB{DSN: "sqlite://memory"}).Override()
 //	repo := s.Get[*Repo]()
 func Test(tb TB, wire ...Module) *Scope {

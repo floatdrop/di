@@ -496,8 +496,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 	// "owes a release" are the same thing, so C9 holds it to exactly one
 	// stop step from here. The shape that has one records itself in the
 	// hook, once the start step has actually succeeded.
-	own := func(sc *di.Scope, v T) T {
-		name := sc.Get[scopeName]().name
+	ownIn := func(name string, v T) T {
 		m.owner.Store(any(v), name)
 		if m.tearing.Load() {
 			m.late.Store(any(v), true)
@@ -507,13 +506,26 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		}
 		return v
 	}
+	own := func(sc *di.Scope, v T) T { return ownIn(sc.Get[scopeName]().name, v) }
 	build := func(sc *di.Scope) T { return own(sc, plain()) }
+	// The same constructor for Wire: it has no scope handle, so the scope's
+	// name arrives as a dependency, which is what Wire is for.
+	wired := func(sn scopeName) T { return ownIn(sn.name, plain()) }
 	var b di.Binding[T]
 	switch o.reg % 6 {
 	case 0:
-		b = s.Provide(build).Worker(work).OnStop(down)
+		if o.wire {
+			b = s.Wire[T](wired).Worker(work).OnStop(down)
+		} else {
+			b = s.Provide(build).Worker(work).OnStop(down)
+		}
 	case 1:
-		b = s.Provide(build).Scoped().Worker(work).OnStop(down)
+		// Scoped through Wire puts a reflect.Call under every child build.
+		if o.wire {
+			b = s.Wire[T](wired).Scoped().Worker(work).OnStop(down)
+		} else {
+			b = s.Provide(build).Scoped().Worker(work).OnStop(down)
+		}
 	case 2:
 		b = s.Provide(func(sc *di.Scope) T { return own(sc, dep(sc)) }).
 			Worker(work).
@@ -758,6 +770,7 @@ func (m *cmachine) render(label string, s *di.Scope) {
 	}
 	_ = s.Explain[*mk1]()
 	_ = s.Explain[mkI]()
+	_ = s.Validate()
 }
 
 // run executes the sequence in three phases: wiring sequentially, then the
