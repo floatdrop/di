@@ -6,8 +6,10 @@
 
 A dependency-injection container for Go 1.27+, built on
 [generic methods](https://go.dev/blog/generic-methods). Register services with
-`s.Provide(...)`, resolve them with `s.Get[T]()`. No reflection over your
-constructors, no code generation, no dependencies.
+`s.Provide(...)` or hand over a plain constructor with `s.Wire[T](NewT)`, and
+resolve them with `s.Get[T]()`. No code generation, no dependencies, and
+reflection only where you ask for it: `Wire` reads a constructor's signature
+so that `Validate` can check the graph before anything is built.
 
 ```go
 app := di.New()
@@ -35,6 +37,11 @@ repo, err := app.Resolve[*Repo]()
 - **The graph is inspectable.** Dependencies are recorded as constructors
   resolve them, so `Explain[T]` prints what a service was built from and what
   needed it, and `Graph` exports the whole thing as Graphviz DOT.
+- **The graph can be checked before it is built.** A constructor handed to
+  `Wire` declares its dependencies by its parameters, and `Validate` walks
+  them: a dependency nothing provides, a cycle, or a singleton that would
+  build a request-scoped service in the wrong scope is reported without a
+  constructor running.
 
 ## Installation
 
@@ -107,6 +114,7 @@ registration and must be called before the scope is first resolved.
 | Call | Registers |
 |---|---|
 | `s.Provide(func(*di.Scope) T)` | A lazily built singleton. `T` is inferred. |
+| `s.Wire[T](NewT)` | A lazily built singleton from a plain constructor. Its parameters are its dependencies; see [Wiring plain constructors](#wiring-plain-constructors). |
 | `s.Value(v)` | An instance you already have. |
 | `s.Use(mods...)` | What the modules register, attributed to them by name. |
 
@@ -128,7 +136,9 @@ app.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })
 
 The compiler checks that `*Repo` satisfies `Reader`, and the two keys share
 one instance because the constructor returns the same pointer. Declare it
-`Scoped()` as well when the target is.
+`Scoped()` as well when the target is. With `Wire` the constructor's result
+need only be assignable to the key, so `app.Wire[Reader](NewRepo)` serves the
+interface directly; a constructor that does not is rejected at registration.
 
 Rules the container enforces:
 
@@ -144,6 +154,100 @@ Rules the container enforces:
 - Combinations that cannot be honoured are rejected when the scope is first
   resolved, whatever order the methods were called in: `Eager` on a scoped
   binding, and `Scoped` on a `Value`.
+
+### Wiring plain constructors
+
+`Provide` takes a closure, which pulls its dependencies with `s.Get` and can
+do anything else it likes; the container learns what it needed by watching it
+run. `Wire` takes a constructor as it is written, `func(A, B) T` or
+`func(A, B) (T, error)`, and reads its parameters as the dependencies. The
+build resolves each one exactly as the closure would have, from the same
+scope, so lifetimes, hooks, cycles and error paths are unchanged. What changes
+is that the dependencies are known at registration, and `Validate` can walk
+them with nothing built:
+
+[embedmd]:# (examples/wire/main.go go)
+```go
+// Wire: plain constructors whose parameters are their dependencies, and a
+// graph that is checked before anything is built.
+package main
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
+)
+
+type Config struct{ DSN string }
+type DB struct{ dsn string }
+type Repo struct{ db *DB }
+type User struct{ name string }
+type Handler struct {
+	repo *Repo
+	user *User
+}
+type Mailer struct{ user *User }
+
+// The constructors know nothing about di.
+func NewDB(cfg Config) *DB                       { return &DB{dsn: cfg.DSN} }
+func NewRepo(db *DB) *Repo                       { return &Repo{db: db} }
+func NewUser(r *http.Request) *User              { return &User{name: r.Header.Get("X-User")} }
+func NewHandler(repo *Repo, user *User) *Handler { return &Handler{repo: repo, user: user} }
+func NewMailer(user *User) *Mailer               { return &Mailer{user: user} }
+
+func main() {
+	app := di.New()
+	app.Value(Config{DSN: "postgres://localhost/app"})
+	app.Wire[*DB](NewDB)
+	app.Wire[*Repo](NewRepo)
+	app.Wire[*User](NewUser).Scoped() // one per request scope, where the *http.Request is
+	app.Wire[*Handler](NewHandler).Scoped()
+
+	// Nothing has been built. From the application scope, *User needs an
+	// *http.Request that only a request scope provides: owed, not wrong.
+	v := app.Validate()
+	fmt.Println("errors:", v.Err())
+	fmt.Println("owed:  ", v.Owed)
+
+	// A request scope provides it, so checked from there nothing is owed.
+	fmt.Println("request scopes:", dihttp.Validate(app))
+
+	// A singleton depending on a request-scoped service would be built in
+	// app, where there is no request. A closure would fail on first use;
+	// the declared graph fails here.
+	app.Wire[*Mailer](NewMailer)
+	fmt.Println(app.Validate().Err())
+}
+```
+
+```
+errors: <nil>
+owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:35)]
+request scopes: <nil>
+di: *net/http.Request: not provided in scope root (needed by [*main.Mailer *main.User]; *main.User is Scoped, so the singleton *main.Mailer would build it there)
+```
+
+| Call | Returns |
+|---|---|
+| `s.Validate()` | A `Validation`. `Err()` joins `Errors`, the failures the declared graph proves. `Owed` lists what a `Scoped` binding needs that this scope does not provide, left to the scope that resolves it. `Unchecked` lists the `Provide` closures. |
+| `dihttp.Validate(app)` | `error`. Validates from a throwaway request scope holding an `*http.Request`, so what is owed there is reported as missing. |
+
+A singleton is checked against the scope that registered it, since that is
+where it is built. A `Scoped` binding is built in whichever scope resolves it,
+so it is checked as if resolved from the scope calling `Validate`, and what
+that scope does not provide is owed rather than wrong: a descendant may
+provide it, as request scopes provide the request. Call `Validate` from that
+descendant, or `dihttp.Validate` for request scopes, to have those checked.
+
+`Wire` reads the signature with reflection once, at registration, and a
+constructor of the wrong shape is rejected there with the other configuration
+errors. The build calls it through `reflect.Call`, which costs about 150ns and
+two allocations per build over a closure; a warm `Get` is the same code for
+both. A slice parameter is a key like any other, not the group for its
+element type, and a constructor that needs the scope itself, for `s.Context()`
+or a conditional dependency, stays a `Provide` closure.
 
 ### Resolution
 
@@ -599,9 +703,10 @@ panic has no enclosing call to unwind to from another goroutine. An
 started, which would be a wait on itself. And no hook may call `Stop` on its
 own scope or an ancestor, for the same reason; `Shutdown` never blocks.
 
-**Known limitations.** The dependency graph is only known once constructors
-run, so a missing dependency of a lazy service surfaces on first resolution,
-or at `Start` if the service is eager; there is no whole-graph validation
+**Known limitations.** A `Provide` closure's dependencies are only known once
+it runs, so a missing dependency of a lazy service surfaces on first
+resolution, or at `Start` if the service is eager. `Validate` checks what
+`Wire` declares and lists the closures as unchecked
 ([#3](https://github.com/floatdrop/di/issues/3)). `Stop` is synchronous with
 one exception: when its own context expires while a hook is still running,
 the missed deadline is reported to the caller and the release finishes on a

@@ -7,6 +7,30 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+Constructors can be handed over as they are written, and the graph they
+declare can be checked before anything is built ([#3]). Nothing existing
+changes shape or behaviour; an upgrade cannot break a caller.
+
+### Added
+
+- `Scope.Wire[T](ctor)` registers a plain constructor, `func(A, B) T` or
+  `func(A, B) (T, error)`, whose parameters are its dependencies. Each is
+  resolved as a `Provide` closure would resolve it, from the same scope, so
+  lifetimes, hooks, cycles and error paths are unchanged. The signature is
+  read with reflection once at registration, where a constructor of the wrong
+  shape is rejected like any other configuration error; a result merely
+  assignable to `T` is accepted, so a concrete constructor can serve an
+  interface key. The build calls the constructor through `reflect.Call`, about
+  150ns and two allocations over a closure. `Provide` is untouched.
+- `Scope.Validate()` walks the declared graph without building and returns a
+  `Validation`: `Errors` (joined by `Err()`) for a dependency nothing provides,
+  a cycle among `Wire` constructors, or a singleton that would build a `Scoped`
+  service in a scope that cannot satisfy it; `Owed` for what a `Scoped`
+  binding needs that the validating scope does not provide, since the scope
+  resolving it may; `Unchecked` for the `Provide` closures.
+- `dihttp.Validate(app)` validates from a throwaway request scope holding an
+  `*http.Request`, so what a request scope would still miss is an error.
+
 ## [0.8.0] - 2026-09-06
 
 Two features and one rule. `Explain` and `Graph` render the dependency graph as
@@ -734,3 +758,4 @@ events.
 [0.3.0]: https://github.com/floatdrop/di/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/floatdrop/di/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/floatdrop/di/releases/tag/v0.1.0
+[#3]: https://github.com/floatdrop/di/issues/3

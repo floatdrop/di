@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
 on generic methods. The library is `di.go`, the rendering of the recorded
-graph in `explain.go`, and the net/http adapter in `dihttp/`; everything
-else is tests, examples, and a separate benchmarks module.
+graph in `explain.go`, the check of the declared graph in `validate.go`, and
+the net/http adapter in `dihttp/`; everything else is tests, examples, and a
+separate benchmarks module.
 
 ## Commands
 
@@ -316,6 +317,37 @@ produced no value and its path is already in the error. Only `Explain` and
 `Graph` read `deps`; nothing in the build, start or stop machine does, so a
 mistake here cannot break resolution.
 
+**`Wire` declares what `Provide` reveals.** `Wire[T](ctor any)` reads the
+constructor's signature with reflection once, at registration, and stores the
+parameter types on the binding as `wants`; the build is an ordinary `build`
+func that calls `s.get` for each and then `reflect.Call`, so everything below
+`register` is shared with `Provide` and the machine never sees the
+difference. `T` is spelled out because it cannot be inferred from `any`, and a
+result merely assignable to `T` is accepted, which is how a concrete
+constructor serves an interface key. The typed alternative, `Wire0..Wire6`
+with `E` variants, was prototyped beside it and dropped: fourteen methods to
+save a repeated type argument, with the compiler checking only an arity the
+reflective form cannot get wrong. Every registration method calls `register`
+directly, because `callsite` counts a fixed number of frames; a `Wire` that
+went through `Provide` would record a site inside `di.go`.
+
+`Validate` walks `wants`. Its node is a binding *in the scope it would be
+built in*, because a `Scoped` binding built in one scope looks its
+dependencies up from there, so the same binding under two holders is two
+nodes and the memo (`done`) is keyed by both. Three modes say what a missing
+dependency means: a singleton on its own turn is `strict`; a `Scoped` binding
+as the validating scope would resolve it is `lenient`, and what is missing is
+`Owed` rather than an error, because a descendant may provide it and no
+scope-position rule can tell an intermediate scope from a leaf -- only the
+caller knows it is one, which is what `dihttp.Validate` knows about a request
+scope; a singleton reached from anything else is `cyclesOnly`, since its own
+turn reports what it misses. A `Scoped` dependency is walked in the caller's
+mode under the same holder, which is how a singleton that would build a
+`Scoped` service its scope cannot satisfy becomes an error -- the one definite
+failure a singleton-captures-Scoped shape has; a capture that is satisfiable
+works at runtime and is not reported. Cycles are reported once, keyed by
+their members, whichever turn finds them.
+
 **A key is served to a whole route, not just to its destination.**
 `binding.used` protects the owner; `markServed` records the key in every scope
 between the resolver and that owner. Both halves matter: an earlier version
@@ -414,6 +446,15 @@ Four layers, each catching a different class:
   bugs. I4 has no exemptions now that every lifetime is tracked. The old
   exemption for aliased keys is what once hid a scope handing out two live
   values for one interface, so do not reintroduce one lightly.
+
+  `op.wire` is a bit that was spare in the fifth byte, so adding it kept every
+  corpus entry's meaning: when set, the shapes that have a constructor to hand
+  over register it through `Wire` instead of `Provide`, in both this machine
+  and the concurrent driver, which is what puts `reflect.Call` under `-race`
+  and gives `Validate` declared edges to walk. `Validate` itself is checked
+  at the end of every sequence (I8: builds nothing, repeatable) and inside the
+  concurrent render lane; what it *says* is pinned by `validate_test.go`,
+  because predicting it here would model the lookup rules a second time.
 - `lifecyclemodel_test.go` — the one place that *does* predict, because the
   argument against predicting does not hold for it. What serves a key depends
   on overrides and the eager rules, and modelling that would be

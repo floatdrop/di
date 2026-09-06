@@ -8,6 +8,8 @@ package dihttp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/floatdrop/di"
@@ -35,4 +37,24 @@ func Middleware(s *di.Scope) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// Validate checks the wiring a request scope of s will resolve, without
+// building anything. A service that depends on the request is declared in the
+// application scope as Scoped and built per request, so from s itself
+// [di.Scope.Validate] can only report the *http.Request as owed. Validate opens
+// one throwaway request scope holding an empty request, validates from there,
+// and reports what is still missing as errors, alongside whatever the
+// application scope's own singletons would fail on. Call it after wiring, or
+// from a test.
+func Validate(s *di.Scope) error {
+	req := s.Child("request")
+	defer func() { _ = req.Stop(context.Background()) }()
+	req.Value(&http.Request{})
+	v := req.Validate()
+	errs := v.Errors
+	for _, owed := range v.Owed {
+		errs = append(errs, fmt.Errorf("di: %s: %w in a request scope", owed, di.ErrNotProvided))
+	}
+	return errors.Join(errs...)
 }
