@@ -7,6 +7,14 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-06
+
+The request-scope middleware becomes a dependency a server's constructor can
+take, so an application needs no `Provide` closure to serve HTTP. `go doc
+-all` against 0.11.0 leaves `di` untouched and changes `dihttp`: `Middleware`
+is now the type, `NewMiddleware` makes one, `Module` registers one. The rename
+is the breaking change, and the reason for the minor bump.
+
 ### Changed
 
 - `dihttp.Middleware` is now the type, `func(http.Handler) http.Handler`, so
@@ -832,7 +840,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/floatdrop/di/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/floatdrop/di/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/floatdrop/di/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/floatdrop/di/compare/v0.9.0...v0.9.1
