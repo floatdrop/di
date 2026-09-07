@@ -240,6 +240,17 @@ internal/api/         <span class="c">the HTTP server and its handlers</span></p
 				<figcaption>app.Explain[storage.Store]()</figcaption>
 				<pre class="plain"><code>{data.explain}</code></pre>
 			</figure>
+			<p>
+				<code>Modules</code> is the same information read by module rather than by service: what
+				each provides, what it needs and who serves it, what it wraps, and which of its
+				constructors are closures. It is derived from the registrations, so there is no
+				manifest to keep in step. This is the whole application, before anything is built,
+				pinned by a test as well.
+			</p>
+			<figure>
+				<figcaption>app.Modules()</figcaption>
+				<pre class="plain"><code>{data.modules}</code></pre>
+			</figure>
 		</section>
 
 		<section id="run">

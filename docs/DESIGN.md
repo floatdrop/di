@@ -317,6 +317,7 @@ that hook's error, so a teardown can never be left half done by one.
 - **Edges, while constructors run.** Each resolution appends the instance it produced to the asking instance's dependency list, which is what `Explain` and `Graph` draw. Nothing in the build, start or stop machinery reads it.
 - **Declared parameters, at registration.** A constructor handed to `Wire` reports its parameter types, so `Validate` can walk the graph before anything is built, and `Explain` can draw a service that does not exist yet.
 - **Events, as things happen.** Observers see a `build`, `start`, `drain` and `stop` event for every instance, with the registration site, the duration and the error if any, and a `shutdown` event with its cause.
+- **The module a registration came from.** `Use` labels every registration with the module that made it, which is what error messages name when two modules collide, and what `Modules` groups by: a per-module list of what is provided, what is needed and which module serves it, what is wrapped, and which constructors are closures. It is derived from the declarations above, so there is no manifest to keep in step.
 
 `Validate` follows the holder rule. A singleton is checked against the scope
 that registered it, since that is where it is built. A `Scoped` registration

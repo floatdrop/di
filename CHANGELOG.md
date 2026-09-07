@@ -7,6 +7,18 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Added
+
+- `Scope.Modules()` renders the modules registered into a scope and its
+  ancestors: what each provides, what it needs and which module serves it,
+  what it wraps, and which of its constructors are closures whose needs are
+  known only when they run. A need only a resolving scope can provide is
+  reported as owed, as `Validate` reports it, and a module's dependency on its
+  own services is left out. It is derived from what registrations already
+  carry, the module label and the parameters `Wire` declares, so there is
+  nothing to declare twice. Keys are named by their package rather than their
+  import path, to read beside the module labels.
+
 ## [0.13.1] - 2026-09-07
 
 Three defects reported in [#35], each with a reproduction, each real. `go

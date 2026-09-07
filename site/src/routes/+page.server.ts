@@ -12,6 +12,7 @@ import cacheTest from '../../../examples/guide/internal/cache/cache_test.go?raw'
 import mail from '../../../examples/guide/internal/mail/mail.go?raw';
 import api from '../../../examples/guide/internal/api/api.go?raw';
 import explain from '../../../examples/guide/testdata/explain.txt?raw';
+import modules from '../../../examples/guide/testdata/modules.txt?raw';
 
 const run = `git clone https://github.com/floatdrop/di && cd di
 go run ./examples/guide/cmd/api &
@@ -36,5 +37,6 @@ export const load = async () => ({
 		api: await highlight(api),
 		run: await highlight(run, 'sh')
 	},
-	explain: explain.trimEnd()
+	explain: explain.trimEnd(),
+	modules: modules.trimEnd()
 });

@@ -57,6 +57,26 @@ func TestExplainMatchesTheGuide(t *testing.T) {
 	}
 }
 
+// The module report the site and README show is this file's output too.
+func TestModulesMatchTheGuide(t *testing.T) {
+	app := di.New()
+	wire(app)
+	got := app.Modules()
+	path := filepath.Join("testdata", "modules.txt")
+	if *update {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(want) {
+		t.Fatalf("Modules output changed; run go test ./examples/guide -update\n%s", got)
+	}
+}
+
 // Start builds the eager services and runs their hooks against a random
 // port; Stop cancels the worker, drains the server and closes the database.
 func TestStartAndStop(t *testing.T) {

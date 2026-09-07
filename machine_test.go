@@ -285,6 +285,24 @@ func (m *machine) render() {
 			m.explain(s, i, k)
 		}
 		m.validate(s, i)
+		m.modules(s, i)
+	}
+}
+
+// modules renders the module report, which walks the same registry as
+// Validate does. A configuration rejection is legitimate for the reason
+// explain gives; anything else, or a report that does not end in a newline,
+// is a defect.
+func (m *machine) modules(s *di.Scope, scope int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, rejected := r.(string); !rejected {
+				m.fail("Modules(s%d) panicked with %v", scope, r)
+			}
+		}
+	}()
+	if out := s.Modules(); out != "" && !strings.HasSuffix(out, "\n") {
+		m.fail("Modules(s%d) rendered %q", scope, out)
 	}
 }
 
