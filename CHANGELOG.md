@@ -7,6 +7,12 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-07
+
+A module dependency report, derived from what registrations already carry.
+`go doc -all` against 0.13.1 adds `Scope.Modules` and changes no signature;
+an upgrade cannot break a caller.
+
 ### Added
 
 - `Scope.Modules()` renders the modules registered into a scope and its
@@ -890,7 +896,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/floatdrop/di/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/floatdrop/di/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/floatdrop/di/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/floatdrop/di/compare/v0.11.0...v0.12.0
