@@ -3,7 +3,10 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 `github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
-on generic methods. The library is `di.go`, the rendering of the recorded
+on generic methods. [`docs/DESIGN.md`](docs/DESIGN.md) explains resolution,
+lifetimes, phases, cycles and teardown with diagrams, and holds the design
+notes that used to be in the README; this file is the working detail behind
+it, and the two are edited together. The library is `di.go`, the rendering of the recorded
 graph in `explain.go`, the check of the declared graph in `validate.go`, and
 the net/http adapter in `dihttp/`; everything else is tests, examples, and a
 separate benchmarks module.

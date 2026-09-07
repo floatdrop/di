@@ -253,8 +253,10 @@ internal/api/         <span class="c">the HTTP server and its handlers</span></p
 				{@html data.code.run}
 			</figure>
 			<p>
-				The <a href="{repo}#readme">README</a> covers the rest: groups, observers, the rules
-				the container enforces, and the design notes on concurrency and shutdown.
+				The <a href="{repo}#readme">README</a> covers the rest: groups, observers, and the
+				rules the container enforces.
+				<a href="{repo}/blob/main/docs/DESIGN.md">How it works</a> goes the other way, from
+				<code>Get</code> to a value: lifetimes, phases, cycles and shutdown, with diagrams.
 			</p>
 		</section>
 	</main>

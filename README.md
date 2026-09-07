@@ -13,6 +13,8 @@ so that `Validate` can check the graph before anything is built.
 
 [**The guide**](https://floatdrop.github.io/di/) walks through one application
 top to bottom, a file at a time: how it is structured and what it looks like.
+[**How it works**](docs/DESIGN.md) is the other direction: what happens
+between `s.Get[T]()` and a value, with diagrams.
 
 ```go
 app := di.New()
@@ -866,8 +868,8 @@ dependencies it declares are drawn under it with dashed edges, each continuing
 as a recorded tree where it has been built and as a declared one where it has
 not, and `declared by:` names the unbuilt services that declare it. A closure
 that has not run ends its branch, which is the other half of the
-[known limitation](#design-notes) below: for closures the graph is what ran,
-not what could run.
+[known limitation](docs/DESIGN.md#known-limitations): for closures the graph
+is what ran, not what could run.
 
 ```
 *main.Handler: scoped in root, not built (provided at main.go:35)
@@ -962,41 +964,6 @@ func TestRepo(t *testing.T) {
 	}
 }
 ```
-
-## Design notes
-
-**Why generic methods.** Before Go 1.27 a typed container had to expose
-package-level functions such as `do.Invoke[T](injector)`, and every variation
-became another function. With generic methods the whole API lives on one
-concrete type and reads left to right. The trade-off is that generic methods
-cannot appear on interfaces, so `*di.Scope` is concrete; substitute
-dependencies through scopes rather than by mocking the container.
-
-**Concurrency.** Resolution is safe from many goroutines, including
-goroutines a constructor starts for itself. Each singleton is built at most
-once however many resolutions race for it, and the resolution path is an
-immutable linked list, so parallel branches share nothing. Once the scope is
-running, a resolution returns only a service whose `OnStart` has finished,
-waiting if another goroutine is starting it. A cycle is reported as
-`di.ErrCycle` even when the two halves are being built concurrently, which
-needs a wait-for graph rather than the per-branch path alone.
-
-Three re-entrancy limits apply. In a goroutine a constructor started, use
-`Resolve` rather than `Get`: `Get` reports failure by panicking, and that
-panic has no enclosing call to unwind to from another goroutine. An
-`OnStart` hook must not resolve a service that depends on the one being
-started, which would be a wait on itself. And no hook may call `Stop` on its
-own scope or an ancestor, for the same reason; `Shutdown` never blocks.
-
-**Known limitations.** A `Provide` closure's dependencies are only known once
-it runs, so a missing dependency of a lazy service surfaces on first
-resolution, or at `Start` if the service is eager. `Validate` checks what
-`Wire` declares and lists the closures as unchecked
-([#3](https://github.com/floatdrop/di/issues/3)). `Stop` is synchronous with
-one exception: when its own context expires while a hook is still running,
-the missed deadline is reported to the caller and the release finishes on a
-goroutine of its own, reaching observers. A build that completes after its
-scope stopped is undone the same way.
 
 ## Performance
 
