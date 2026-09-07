@@ -1,0 +1,20 @@
+config.Module
+  provides   config.Config
+storage.Module
+  provides   *storage.db, storage.Store
+  needs      config.Config ← config.Module
+cache.Module
+  provides   *cache.cache
+  wraps      storage.Store ← storage.Module
+mail.Module
+  provides   *mail.Mailer
+dihttp.Module
+  provides   dihttp.Middleware
+  unchecked  dihttp.Middleware (closures: needs known when they run)
+api.Module
+  provides   *api.Caller, *api.Users, *api.Health, *http.Server
+  needs      *http.Request ← owed to a resolving scope
+             storage.Store ← cache.Module
+             *mail.Mailer ← mail.Module
+             config.Config ← config.Module
+             dihttp.Middleware ← dihttp.Module

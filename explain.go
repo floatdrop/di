@@ -424,3 +424,133 @@ func dotLabel(parts ...string) string {
 	}
 	return `"` + strings.Join(esc, `\n`) + `"`
 }
+
+// Modules renders the modules registered into this scope and its ancestors:
+// what each provides, what it needs and which module serves it, what it
+// wraps, and which of its constructors are closures whose needs are unknown
+// until they run. A need only a resolving scope can provide, as a request
+// scope provides the request, is reported as owed, the way Validate reports
+// it. A dependency a module serves for itself is not a module dependency and
+// is left out. Registrations made outside any module are grouped as
+// "registered directly".
+//
+// Like Explain, it builds nothing and commits pending registrations the way
+// a resolution would, so a configuration this scope would reject is reported
+// by the same panic.
+func (s *Scope) Modules() string {
+	var chain []*state
+	for st := s.state; st != nil; st = st.parent {
+		st.freeze()
+		chain = append(chain, st)
+	}
+	type module struct {
+		name                              string
+		provides, needs, wraps, unchecked []string
+		seen                              map[string]bool
+	}
+	var order []*module
+	byName := map[string]*module{}
+	get := func(name string) *module {
+		if m := byName[name]; m != nil {
+			return m
+		}
+		m := &module{name: name, seen: map[string]bool{}}
+		byName[name] = m
+		order = append(order, m)
+		return m
+	}
+	// One set per module, keyed by section as well as line: a key is listed
+	// under provides and then again under unchecked, and both lines stay.
+	add := func(m *module, list *[]string, line string) {
+		id := fmt.Sprintf("%p:%s", list, line)
+		if !m.seen[id] {
+			m.seen[id] = true
+			*list = append(*list, line)
+		}
+	}
+	// Ancestors first, so the report reads top-down like the scope tree and
+	// a module is listed where it was first used.
+	for _, st := range slices.Backward(chain) {
+		for _, b := range st.live() {
+			m := get(moduleLabel(b))
+			if b.inner != nil {
+				add(m, &m.wraps, shortName(b.key.t)+" ← "+moduleLabel(b.inner))
+			} else {
+				add(m, &m.provides, shortName(b.key.t))
+			}
+			switch {
+			case b.isValue:
+				continue
+			case b.wants == nil:
+				add(m, &m.unchecked, shortName(b.key.t))
+				continue
+			}
+			holder := st
+			if b.scoped {
+				holder = s.state
+			}
+			for _, k := range b.wants {
+				dep, _ := (&Scope{state: holder}).lookup(k)
+				var from string
+				switch {
+				case dep == nil && b.scoped:
+					from = "owed to a resolving scope"
+				case dep == nil:
+					from = "not provided"
+				case moduleLabel(dep) == m.name:
+					continue // the module's own business
+				default:
+					from = moduleLabel(dep)
+				}
+				add(m, &m.needs, shortName(k.t)+" ← "+from)
+			}
+		}
+	}
+
+	var sb strings.Builder
+	for _, m := range order {
+		sb.WriteString(m.name + "\n")
+		section := func(label string, lines []string) {
+			for i, l := range lines {
+				if i == 0 {
+					fmt.Fprintf(&sb, "  %-10s %s\n", label, l)
+				} else {
+					fmt.Fprintf(&sb, "  %-10s %s\n", "", l)
+				}
+			}
+		}
+		if len(m.provides) > 0 {
+			section("provides", []string{strings.Join(m.provides, ", ")})
+		}
+		section("wraps", m.wraps)
+		section("needs", m.needs)
+		if len(m.unchecked) > 0 {
+			section("unchecked", []string{strings.Join(m.unchecked, ", ") + " (closures: needs known when they run)"})
+		}
+	}
+	return sb.String()
+}
+
+// moduleLabel names the module a binding was registered from, or says that
+// there was none.
+func moduleLabel(b *binding) string {
+	if b.module == "" {
+		return "registered directly"
+	}
+	return b.module
+}
+
+// shortName is a key with its package named the way code names it,
+// storage.Store rather than the import path, to match the module labels
+// beside it. Explain keeps the full path, since an error message must not
+// confuse two packages of one name; a module report is read by a person
+// who knows their packages.
+func shortName(t reflect.Type) string {
+	if t.Kind() == reflect.Pointer {
+		return "*" + shortName(t.Elem())
+	}
+	if t.PkgPath() != "" {
+		return t.PkgPath()[strings.LastIndex(t.PkgPath(), "/")+1:] + "." + t.Name()
+	}
+	return t.String()
+}

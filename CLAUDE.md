@@ -342,7 +342,14 @@ back to the recorded tree wherever a declared dependency has been built;
 (`peek`, a lookup without the freeze), because it walks every scope of the
 container and a root `Explain` must not be the call that rejects a child's
 pending batch. `Graph` is unchanged: it lists built instances only, and a
-built `Wire` instance's recorded edges are its declared ones.
+built `Wire` instance's recorded edges are its declared ones. `Modules` is
+the third renderer, grouping live bindings by `binding.module` and resolving
+each binding's `wants` from its holder to name the serving module; keys use
+`shortName`, package-qualified rather than import-path-qualified, because a
+module report is read beside module labels of the same shape. Its dedupe set
+is keyed by section as well as line, since a closure's key is listed under
+"provides" and again under "unchecked". The guide pins its report in
+`examples/guide/testdata/modules.txt` next to the Explain golden.
 
 **`Wrap` binds at registration.** `Wrap[T]` finds what serves `T` when it
 is called -- `state.current`, which reads this scope's pending batch and

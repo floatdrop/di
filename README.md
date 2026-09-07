@@ -833,7 +833,9 @@ the registration site, the duration and the error, if any.
 
 A `Provide` closure's dependencies are learned by watching it resolve them,
 and a `Wire` constructor's are declared. What has been built has a recorded
-graph, what was wired has a declared one, and two methods render them.
+graph, what was wired has a declared one, and three methods render them:
+`Explain` for one service, `Graph` for everything built, and `Modules` for
+what each module provides and needs.
 
 `Explain[T]` is the dependency tree of one service, with each node's lifetime,
 its scope, how far through its lifecycle it is and where it was registered,
@@ -862,7 +864,38 @@ DOT, one cluster per scope:
 go run ./examples/explain | dot -Tsvg > graph.svg
 ```
 
-Neither builds anything. A service that has not been resolved is reported
+`Modules` is the report for the person composing an application: which
+module provides which keys, what each needs and which module serves it, what
+it wraps, and which of its constructors are closures whose needs are known
+only when they run. A need only a resolving scope can provide is owed, as
+`Validate` reports it. This is the guide application's, before anything is
+built:
+
+[embedmd]:# (examples/guide/testdata/modules.txt)
+```txt
+config.Module
+  provides   config.Config
+storage.Module
+  provides   *storage.db, storage.Store
+  needs      config.Config ← config.Module
+cache.Module
+  provides   *cache.cache
+  wraps      storage.Store ← storage.Module
+mail.Module
+  provides   *mail.Mailer
+dihttp.Module
+  provides   dihttp.Middleware
+  unchecked  dihttp.Middleware (closures: needs known when they run)
+api.Module
+  provides   *api.Caller, *api.Users, *api.Health, *http.Server
+  needs      *http.Request ← owed to a resolving scope
+             storage.Store ← cache.Module
+             *mail.Mailer ← mail.Module
+             config.Config ← config.Module
+             dihttp.Middleware ← dihttp.Module
+```
+
+None of the three builds anything. A service that has not been resolved is reported
 with its registration and left alone; if it was registered with `Wire`, the
 dependencies it declares are drawn under it with dashed edges, each continuing
 as a recorded tree where it has been built and as a declared one where it has
