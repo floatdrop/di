@@ -7,6 +7,13 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-07
+
+Three defects reported in [#35], each with a reproduction, each real. `go
+doc -all` against 0.13.0 is unchanged in `di` and `dihttp`; an upgrade cannot
+break a caller, and every fix turns a panic, a false rejection or a lost
+error into the behaviour the documentation already promised.
+
 ### Fixed
 
 - `Wire` and `Wrap` accepted a result merely assignable to the key, such as a
@@ -871,7 +878,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/floatdrop/di/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/floatdrop/di/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/floatdrop/di/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/floatdrop/di/compare/v0.10.0...v0.11.0
