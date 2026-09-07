@@ -1,5 +1,6 @@
 // Package cache puts a cache in front of the store. It replaces nothing:
-// the store keeps its registration and hooks, and this wraps it.
+// the store keeps its registration and hooks, and this wraps it. The package
+// exports only its Module.
 package cache
 
 import (
@@ -10,30 +11,31 @@ import (
 	"github.com/floatdrop/di/examples/guide/internal/storage"
 )
 
-type Cache struct {
+type cache struct {
 	mu    sync.Mutex
 	users map[string]storage.User
-	Hits  int
+	hits  int
 }
 
-func New() *Cache { return &Cache{users: map[string]storage.User{}} }
+func newCache() *cache { return &cache{users: map[string]storage.User{}} }
 
-// CachingStore is a Store that asks the one it wraps only on a miss.
-type CachingStore struct {
+// cachingStore is a Store that asks the one it wraps only on a miss, and
+// forwards what it does not change.
+type cachingStore struct {
 	next  storage.Store
-	cache *Cache
+	cache *cache
 }
 
-// NewCachingStore takes the store it wraps first, then its dependencies.
-func NewCachingStore(next storage.Store, c *Cache) storage.Store {
-	return &CachingStore{next: next, cache: c}
+// newCachingStore takes the store it wraps first, then its dependencies.
+func newCachingStore(next storage.Store, c *cache) storage.Store {
+	return &cachingStore{next: next, cache: c}
 }
 
-func (s *CachingStore) Find(ctx context.Context, id string) (storage.User, error) {
+func (s *cachingStore) Find(ctx context.Context, id string) (storage.User, error) {
 	s.cache.mu.Lock()
 	user, ok := s.cache.users[id]
 	if ok {
-		s.cache.Hits++
+		s.cache.hits++
 	}
 	s.cache.mu.Unlock()
 	if ok {
@@ -49,9 +51,11 @@ func (s *CachingStore) Find(ctx context.Context, id string) (storage.User, error
 	return user, nil
 }
 
+func (s *cachingStore) Ping(ctx context.Context) error { return s.next.Ping(ctx) }
+
 // Module registers the cache and wraps whatever serves Store by now. Order
 // matters: this module comes after storage's.
 func Module(s *di.Scope) {
-	s.Wire[*Cache](New)
-	s.Wrap[storage.Store](NewCachingStore)
+	s.Wire[*cache](newCache)
+	s.Wrap[storage.Store](newCachingStore)
 }
