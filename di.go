@@ -505,7 +505,7 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 			if err == nil {
 				return
 			}
-			if rctx.Err() != nil && errors.Is(err, context.Canceled) {
+			if rctx.Err() != nil && onlyCancellation(err) {
 				return // we cancelled it and it reported just that
 			}
 			// Any other error is the worker's own failure and goes to
@@ -1279,7 +1279,7 @@ func (s *Scope) Wire[T any](ctor any) Binding[T] {
 		for i, k := range wants {
 			args[i] = argument(s.get(k), k.t)
 		}
-		return call(fv, args, fails)
+		return call(fv, args, fails, want)
 	})
 	b.wants = wants
 	return Binding[T]{s, b}
@@ -1352,7 +1352,7 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 		for i, k := range wants {
 			args[i+1] = argument(s.get(k), k.t)
 		}
-		return call(fv, args, fails)
+		return call(fv, args, fails, want)
 	})
 	b.inner, b.innerAt, b.wants, b.scoped = inner, at, wants, inner.scoped
 	inner.wrappedBy.Store(b)
@@ -1386,16 +1386,52 @@ func argument(v any, t reflect.Type) reflect.Value {
 }
 
 // call runs a constructor through reflect and turns its error, if it
-// declared one and returned it, into the abort that s.Must would raise.
-func call(fv reflect.Value, args []reflect.Value, fails bool) any {
+// declared one and returned it, into the abort that s.Must would raise. The
+// value is stored as the registered type, not the constructor's result type:
+// registration accepted any result assignable to the key, and a chan int
+// stored for a <-chan int key would pass every check until Get asserted it.
+// An interface key needs no conversion, since the assertion to an interface
+// is what accepts the concrete value.
+func call(fv reflect.Value, args []reflect.Value, fails bool, want reflect.Type) any {
 	out := fv.Call(args)
 	if fails && !out[1].IsNil() {
 		panic(abort{out[1].Interface().(error)})
 	}
-	return out[0].Interface()
+	v := out[0]
+	if v.Type() != want && want.Kind() != reflect.Interface {
+		v = v.Convert(want)
+	}
+	return v.Interface()
 }
 
 var errorType = reflect.TypeFor[error]()
+
+// onlyCancellation reports whether err says nothing beyond context.Canceled:
+// the cancellation itself, or wrappings of it. A worker that returns
+// errors.Join(ctx.Err(), failure) after being cancelled is reporting the
+// failure, and errors.Is would have called the whole thing a cancellation.
+func onlyCancellation(err error) bool {
+	if err == context.Canceled {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		errs := u.Unwrap()
+		if len(errs) == 0 {
+			return false
+		}
+		for _, e := range errs {
+			if !onlyCancellation(e) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		inner := u.Unwrap()
+		return inner != nil && onlyCancellation(inner)
+	}
+	return false
+}
 
 func (b Binding[T]) edit(f func(*binding)) Binding[T] {
 	b.s.mu.Lock()

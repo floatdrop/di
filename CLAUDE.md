@@ -370,7 +370,10 @@ bound rather than looked up, for both `Validate` and `Explain`.
 `Validate` walks `wants`. Its node is a binding *in the scope it would be
 built in*, because a `Scoped` binding built in one scope looks its
 dependencies up from there, so the same binding under two holders is two
-nodes and the memo (`done`) is keyed by both. Three modes say what a missing
+nodes and the memo (`done`) is keyed by both -- and so is the path used for
+cycle detection (`step`), which once compared bindings alone and called a
+valid graph that visits one `Scoped` binding from a child and again from the
+root a cycle (#35). Three modes say what a missing
 dependency means: a singleton on its own turn is `strict`; a `Scoped` binding
 as the validating scope would resolve it is `lenient`, and what is missing is
 `Owed` rather than an error, because a descendant may provide it and no
@@ -441,7 +444,10 @@ with an `OnStop` for an `OnStart` that never finished.
   which is why the fallback still has to be a bounded wait rather than a
   promise.
 - Every user hook is called through `callHook` (or `startClaimed`'s
-  equivalent), which turns a panic into that hook's error. A hook can panic by
+  equivalent), which turns a panic into that hook's error. A cancelled `Worker`'s return is dropped only when it says
+  nothing beyond `context.Canceled` (`onlyCancellation` walks the error
+  tree); `errors.Is` matched `errors.Join(ctx.Err(), failure)` and dropped
+  the failure with it (#35). A hook can panic by
   resolving something whose registration is rejected -- the rejection is a
   panic, and `Resolve` re-panics anything that is not an `abort`. Letting one
   escape `Stop` leaves `stopOnce` claimed and never settled, which is a hang

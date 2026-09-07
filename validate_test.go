@@ -290,3 +290,37 @@ func TestValidateWithStubsBuildsNothing(t *testing.T) {
 		t.Fatalf("err=%v built=%v", err, built)
 	}
 }
+
+type valSrc struct{}
+type valScopedSvc struct{ src *valSrc }
+type valSingleton struct{ svc *valScopedSvc }
+
+// A valid graph can visit one Scoped binding in two scopes: from a child,
+// the scoped service needs a source the child provides, whose constructor
+// needs a root singleton, which needs the same scoped service built in the
+// root, which needs the root's source. Run time resolves it, since a path
+// node is a binding in a holder; Validate compared bindings alone and called
+// it a cycle. (issue 35)
+func TestValidateTellsScopedInstancesApartByHolder(t *testing.T) {
+	app := di.New()
+	app.Value(&valSrc{})
+	app.Wire[*valScopedSvc](func(s *valSrc) *valScopedSvc { return &valScopedSvc{s} }).Scoped()
+	app.Wire[*valSingleton](func(s *valScopedSvc) *valSingleton { return &valSingleton{s} })
+	child := app.Child("child")
+	child.Wire[*valSrc](func(s *valSingleton) *valSrc { return s.svc.src })
+
+	if err := child.Validate().Err(); err != nil {
+		t.Fatalf("a graph the runtime resolves must validate: %v", err)
+	}
+	if _, err := child.Resolve[*valScopedSvc](); err != nil {
+		t.Fatalf("runtime: %v", err)
+	}
+
+	// The same binding twice under one holder is still a cycle.
+	cyc := di.New()
+	cyc.Wire[*valScopedSvc](func(*valSingleton) *valScopedSvc { return nil }).Scoped()
+	cyc.Wire[*valSingleton](func(*valScopedSvc) *valSingleton { return nil }).Scoped()
+	if !errors.Is(cyc.Validate().Err(), di.ErrCycle) {
+		t.Fatal("a real cycle among scoped bindings must still be reported")
+	}
+}
