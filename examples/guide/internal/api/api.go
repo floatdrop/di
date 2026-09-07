@@ -55,13 +55,15 @@ func (u *Users) Greet(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// Health needs nothing from the request, so it is an ordinary singleton.
-type Health struct{ db *storage.DB }
+// Health needs nothing from the request, so it is an ordinary singleton. It
+// asks the store, which is the storage package's contract; the connection
+// behind it is that package's own business.
+type Health struct{ store storage.Store }
 
-func NewHealth(db *storage.DB) *Health { return &Health{db: db} }
+func NewHealth(store storage.Store) *Health { return &Health{store: store} }
 
 func (h *Health) Check(w http.ResponseWriter, r *http.Request) {
-	if err := h.db.Ping(r.Context()); err != nil {
+	if err := h.store.Ping(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}

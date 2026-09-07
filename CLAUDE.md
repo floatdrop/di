@@ -647,7 +647,11 @@ The sequential generators do not explore goroutine interleavings. That is what
   servers; its tests start it on a random port instead. It uses no `Provide`
   closure: the one thing that needs the scope, the request-scope middleware,
   comes from `dihttp.Module` as a `dihttp.Middleware` dependency, and routes
-  resolve their handler types through `dihttp.Handle((*Users).Show)`.
+  resolve their handler types through `dihttp.Handle((*Users).Show)`. Its
+  packages export only their contract and `Module`: keys are types, so an
+  unexported type is a private service, which is the whole privacy model
+  (the `Private()` marker and child-scope exports were considered and are
+  not needed; see the Modules section of the README).
 - **`examples/app` and `examples/server` block on signals.** To exercise them,
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,

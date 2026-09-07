@@ -614,6 +614,24 @@ Without the rule the second `*DB` would have won silently and rewired
 of their own declare distinct types (`type CacheDB struct{ *DB }`); a module
 that means to replace another's registration says `Override()`.
 
+Privacy is Go's. Keys are types, so a service whose type is unexported can be
+named, and therefore resolved, overridden, shadowed or wrapped, only by the
+package that declares it. A module exports its contract and its `Module`
+function and keeps the rest lowercase:
+
+```go
+type db struct{ dsn string }               // only this package can say Get[*db]()
+
+func Module(s *di.Scope) {
+    s.Wire[*db](newDB).OnStop(func(_ context.Context, db *db) error { return db.Close() })
+    s.Wire[Store](newPGStore)                  // the exported contract
+}
+```
+
+`Explain`, `Graph` and `Validate` still see and check the private node. What
+a test can override is exactly what is exported: the contract, or the
+configuration the private service is built from.
+
 ### Lifecycle
 
 `Start` builds every `Eager` binding, then runs `OnStart` hooks in build order.

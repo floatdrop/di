@@ -79,18 +79,24 @@ internal/api/         <span class="c">the HTTP server and its handlers</span></p
 		<section id="constructors">
 			<h2><span class="n">2</span>Constructors and a module</h2>
 			<p>
-				<code>NewDB</code> and <code>NewPGStore</code> take what they need as parameters and
-				return what they make; <code>NewDB</code> can fail. Neither imports the container.
+				<code>newDB</code> and <code>newPGStore</code> take what they need as parameters and
+				return what they make; <code>newDB</code> can fail. Neither imports the container.
 				Nothing in this application needs the general form, <code>Provide</code>, which takes
 				a closure over the scope; the two mix freely when something does.
 			</p>
 			<p>
 				<code>Module</code> hands them over with <code>Wire</code>. The type argument is the
-				key the service is served under: <code>*DB</code> for the connection, and the
-				<code>Store</code> interface for the store, since a <code>*PGStore</code> is assignable
+				key the service is served under: <code>*db</code> for the connection, and the
+				<code>Store</code> interface for the store, since a <code>*pgStore</code> is assignable
 				to it. The parameters of a wired constructor are its dependencies, which is how the
 				container knows the graph before anything is built. Hooks are typed on the value they
 				receive and run when the application starts and stops.
+			</p>
+			<p>
+				Privacy is Go's. Keys are types, so <code>*db</code>, which only this package can
+				name, is a service only this package can resolve. The package exports its contract,
+				<code>Store</code> and <code>User</code>, and its <code>Module</code>; the connection
+				has a lifecycle the container runs and is otherwise nobody else's business.
 			</p>
 			<figure>
 				<figcaption>internal/storage/storage.go</figcaption>
@@ -184,9 +190,12 @@ internal/api/         <span class="c">the HTTP server and its handlers</span></p
 			<p>
 				<code>Wrap</code> composes over whatever serves a key. The wrapper takes that value
 				first and its other dependencies after it. The store keeps its registration and its
-				hooks, is built first, and is stopped after the wrapper. The one thing to get right is
-				module order: the cache's module comes after storage's. A wrapper registered in a
-				child scope applies to that scope and its descendants only.
+				hooks, is built first, and is stopped after the wrapper, and the wrapper forwards what
+				it does not change. The one thing to get right is module order: the cache's module
+				comes after storage's. A wrapper registered in a child scope applies to that scope and
+				its descendants only. Like storage, this package exports only its <code>Module</code>:
+				a cross-cutting concern composes over an exported contract, never over a package's
+				internals.
 			</p>
 			<figure>
 				<figcaption>internal/cache/cache.go</figcaption>
@@ -209,7 +218,7 @@ internal/api/         <span class="c">the HTTP server and its handlers</span></p
 			</figure>
 			<p>
 				The wrapper is tested through the same modules, with nothing faked: two lookups, one
-				hit.
+				hit. It is an internal test, because only the cache package can name its own cache.
 			</p>
 			<figure>
 				<figcaption>internal/cache/cache_test.go</figcaption>
