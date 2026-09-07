@@ -26,8 +26,8 @@ One registration can produce **zero, one, or many** instances:
 | It produces | When |
 |---|---|
 | zero instances | nobody ever asks for the key |
-| one instance | the default, a singleton |
-| one per scope | the registration is marked `Scoped()` |
+| one instance | the default, a singleton: every scope that asks gets the same one |
+| many instances, one per scope | the registration is marked `Scoped()`: every scope that asks gets its own |
 
 That is the whole of `Scoped`. Everything below is about which instance a
 given `Get` lands on.
