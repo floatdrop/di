@@ -255,6 +255,9 @@ context is cancelled, `SIGINT` or `SIGTERM` arrives, or `Shutdown` is called.
 Then it stops everything with a bounded context. A second signal during the
 stop cancels that context, so a hung hook cannot keep the process alive.
 
+<details>
+<summary><code>examples/server/main.go</code>, an HTTP server with OnStart, OnDrain and OnStop, run with a stop timeout</summary>
+
 [embedmd]:# (examples/server/main.go go)
 ```go
 // Graceful shutdown of an HTTP server.
@@ -324,6 +327,8 @@ func main() {
 	}
 }
 ```
+
+</details>
 
 ### Scopes
 
@@ -457,6 +462,9 @@ resolves the key say which one it wants: the selector is an ordinary
 constructor whose parameter is the key, and `Scoped()` leaves the choice to
 the resolving scope.
 
+<details>
+<summary><code>examples/instances/main.go</code>, a primary and a replica by type, and configured shards by a scoped selector</summary>
+
 [embedmd]:# (examples/instances/main.go go)
 ```go
 // More than one instance of a type: a defined type names each one while the
@@ -554,6 +562,8 @@ func main() {
 }
 ```
 
+</details>
+
 Rules and traps:
 
 - Use `Wire` for the selector rather than `Provide`. Its parameter declares
@@ -628,6 +638,9 @@ The wrapped registration keeps its hooks and lifetime. It is built first, as
 the wrapper's dependency, and stopped after it. Wrappers chain in
 registration order. uber/fx calls this `Decorate`.
 
+<details>
+<summary><code>examples/wrap/main.go</code>, the program that prints the output below</summary>
+
 [embedmd]:# (examples/wrap/main.go go)
 ```go
 // Wrap: compose over a service without replacing it. The wrapped
@@ -682,6 +695,8 @@ func main() {
 	_ = app.Stop(context.Background())
 }
 ```
+
+</details>
 
 ```
 app:   row 1
@@ -743,6 +758,9 @@ would build a request-scoped service in the wrong scope. A closure's
 dependencies are unknown until it runs, so `Provide` registrations are listed
 as unchecked rather than checked.
 
+<details>
+<summary><code>examples/wire/main.go</code>, the program that prints the output below</summary>
+
 [embedmd]:# (examples/wire/main.go go)
 ```go
 // Wire: plain constructors whose parameters are their dependencies, and a
@@ -803,6 +821,8 @@ func main() {
 	fmt.Println(app.Validate().Err())
 }
 ```
+
+</details>
 
 ```
 *main.Handler: scoped in root, not built (provided at main.go:35)
@@ -914,6 +934,9 @@ what ran, not what could run
     └╌╌ *net/http.Request: not provided
 ```
 
+<details>
+<summary><code>examples/explain/main.go</code>, the program that prints the first two trees in this section</summary>
+
 [embedmd]:# (examples/explain/main.go go)
 ```go
 // Inspecting the graph: what a service was built from, and what needed it.
@@ -971,6 +994,8 @@ func main() {
 	fmt.Print(app.Graph())
 }
 ```
+
+</details>
 
 #### Observability
 
