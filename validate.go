@@ -143,19 +143,32 @@ const (
 	cyclesOnly             // a singleton reached from elsewhere: its own turn reports what it misses
 )
 
+// step is one node on a walk's path: a binding in the scope it would be
+// built in. The holder is part of the identity, as it is on a resolution
+// path at run time: a Scoped binding reached again under another holder is
+// another instance, not a cycle, and a valid graph can visit one twice.
+type step struct {
+	b      *binding
+	holder *state
+}
+
 // walk follows b's declared dependencies from holder, the scope b would be
 // built in. A Scoped dependency is built in the same holder and walked in the
 // same mode. A singleton dependency is built in its own scope, and its
 // missing dependencies are that scope's report on its own turn, so it is
 // walked only for cycles. Cycles are reported once, by their members.
-func (v *validator) walk(b *binding, holder *state, md mode, path []*binding) {
+func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 	node := visit{b, holder, md}
 	if v.done[node] {
 		return
 	}
-	path = append(path, b)
+	path = append(path, step{b, holder})
 	for _, e := range declared(b, holder) {
 		k, dep, owner := e.k, e.b, e.owner
+		next := step{dep, owner}
+		if dep != nil && dep.scoped {
+			next.holder = holder
+		}
 		switch {
 		case dep == nil && md == lenient && v.stubs[k]:
 			// The resolving scope will hold it, the caller says, and a value
@@ -163,8 +176,8 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []*binding) {
 			// builds in its own scope, where that scope's values are not.
 		case dep == nil:
 			v.missing(k, b, holder, md, path)
-		case slices.Contains(path, dep):
-			v.cycle(path[slices.Index(path, dep):], k)
+		case slices.Contains(path, next):
+			v.cycle(path[slices.Index(path, next):], k)
 		case dep.wants == nil:
 			// A Provide closure or a Value: nothing declared to follow.
 		case dep.scoped:
@@ -176,7 +189,7 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []*binding) {
 	v.done[node] = true
 }
 
-func (v *validator) missing(k key, b *binding, holder *state, md mode, path []*binding) {
+func (v *validator) missing(k key, b *binding, holder *state, md mode, path []step) {
 	switch {
 	case md == cyclesOnly:
 	case md == lenient && v.leaf:
@@ -185,7 +198,7 @@ func (v *validator) missing(k key, b *binding, holder *state, md mode, path []*b
 		v.owed(fmt.Sprintf("%s: needed by %s (scoped, provided at %s)", k, b.key, b.site))
 	case len(path) > 1:
 		v.err(fmt.Errorf("di: %s: %w in scope %s (needed by %s; %s is Scoped, so the singleton %s would build it there)",
-			k, ErrNotProvided, holder.name, keysOf(path), b.key, path[0].key))
+			k, ErrNotProvided, holder.name, keysOf(path), b.key, path[0].b.key))
 	default:
 		v.err(fmt.Errorf("di: %s: %w (needed by %s, provided at %s)", k, ErrNotProvided, keysOf(path), b.where()))
 	}
@@ -193,10 +206,10 @@ func (v *validator) missing(k key, b *binding, holder *state, md mode, path []*b
 
 // cycle reports the members once however many turns reach them, so a cycle
 // of two is one line rather than one per participant.
-func (v *validator) cycle(members []*binding, closing key) {
+func (v *validator) cycle(members []step, closing key) {
 	names := make([]string, len(members))
-	for i, b := range members {
-		names[i] = b.key.String()
+	for i, m := range members {
+		names[i] = m.b.key.String()
 	}
 	slices.Sort(names)
 	id := "cycle " + fmt.Sprint(names)
@@ -244,10 +257,10 @@ func declared(b *binding, holder *state) []edge {
 }
 
 // keysOf renders a path the way a resolution error does.
-func keysOf(path []*binding) string {
+func keysOf(path []step) string {
 	keys := make([]string, len(path))
-	for i, b := range path {
-		keys[i] = b.key.String()
+	for i, s := range path {
+		keys[i] = s.b.key.String()
 	}
 	return fmt.Sprint(keys)
 }

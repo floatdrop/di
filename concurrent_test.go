@@ -434,10 +434,14 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		<-ctx.Done()
 		m.sched.pause("worker cancelled")
 		time.Sleep(2 * time.Millisecond) // outlast an impatient Stop
+		// What a cancelled worker returns is the shape under test: a
+		// failure joined with the cancellation must survive the filter that
+		// drops a bare cancellation, and a wrapped cancellation with nothing
+		// else in it must not be reported (issue 35).
 		if o.reg%3 == 0 {
-			return errWorker // its own failure, not the cancellation
+			return errors.Join(ctx.Err(), errWorker) // its own failure, not the cancellation
 		}
-		return nil
+		return fmt.Errorf("worker: %w", ctx.Err())
 	}
 	// owe records that this instance's binding declares OnDrain, which is
 	// what makes C6 hold it to one.

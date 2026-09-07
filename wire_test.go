@@ -166,3 +166,37 @@ func TestWireServesAnInterfaceFromAConcreteConstructor(t *testing.T) {
 		t.Fatal("interface not served by the concrete constructor")
 	}
 }
+
+type wBytes []byte
+
+// A result that is assignable to the key but not identical to it, a chan for
+// a receive-only key or a []byte for a named slice, passed registration and
+// then failed the assertion in Get, because the stored value kept the
+// constructor's type. It is stored as the key's type now, for Wire and for
+// Wrap, and it can then be handed to a parameter of that type. (issue 35)
+func TestWireStoresAnAssignableResultAsTheKey(t *testing.T) {
+	s := di.New()
+	s.Wire[<-chan int](func() chan int { return make(chan int, 1) })
+	s.Wire[wBytes](func() []byte { return []byte{42} })
+	s.Wire[*wSink](func(ch <-chan int, b wBytes) *wSink { return &wSink{} })
+
+	ch, err := s.Resolve[<-chan int]()
+	if err != nil || ch == nil {
+		t.Fatalf("receive-only channel: %v", err)
+	}
+	if b, err := s.Resolve[wBytes](); err != nil || len(b) != 1 {
+		t.Fatalf("named slice: %v %v", b, err)
+	}
+	if _, err := s.Resolve[*wSink](); err != nil {
+		t.Fatalf("as a parameter: %v", err)
+	}
+
+	w := di.New()
+	w.Wire[wBytes](func() []byte { return []byte{1} })
+	w.Wrap[wBytes](func(b wBytes) []byte { return append(b, 2) })
+	if b, err := w.Resolve[wBytes](); err != nil || len(b) != 2 {
+		t.Fatalf("a wrapper's result is converted too: %v %v", b, err)
+	}
+}
+
+type wSink struct{}

@@ -7,6 +7,21 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Fixed
+
+- `Wire` and `Wrap` accepted a result merely assignable to the key, such as a
+  `chan int` for a `<-chan int` key or a `[]byte` for a named slice type, and
+  then stored it as the constructor's own type, so `Get` panicked asserting
+  it. The value is stored as the key's type now ([#35]).
+- `Validate` reported a cycle where a valid graph visited one `Scoped`
+  binding in two scopes. A node on its path is now a binding in a holder, as
+  it is on a resolution path at run time, so the two instances are told
+  apart ([#35]).
+- A `Worker` that returned its own failure joined with the cancellation, as
+  `errors.Join(ctx.Err(), err)`, had the failure dropped with the
+  cancellation, and `Stop` returned nil. Only an error that says nothing
+  beyond the cancellation is dropped now ([#35]).
+
 ## [0.13.0] - 2026-09-06
 
 One route, one line. `go doc -all` against 0.12.0 leaves `di` untouched and
@@ -875,3 +890,4 @@ events.
 [0.1.0]: https://github.com/floatdrop/di/releases/tag/v0.1.0
 [#3]: https://github.com/floatdrop/di/issues/3
 [#1]: https://github.com/floatdrop/di/issues/1
+[#35]: https://github.com/floatdrop/di/issues/35

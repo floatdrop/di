@@ -226,3 +226,39 @@ func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
 		t.Fatalf("Run dropped the worker failure published during the rollback: %v", err)
 	}
 }
+
+// A worker cancelled by Stop may report a failure alongside the
+// cancellation, as errors.Join(ctx.Err(), failure). The filter that drops a
+// bare cancellation used errors.Is, which matched the joined error and
+// dropped the failure with it; Stop returned nil. Only an error that says
+// nothing beyond the cancellation is dropped now. (issue 35)
+func TestWorkerFailureJoinedWithCancellationIsReported(t *testing.T) {
+	failure := errors.New("flush failed")
+	s := di.New()
+	s.Value(&Worker{}).Eager().Worker(func(ctx context.Context, _ *Worker) error {
+		<-ctx.Done()
+		return errors.Join(ctx.Err(), failure)
+	})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Stop(ctx); !errors.Is(err, failure) {
+		t.Fatalf("Stop dropped the worker's own failure: %v", err)
+	}
+
+	// A wrapped cancellation, with nothing else in it, is still nothing to
+	// report.
+	quiet := di.New()
+	quiet.Value(&Worker{}).Eager().Worker(func(ctx context.Context, _ *Worker) error {
+		<-ctx.Done()
+		return fmt.Errorf("loop: %w", ctx.Err())
+	})
+	if err := quiet.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := quiet.Stop(ctx); err != nil {
+		t.Fatalf("a bare cancellation is not a failure: %v", err)
+	}
+}
