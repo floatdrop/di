@@ -19,7 +19,14 @@ import (
 
 func main() {
 	app := di.New()
-	app.Use(config.Module, storage.Module, cache.Module, mail.Module, dihttp.Module, api.Module)
+	app.Use(
+		config.Module,
+		storage.Module,
+		cache.Module,
+		mail.Module,
+		dihttp.Module,
+		api.Module,
+	)
 
 	// Nothing has been built yet. The constructors declared their
 	// dependencies, so the graph is checked here, as a request scope holding
