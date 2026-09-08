@@ -60,6 +60,33 @@ html.g-root {
 	font-size: 100%;
 }
 
+/* Chinese and Japanese need their own faces, and they need separate ones:
+   Han unification gives the two languages the same codepoints with different
+   correct glyph shapes, so a shared CJK stack renders one of them in the
+   other's hand. The Latin families stay in front, because a Chinese sentence
+   with `dihttp.Middleware` in it should set that part in the Latin face.
+   Keyed off the html element's lang, which entry-server.tsx already sets. */
+html[lang^='zh'] {
+	--g-font-family-sans:
+		ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC',
+		'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+}
+
+html[lang^='ja'] {
+	--g-font-family-sans:
+		ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Hiragino Sans',
+		'Hiragino Kaku Gothic ProN', 'Yu Gothic', Meiryo, 'Noto Sans JP', sans-serif;
+}
+
+/* A CJK glyph is a full em where `ch` is the width of a zero, about half of
+   one, so the Latin measure comes out at roughly 34 characters a line. These
+   scripts read best at 35 to 45, and they want more leading than Latin. */
+html[lang^='zh'],
+html[lang^='ja'] {
+	--di-measure: 40em;
+	--di-leading: 1.85;
+}
+
 /* body-2 is the neutral default: it is what the chrome around the prose --
    the topbar, the sidebar, the footer -- is sized against. The prose itself
    sets its own step below. */
@@ -225,7 +252,7 @@ body {
 .di-hero__lead {
 	margin: 0;
 	max-width: var(--di-measure);
-	line-height: 1.55;
+	line-height: calc(var(--di-leading, 1.6) - 0.05);
 }
 
 .di-hero__install {
@@ -288,7 +315,7 @@ body {
 .di-prose {
 	min-width: 0;
 	font-size: var(--g-text-body-3-font-size);
-	line-height: 1.6;
+	line-height: var(--di-leading, 1.6);
 }
 
 .di-prose p {

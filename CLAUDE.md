@@ -594,7 +594,9 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
   library itself stays dependency-free. `samber/do` is a dependency there only.
 - **`site/` is the landing page and guide** at https://floatdrop.github.io/di/,
   a React project built with Gravity UI, prerendered to static HTML in English
-  at `/` and Russian at `/ru/`, and deployed by `.github/workflows/pages.yml`
+  at `/` and Russian, Chinese and Japanese at `/ru/`, `/zh/` and `/ja/`, each
+  one value of a `Content` type so a missing translation is a compile error
+  (though not a stale one), and deployed by `.github/workflows/pages.yml`
   on pushes to `main` that touch it or `examples/guide/`. It ships no React;
   the only JavaScript is one inlined script. Its code blocks are the files of
   `examples/guide`, imported as raw text at build time, so the guide cannot

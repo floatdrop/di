@@ -1,7 +1,7 @@
 # site
 
 The landing page and step-by-step guide at https://floatdrop.github.io/di/,
-in English and Russian, prerendered to static HTML.
+in English, Russian, Chinese and Japanese, prerendered to static HTML.
 
 It is a React project built with [Gravity UI](https://gravity-ui.com), and it
 ships no React: `vite build` produces a server bundle, `scripts/prerender.ts`
@@ -33,10 +33,15 @@ rather than the environment, and redirects anything outside it.
 
 ## How it fits together
 
-- `src/content/en.tsx` and `src/content/ru.tsx` are the two locales. Both
-  satisfy `Content` in `src/content/types.ts`, so a missing translation is a
-  compile error rather than a gap on the page. Prose is JSX, not strings in a
-  catalog, because most sentences carry inline code and links.
+- `src/content/*.tsx` is one file per locale, each satisfying `Content` in
+  `src/content/types.ts`, so a missing translation is a compile error rather
+  than a gap on the page. Prose is JSX, not strings in a catalog, because most
+  sentences carry inline code and links. Adding a locale is `LOCALES` plus
+  `localePath` in `types.ts`, the file, and two lines in `content/index.ts`;
+  the compiler names the two, and the URLs, the `hreflang` links and the
+  language menu all follow from `LOCALES` on their own.
+  **`tsc` checks that a translation is complete, not that it is current.**
+  Change an English paragraph and the other three still compile and deploy.
 - `src/code.ts` reads the files of `../examples/guide` as raw text and
   highlights them with Shiki at build time, so the page cannot drift from code
   the Go CI compiles and tests. The `Explain` tree and the `Modules` report are
@@ -74,11 +79,11 @@ rather than the environment, and redirects anything outside it.
 
 ## Adding a step
 
-Add its id to `StepId`, then add the step to `steps` in **both** locales;
-`tsc` will not let you forget the second. If it shows a new file, add the id
+Add its id to `StepId`, then add the step to `steps` in **every** locale;
+`tsc` will not let you forget one. If it shows a new file, add the id
 to `FigureId`, the import to `src/code.ts`, and the figure to `buildFigures`.
 
-## Six things worth knowing
+## Seven things worth knowing
 
 `src/inline-script.ts` is inlined by calling `Function.prototype.toString` on
 it, so it is cut out of its module and must close over nothing: everything it
@@ -98,6 +103,13 @@ platform's own borders. Nothing 404s in the page you are looking at. So when
 something looks wrong in one browser and not another, check that the CSS
 loaded before believing anything else -- that is what the relative URLs above
 are for.
+
+Chinese and Japanese get their own font stacks, keyed off the html element's
+`lang`, and they have to be separate ones: Han unification gives the two
+languages the same codepoints with different correct glyph shapes, so one
+shared CJK stack sets one of them in the other's hand. They also get their own
+measure and leading, because `ch` is the width of a zero and a CJK glyph is a
+full em, which makes the Latin `68ch` about 34 characters a line.
 
 uikit's `.g-root` carries `font-size: 13px`, and this page puts that class on
 the html element, because the inlined script has to settle the theme before

@@ -1,11 +1,16 @@
 import type { ReactNode } from 'react';
 
 /** The two locales the site is prerendered in. */
-export const LOCALES = ['en', 'ru'] as const;
+export const LOCALES = ['en', 'ru', 'zh', 'ja'] as const;
 export type Locale = (typeof LOCALES)[number];
 
 /** English lives at the root, so its path segment is empty. */
-export const localePath: Record<Locale, string> = { en: '', ru: 'ru/' };
+export const localePath: Record<Locale, string> = {
+	en: '',
+	ru: 'ru/',
+	zh: 'zh/',
+	ja: 'ja/'
+};
 
 /** How many directories below the build root a locale's page sits. */
 export const localeDepth = (locale: Locale) => localePath[locale].split('/').length - 1;
