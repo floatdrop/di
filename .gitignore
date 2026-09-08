@@ -31,7 +31,10 @@ go.work.sum
 # .idea/
 # .vscode/
 
-# Site (SvelteKit)
+# Local agent state
+.claude/
+
+# Site
 site/node_modules/
-site/.svelte-kit/
 site/build/
+site/.ssr/
