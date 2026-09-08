@@ -1,0 +1,404 @@
+/* Gravity UI's tokens and component styles. Every component this page uses
+   imports its own CSS, so the bundle picks the rest up on its own; this file
+   is the theme layer plus the handful of page shapes uikit has no component
+   for -- a prose column, a code figure, a sticky sidebar.
+
+   Every size here comes from a `--g-text-*` token. uikit's scale is built for
+   application density, and a page of prose reads a step or two up it, so the
+   *choice* of step is the design; the numbers are not ours to invent. */
+@import '@gravity-ui/uikit/styles/styles.css';
+
+/* Gravity UI's own stylesheet pulls Inter from Google Fonts. Nothing
+   third-party is on the path to rendering this page -- the star count is the
+   only outside request and it is made after paint -- so it asks for the
+   system UI face instead; drop
+   `@import '@gravity-ui/uikit/styles/fonts.css';` above and delete this block
+   to get Inter back. */
+.g-root {
+	--g-font-family-sans:
+		ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+	--g-font-family-monospace:
+		ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+	/* Prose is wider than a uikit control, and one measure keeps it readable. */
+	--di-measure: 68ch;
+	--di-page: 64rem;
+	--di-gutter: var(--g-spacing-5);
+	--di-topbar-height: 56px;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+}
+
+html {
+	background: var(--g-color-base-background);
+	color: var(--g-color-text-primary);
+	/* Tells the browser's own widgets -- scrollbars, form controls -- which way
+	   the page went, before any of our CSS applies. */
+	color-scheme: light;
+}
+
+html.g-root_theme_dark {
+	color-scheme: dark;
+}
+
+/* uikit's `.g-root` carries `font-size: var(--g-text-body-1-font-size)`, and
+   this page puts that class on the html element so the inlined script can
+   settle the theme before the body exists. Left alone that makes 1rem 13px
+   for the whole document -- every page metric below silently three-quarters
+   of what it reads as. The root keeps the browser's own size; `body` takes
+   uikit's step instead, and nothing in uikit needs the root to change, since
+   every size it ships is a `--g-text-*` pixel token. */
+html.g-root {
+	font-size: 100%;
+}
+
+/* body-2 is the neutral default: it is what the chrome around the prose --
+   the topbar, the sidebar, the footer -- is sized against. The prose itself
+   sets its own step below. */
+body {
+	font-family: var(--g-font-family-sans);
+	font-size: var(--g-text-body-2-font-size);
+	line-height: var(--g-text-body-2-line-height);
+	-webkit-font-smoothing: antialiased;
+}
+
+/* ---- page frame ---------------------------------------------------------- */
+
+.di-page {
+	max-width: var(--di-page);
+	margin: 0 auto;
+	padding-inline: var(--di-gutter);
+}
+
+.di-topbar {
+	position: sticky;
+	top: 0;
+	z-index: 10;
+	background: color-mix(in srgb, var(--g-color-base-background) 88%, transparent);
+	-webkit-backdrop-filter: blur(8px);
+	backdrop-filter: blur(8px);
+	border-bottom: 1px solid var(--g-color-line-generic);
+}
+
+.di-topbar__inner {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--g-spacing-4);
+	min-height: var(--di-topbar-height);
+	padding-block: var(--g-spacing-2);
+}
+
+.di-topbar__brand {
+	font-family: var(--g-font-family-monospace);
+	font-size: var(--g-text-body-1-font-size);
+	color: var(--g-color-text-secondary);
+	text-decoration: none;
+}
+
+.di-topbar__brand:hover {
+	color: var(--g-color-text-primary);
+}
+
+.di-controls {
+	display: flex;
+	align-items: center;
+	gap: var(--g-spacing-2);
+}
+
+/* ---- language menu ------------------------------------------------------- */
+
+/* A `details`, so it opens with no JavaScript; the inlined script only
+   dismisses it when the next click lands somewhere else. */
+.di-lang {
+	position: relative;
+}
+
+.di-lang__toggle {
+	cursor: pointer;
+	list-style: none;
+}
+
+.di-lang__toggle::-webkit-details-marker {
+	display: none;
+}
+
+.di-lang__panel {
+	position: absolute;
+	inset-inline-end: 0;
+	top: calc(100% + var(--g-spacing-1));
+	z-index: 20;
+	min-width: 9rem;
+	padding-block: var(--g-spacing-1);
+	border-radius: var(--g-border-radius-m);
+	background: var(--g-color-base-float);
+	/* uikit's own popup recipe: a hairline border and one soft drop. */
+	box-shadow:
+		0 0 0 1px var(--g-color-line-generic),
+		0 8px 20px 1px var(--g-color-sfx-shadow);
+}
+
+.di-lang[open] .di-lang__toggle .g-button__icon_side_end {
+	transform: rotate(180deg);
+}
+
+/* ---- theme and copy buttons ---------------------------------------------- */
+
+/* Neither button re-renders -- the page ships no React -- so both states are
+   in the markup and CSS shows whichever applies. The suffix names the state
+   the icon appears in, not the one it switches to. */
+.di-theme-icon,
+.di-copy-icon {
+	display: inline-flex;
+}
+
+.di-theme-icon_on-dark,
+.g-root_theme_dark .di-theme-icon_on-light {
+	display: none;
+}
+
+.g-root_theme_dark .di-theme-icon_on-dark {
+	display: inline-flex;
+}
+
+.di-copy-icon_done {
+	display: none;
+}
+
+.di-copy_done .di-copy-icon_idle {
+	display: none;
+}
+
+.di-copy_done .di-copy-icon_done {
+	display: inline-flex;
+	color: var(--g-color-text-positive);
+}
+
+/* The star count, appended by the inlined script. uikit pulls a button's icon
+   in with negative margins, so the text lands flush against it. */
+.di-stars {
+	padding-inline-start: var(--g-spacing-1);
+	font-variant-numeric: tabular-nums;
+}
+
+/* The star is drawn here rather than appended with the count, so the script
+   has no markup to build. `--g-color-text-warning` is uikit's yellow, and it
+   is a different one per theme, which a hard-coded gold would not be. */
+.di-stars::before {
+	content: '\2605';
+	margin-inline-end: 0.25em;
+	font-size: 0.95em;
+	color: var(--g-color-text-warning);
+}
+
+/* ---- hero ---------------------------------------------------------------- */
+
+.di-hero {
+	/* Gravity's spacing scale stops at 40px; the page rhythm above a section is
+	   coarser than any control's, so these few are spelled out. */
+	padding-block: 4.5rem 3.5rem;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--g-spacing-5);
+}
+
+/* display-3 is 40px, which is the right ceiling and far too much at 390px, so
+   the variant sets the family and weight and the size scales with the page. */
+.di-hero__title {
+	margin: 0;
+	max-width: 22ch;
+	font-size: clamp(1.875rem, 6vw, 2.5rem);
+	line-height: 1.12;
+	letter-spacing: -0.02em;
+	text-wrap: balance;
+}
+
+.di-hero__lead {
+	margin: 0;
+	max-width: var(--di-measure);
+	line-height: 1.55;
+}
+
+.di-hero__install {
+	display: flex;
+	align-items: center;
+	gap: var(--g-spacing-2);
+	padding: var(--g-spacing-1) var(--g-spacing-1) var(--g-spacing-1) var(--g-spacing-3);
+	border: 1px solid var(--g-color-line-generic);
+	border-radius: var(--g-border-radius-l);
+	background: var(--g-color-base-generic-ultralight);
+}
+
+.di-hero__install-code {
+	font-family: var(--g-font-family-monospace);
+	font-size: var(--g-text-code-2-font-size);
+	line-height: var(--g-text-code-2-line-height);
+}
+
+/* ---- body ---------------------------------------------------------------- */
+
+.di-layout {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: var(--g-spacing-8);
+	padding-bottom: 4rem;
+}
+
+@media (min-width: 64rem) {
+	.di-layout {
+		grid-template-columns: 15rem minmax(0, 1fr);
+		gap: var(--g-spacing-9);
+	}
+
+	.di-toc {
+		position: sticky;
+		top: calc(var(--di-topbar-height) + var(--g-spacing-5));
+		align-self: start;
+		max-height: calc(100vh - var(--di-topbar-height) - var(--g-spacing-8));
+		overflow-y: auto;
+	}
+}
+
+/* ---- table of contents --------------------------------------------------- */
+
+/* uikit's Toc draws the rail, the indent and every state, the active one
+   included -- the inlined script only sets the class as you scroll. What the
+   component leaves to the page is the type, since it inherits whatever it is
+   dropped into. Nothing else here overrides it. */
+.di-toc {
+	min-width: 0;
+	font-size: var(--g-text-body-1-font-size);
+	line-height: var(--g-text-body-1-line-height);
+}
+
+
+/* ---- prose --------------------------------------------------------------- */
+
+/* body-3 is 17px, uikit's largest body step and the one a column of text
+   wants; its 24px leading is a control's, so the leading is set in ems. */
+.di-prose {
+	min-width: 0;
+	font-size: var(--g-text-body-3-font-size);
+	line-height: 1.6;
+}
+
+.di-prose p {
+	margin: 0 0 1.15em;
+	max-width: var(--di-measure);
+}
+
+.di-intro {
+	margin-bottom: 3rem;
+}
+
+.di-section {
+	margin-bottom: 3.5rem;
+	scroll-margin-top: calc(var(--di-topbar-height) + var(--g-spacing-4));
+}
+
+.di-section__heading {
+	display: flex;
+	align-items: baseline;
+	gap: var(--g-spacing-3);
+	margin: 0 0 var(--g-spacing-4);
+	line-height: 1.25;
+	letter-spacing: -0.01em;
+	text-wrap: balance;
+}
+
+.di-section__number {
+	flex: none;
+	font-family: var(--g-font-family-monospace);
+	font-size: var(--g-text-body-2-font-size);
+	font-weight: var(--g-text-body-font-weight);
+	font-variant-numeric: tabular-nums;
+	color: var(--g-color-text-secondary);
+}
+
+/* Inline code inside prose: one step below body-3, which is code-inline-3, so
+   it sits on the line instead of shrinking out of it. */
+.di-code {
+	padding: 0.1em 0.25em;
+	border-radius: var(--g-border-radius-xs);
+	background: var(--g-color-base-generic);
+}
+
+/* ---- code figures -------------------------------------------------------- */
+
+.di-figure {
+	margin: var(--g-spacing-5) 0 var(--g-spacing-6);
+}
+
+.di-figure__card {
+	overflow: hidden;
+}
+
+.di-figure__caption {
+	display: flex;
+	align-items: center;
+	gap: var(--g-spacing-2);
+	padding: var(--g-spacing-2) var(--g-spacing-4);
+	border-bottom: 1px solid var(--g-color-line-generic);
+	color: var(--g-color-text-secondary);
+	font-family: var(--g-font-family-monospace);
+	font-size: var(--g-text-body-1-font-size);
+	line-height: var(--g-text-body-1-line-height);
+}
+
+.di-figure__body {
+	margin: 0;
+	padding: var(--g-spacing-3) var(--g-spacing-4);
+	overflow-x: auto;
+	font-family: var(--g-font-family-monospace);
+	font-size: var(--g-text-code-2-font-size);
+	line-height: 1.55;
+	tab-size: 4;
+}
+
+.di-figure__body code {
+	font-family: inherit;
+}
+
+/* Shiki brings its own pre; the padding above is the one that counts. */
+.di-figure__body > pre {
+	margin: 0;
+	padding: 0;
+}
+
+.di-figure__comment {
+	color: var(--g-color-text-secondary);
+}
+
+/* Shiki emits both themes as custom properties and the theme class picks one,
+   so switching does not re-highlight anything. */
+.shiki,
+.shiki span {
+	color: var(--shiki-light);
+	background-color: transparent !important;
+}
+
+.g-root_theme_dark .shiki,
+.g-root_theme_dark .shiki span {
+	color: var(--shiki-dark);
+}
+
+/* ---- footer -------------------------------------------------------------- */
+
+.di-footer {
+	border-top: 1px solid var(--g-color-line-generic);
+	padding-block: var(--g-spacing-6) var(--g-spacing-10);
+}
+
+.di-footer p {
+	max-width: var(--di-measure);
+	margin: 0;
+}

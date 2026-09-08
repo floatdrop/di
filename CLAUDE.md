@@ -651,14 +651,41 @@ The sequential generators do not explore goroutine interleavings. That is what
   fails on the sync check.
 - **`benchmarks/` is a separate module** with a `replace ../` directive, so the
   library itself stays dependency-free. `samber/do` is a dependency there only.
-- **`site/` is the landing page and guide**, a SvelteKit project prerendered
-  to static HTML with no client-side JavaScript, deployed to GitHub Pages by
+- **`site/` is the landing page and guide**, a React project built with
+  Gravity UI and prerendered to static HTML, deployed to GitHub Pages by
   `.github/workflows/pages.yml` on pushes to `main` that touch it or
-  `examples/guide/`. Its code blocks are the files of `examples/guide`,
+  `examples/guide/`. It ships no React: `vite build` makes a server bundle and
+  `scripts/prerender.ts` runs it once per locale, so the only JavaScript on the
+  page is `src/inline-script.ts`, inlined into the head: it settles the theme
+  before the first paint, and drives the theme button, the copy button, the
+  active item in the `Toc`, the star count on the GitHub button (the one
+  third-party request, made after paint), and the dismissal of the language
+  menu, which opens by itself because it is a `details`. Nothing re-renders,
+  so both states of a toggle are in the markup and CSS shows the one that
+  applies. Every uikit component is imported through `src/uikit.ts` because
+  that list is what gives the dev server its CSS (`src/dev-styles.ts`): a
+  build collects each component's own stylesheet out of the server bundle,
+  and the dev server, having no client bundle, has nothing to collect them
+  with -- so a component imported around that list is styled in the build and
+  bare in dev, and a page with uikit's tokens and none of its components
+  looks like a botched design rather than a missing file.
+  Without `BASE_PATH` the built URLs are relative, so `build/` can be opened
+  off the filesystem, and `npm run preview` takes the base from the built HTML
+  rather than the environment: every way of serving the build at the wrong
+  prefix produces a page whose stylesheet 404s, and that page looks like a
+  botched design rather than a missing file, so it gets reported as one. The
+  page is in
+  English at `/` and Russian at `/ru/`; both locales are one value of the
+  `Content` type, so a missing translation is a compile error. Its code blocks
+  are the files of `examples/guide`,
   imported as raw text at build time, so the guide cannot drift from code the
   Go CI compiles and tests; the `Explain` tree it shows is
   `examples/guide/testdata/explain.txt`, pinned by a golden test with an
-  `-update` flag. `examples/guide` is a multi-package application (config,
+  `-update` flag. Code is never translated: it is Go source and output the Go
+  tests own. `site/README.md` has the rest, including the two configuration
+  traps -- `ssr.noExternal` for Gravity UI, whose components' CSS imports are
+  what build the stylesheet, and `build.ssrEmitAssets`, which writes it out.
+  `examples/guide` is a multi-package application (config,
   storage, cache, mail, api) whose `cmd/api` blocks on signals like the other
   servers; its tests start it on a random port instead. It uses no `Provide`
   closure: the one thing that needs the scope, the request-scope middleware,

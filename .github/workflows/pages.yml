@@ -1,9 +1,12 @@
 name: Site
 
-# The landing page and guide under site/, built with SvelteKit and deployed
-# to GitHub Pages. The guide's code blocks are the files of examples/guide,
-# imported at build time, so a change there rebuilds the site, and the Go CI
-# is what keeps them compiling.
+# The landing page and guide under site/, a React project prerendered to
+# static HTML and deployed to GitHub Pages. The guide's code blocks are the
+# files of examples/guide, imported at build time, so a change there rebuilds
+# the site, and the Go CI is what keeps them compiling.
+#
+# Node 24 is a floor, not a preference: the build and prerender scripts are
+# TypeScript run straight by node, which needs its type stripping.
 
 on:
   push:
