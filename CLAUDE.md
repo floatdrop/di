@@ -4,12 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
 on generic methods. [`docs/DESIGN.md`](docs/DESIGN.md) explains resolution,
-lifetimes, phases, cycles and teardown with diagrams, and holds the design
-notes that used to be in the README; this file is the working detail behind
-it, and the two are edited together. The library is `di.go`, the rendering of the recorded
-graph in `explain.go`, the check of the declared graph in `validate.go`, and
-the net/http adapter in `dihttp/`; everything else is tests, examples, and a
-separate benchmarks module.
+lifetimes, phases, cycles and teardown with diagrams; this file is the working
+detail behind it, and the two are edited together. The library is `di.go`, the
+rendering of the recorded graph in `explain.go`, the check of the declared
+graph in `validate.go`, and the net/http adapter in `dihttp/`; everything else
+is tests, examples, and a separate benchmarks module.
 
 ## Commands
 
@@ -25,7 +24,7 @@ go run github.com/campoy/embedmd@v1.0.0 -w README.md   # re-embed after editing 
 cd benchmarks && go test -bench . -benchmem   # separate module, see below
 
 cd site && npm ci && npm run check && npm run build   # the guide site; BASE_PATH=/di for Pages
-go test ./examples/guide -update                       # rewrite testdata/explain.txt after rewiring the guide app
+go test ./examples/guide -update                       # rewrite testdata/ after rewiring the guide app
 
 go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
 go test -count=1 -coverprofile=all.out .
@@ -55,51 +54,40 @@ path attached, which is how cycle detection and error paths work.
 
 **Which state owns an instance.** A singleton lives in the scope that
 registered the binding (`owner`); a `Scoped` instance lives in the scope that
-resolves it (`holder`), so it can see that scope's values. `resolve` picks the holder
-and the rest of the pipeline works in terms of it.
+resolves it (`holder`), so it can see that scope's values. `resolve` picks the
+holder and the rest of the pipeline works in terms of it.
 
 **The instance phase machine** (`phaseNew` → `Building` → `Built` →
 `Starting` → `Started`/`Failed` → `Stopped`) is read and written *only* under
-the owning state's mutex. This exists because splitting a start-or-stop
-decision across two critical sections produced several bugs. In particular:
-`publish` appends to the stop list and *then* `startIfRunning` reads
-`running`, while `Start` sets `running` before it drains. That ordering is
-what guarantees an instance is started by exactly one path.
+the owning state's mutex: splitting a start-or-stop decision across two
+critical sections produced several bugs. In particular `publish` appends to
+the stop list and *then* `startIfRunning` reads `running`, while `Start` sets
+`running` before it drains. That ordering is what guarantees an instance is
+started by exactly one path.
 
-`await` is the only way to reach an instance. It claims the build step or waits
-for whoever did, and it also waits out `phaseStarting`, which is what stops a
+`await` is the only way to reach an instance. It claims the build step or
+waits for whoever did, and it waits out `phaseStarting`, which is what stops a
 resolution handing back a service whose `OnStart` is still running. `settled`
-says the build step is over and `value`/`err` are final; it replaced a
-`sync.Once`, which could only tell a second resolution to carry on, never to
-wait.
+says the build step is over and `value`/`err` are final.
 
 **A waiter blocks on one step, not on the scope.** Each step another goroutine
 can be responsible for finishing has a channel closed when it is done:
 `settledCh`, `startingCh`, `drainedCh`. One rule covers all three -- the first
 goroutine that actually has to wait makes the channel (`waitOn`), and the owner
-of the step closes it only if it is there (`wake`). The phase still says
-*which* step is outstanding, and phase and channel are read in one critical
-section, so a waiter cannot pick up the channel from a later step.
+of the step closes it only if it is there (`wake`). The phase says *which* step
+is outstanding, and phase and channel are read in one critical section, so a
+waiter cannot pick up the channel from a later step.
 
 Both halves run under the owning state's mutex, which is what makes the pair
 safe in either order: a waiter that got there first is released by the close;
 an owner that got there first leaves nil behind, and the phase the waiter then
-reads already says the step is done, so it never blocks on a wakeup that has
-been and gone. Nil is the ordinary state, not an edge case -- an uncontended
-build, an unraced start step and an undisputed drain each allocate nothing.
+reads already says the step is done. Nil is the ordinary state, not an edge
+case -- an uncontended build, an unraced start step and an undisputed drain
+each allocate nothing.
 
-This replaced a `sync.Cond` per scope, where every phase change woke every
-waiter in the scope to re-check a predicate that was almost never theirs, and
-where bounding a wait by a context needed `awaitPhase` to fake it with a
-`context.AfterFunc` that broadcast on expiry. The context-bounded wait in
-`drainIfNeeded` is now an ordinary `select`.
-
-The one broadcast with no channel replacing it is the one `teardown` did after
-`stopped.Store(true)`. Nothing waits on a predicate that mentions `stopped` --
-`await` blocks only on `settled` and `phaseStarting`, and both are advanced by
-goroutines a `Stop` does not interrupt -- so it released nobody who was not
-about to be released anyway. If a resolution is ever found hanging across a
-`Stop`, this is the first thing to suspect.
+Nothing waits on a predicate that mentions `stopped`, so `teardown` closes no
+channel after `stopped.Store(true)`. If a resolution is ever found hanging
+across a `Stop`, that is the first thing to suspect.
 
 **Two cycle detectors, because one branch cannot see the other.** Within a
 branch, `resolver.onPath` walks the immutable path. Across branches,
@@ -114,158 +102,130 @@ reverse.
 There is one graph per container, made by `New` and handed down through
 `newState`, so `state.graph` is a field read rather than a walk to the root.
 That is exactly the reach a cycle has: a wait crosses scopes, because a
-resolution follows the parent chain, but nothing joins two containers. The
-graph used to be a package-level map and mutex, which found the same cycles and
-made every blocked resolution in the process scan every other container's edges
-under one lock to do it.
+resolution follows the parent chain, but nothing joins two containers.
 
 **The resolution path is immutable, and finished nodes stop counting.**
 `resolver` is a linked list node, not a slice, because a constructor may
 resolve from several goroutines and they all share the `*Scope` it was handed.
 A node is identified by binding *and* holder, never by key: that is what
 separates a group member from a plain registration of the same type, and one
-`Scoped` binding across scopes. It does not carry a key at all -- `pathStr`
-reads `b.key` -- because the only thing that ever put a node on the path whose
-key was not its binding's was a `Bind` alias hop.
+`Scoped` binding across scopes. It carries no key at all -- `pathStr` reads
+`b.key`.
 
 `resolver.done` is the one thing about a node that changes: `resolve` sets it
 as it returns, and `onPath` and `descends` *stop the walk* at a node that has
 it. The path stays whole for error messages; what goes away is the claim that
-the node, or anything above it, is still a dependency. This exists because a
-constructor may keep the `*Scope` it was handed -- that is how a goroutine it
-starts resolves later -- and a resolution made through it afterwards would
-otherwise meet its own finished frame, be called a cycle, and have that
-verdict cached on whatever instance it was building.
+the node, or anything above it, is still a dependency. A constructor may keep
+the `*Scope` it was handed -- that is how a goroutine it starts resolves later
+-- and a resolution made through it afterwards would otherwise meet its own
+finished frame, be called a cycle, and have that verdict cached on whatever
+instance it was building.
 
-Stopping rather than skipping is the second half of that, and it matters
-because the frames *above* the finished one are usually still building: A
-resolves B, B keeps its scope and returns, A carries on, and a later
-resolution through B's scope that needs A met an active A and was called a
-cycle even though it had only to wait. A finished node breaks the chain in
-both directions -- nothing above it is waiting on what is opened below it
-afterwards -- so both edges of the wait-for graph read it the same way. The
-price is the one case that cannot be told apart without goroutine-local state,
-exactly as with `Stop`'s mid-start handoff: a constructor that blocks on a
-resolution made through a finished descendant's scope that leads back to
-itself now deadlocks where it used to be reported. It takes a service reaching
-back into its own unfinished construction through an escaped scope; the late
-resolution the change admits is the documented one.
+Stopping rather than skipping is the second half, because the frames *above*
+the finished one are usually still building: A resolves B, B keeps its scope
+and returns, A carries on, and a later resolution through B's scope that needs
+A met an active A and was called a cycle when it had only to wait. A finished
+node breaks the chain in both directions, so both edges of the wait-for graph
+read it the same way. The price is the one case that cannot be told apart
+without goroutine-local state: a constructor that blocks on a resolution made
+through a finished descendant's scope that leads back to itself now deadlocks
+where it used to be reported. That takes a service reaching back into its own
+unfinished construction through an escaped scope; the late resolution the
+change admits is the documented one.
 
 `Scope.Child` carries the resolver of the scope it is made from, so a child
-opened *inside* a constructor is part of that resolution and a cycle through
-it is reported instead of deadlocking. Nothing else needs to change for a
-child kept for later, because the node it carries is `done` by then and the
-rule above makes the path inert. `inFlight` is that question -- a path whose
-last node has not returned -- and it is also what decides whether `Get`,
-`All` and `Must` convert an `abort` into the plain error panic a top-level
-call gets: a scope kept past its resolution has no enclosing call to unwind
-to, so it is a top-level caller that happens to know where it came from.
+opened *inside* a constructor is part of that resolution and a cycle through it
+is reported instead of deadlocking. A child kept for later needs nothing more,
+because its node is `done` by then. `inFlight` is that question -- a path whose
+last node has not returned -- and it also decides whether `Get`, `All` and
+`Must` convert an `abort` into the plain error panic a top-level call gets: a
+scope kept past its resolution has no enclosing call to unwind to.
 
 **Scopes have a stop machine too.** `state.stopOnce` is claimed by the first
 `Stop` and settled when its teardown finishes; every later or concurrent `Stop`
 waits on it and reports its error. That wait is what keeps dependency order
-when a child and its parent are stopped at once. The cost is that a hook may
-not call `Stop` on its own scope or an ancestor.
+when a child and its parent are stopped at once, and its cost is the rule in
+Invariants below: a hook may not `Stop` its own scope or an ancestor.
 
 The `once` type is that pattern by itself -- claim, settle, ctx-bounded wait --
-because the scope has two of them and they were previously two hand-written
-copies that disagreed in ways only a comment recorded. Its fields are guarded
-by the state mutex rather than one of its own, so claiming a phase and
-recording what the claim decided (`stopCtx`, for `Stop`) stay one critical
-section and no third lock joins the ordering rules. The waiter's contract is
-the one thing the two callers still differ on, and it is now visible at the
-call site: both report the owner's error. The scope-wide drain used to drop
-it, on the reasoning that a drain's failures reach the caller through the
-`Stop` that owns them -- true when that is the same call, and false for a
-request scope ending while the application shuts down, which is where the
-failure needed reporting. The fourth review found it.
+because the scope has two of them. Its fields are guarded by the state mutex
+rather than one of its own, so claiming a phase and recording what the claim
+decided (`stopCtx`, for `Stop`) stay one critical section and no third lock
+joins the ordering rules. Both callers report the owner's error, including the
+scope-wide drain: a request scope ending while the application shuts down is
+exactly where a dropped drain failure needed reporting.
 
 **Draining precedes everything, and it has a machine of its own.** `Stop` is
 drain, then mark stopped, then children, then this scope's instances. Both
 levels of the drain phase are once-with-wait, mirroring the stop phase:
 `state.drainOnce` for the scope, `instance.dr` (`drainNone` → `draining` →
 `drained`) for one hook. A second `Stop` arriving at either waits instead of
-skipping. An earlier version recorded only that a drain had been *decided*,
-which let a concurrent `Stop` see the flag, walk past a hook still running and
-begin releasing what it was using; and it skipped a child whose `Stop` had
-begun, which let this scope mark itself stopped while that child's hooks were
-still resolving through it.
+skipping -- recording only that a drain had been *decided* let a concurrent
+`Stop` walk past a hook still running and begin releasing what it was using.
 
 `drainRun.sweepAll` sweeps repeatedly rather than once, and `drainRun.visit`
 sweeps *every* scope the phase owns on every pass. Draining is the only
 teardown phase during which the scope still resolves, so a hook finishing
 in-flight work may build a service or open a child scope for the first time;
-those owe a drain too, and it has to happen before `stopped` is set or their
-own hooks find nothing to resolve. Visiting each descendant once was enough
-for a hook that builds into its own scope and not for one that builds a level
-along — the same defect, found by the drain oracle after the review that fixed
-the first half. A pass that does no work ends the phase, and `ctx` bounds the
-sweep as well as the hooks.
+those owe a drain too, and it has to happen before `stopped` is set. Visiting
+each descendant once was enough for a hook that builds into its own scope and
+not for one that builds a level along. A pass that does no work ends the phase,
+and `ctx` bounds the sweep as well as the hooks.
 
 The sweep is a post-order walk that claims a descendant's phase immediately
 before descending into it, not a discovery pass that claims the whole subtree
 and a sweep that follows. That ordering is the invariant: while a hook runs,
 the only phases the run holds unended are the scope being swept and its
-ancestors, which is exactly the set a hook may not call `Stop` on anyway.
-Claiming ahead is tidier and it deadlocks a hook that stops a scope the walk
-has taken but not yet reached — a server draining in one child and stopping a
-request scope in another waits for a phase only its own blocked walk can end.
-That is the trap of the paragraph below, one branch along rather than one
-level up. A scope another `Stop` already owns is waited for and then left
-alone, subtree included: that `Stop`'s run drains it.
+ancestors, which is exactly the set a hook may not `Stop` anyway. Claiming
+ahead deadlocks a hook that stops a scope the walk has taken but not yet
+reached. A scope another `Stop` already owns is waited for and then left alone,
+subtree included: that `Stop`'s run drains it.
 
 A descendant's phase ends when its own sweep does, not when the run does.
-Holding it open to the end is tidier, since an ancestor's hook can still build
-into it, and it deadlocks the case the phase exists for: an HTTP server
-draining in an outer scope waits for a handler, and that handler is stopping
-its request scope, which would then be waiting for the run. That is why the
-scope-level guard is not enough on its own and `stopIfNeeded` waits out
-`draining` per instance: an instance built after its scope's phase ended can
-be drained by a sweep still running above it exactly as its own `Stop`
-arrives, and only the per-instance wait keeps the release off a value the hook
-still holds. `drainIfNeeded` also skips an instance whose scope is already
-stopped, because winding something down for work it can no longer take on is
-the opposite of what the hook is for.
+Holding it open to the end deadlocks the case the phase exists for: an HTTP
+server draining in an outer scope waits for a handler, and that handler is
+stopping its request scope. That is also why the scope-level guard is not
+enough on its own and `stopIfNeeded` waits out `draining` per instance: an
+instance built after its scope's phase ended can be drained by a sweep still
+running above it exactly as its own `Stop` arrives. `drainIfNeeded` skips an
+instance whose scope is already stopped, because winding something down for
+work it can no longer take on is the opposite of what the hook is for.
 
 Three windows stay open, and each is cheaper to accept than to close: an
 instance published between the last sweep and `stopped.Store(true)` is not
-drained, and closing that would mean holding the state mutex across user
-hooks; the same for one built into a scope whose phase another `Stop` already
-ended; and a hook running on such a late instance can find its scope stopped
-mid-hook, because the scope became stopped after the decision to drain it.
+drained, and closing that would mean holding the state mutex across user hooks;
+the same for one built into a scope whose phase another `Stop` already ended;
+and a hook running on such a late instance can find its scope stopped mid-hook.
 That last one is why the concurrent driver exercises resolution inside drain
 hooks but does not assert that it succeeds.
 
 **Who hears a drain failure is decided by who owns the teardown, not by who
-ran the hook.** A sweep settles a descendant's failures into that
-descendant's phase, so the descendant's own `Stop` reports them, and an
-ancestor inherits them by stopping that descendant and joining what its
-`Stop` returns. When a second `Stop` of that descendant is already in flight,
-that call owns the teardown, hears the failure, and detaches the scope as it
-finishes -- so whether the ancestor also hears it depends on whether the
-detach beats the ancestor's read of its child list. Both orders are correct,
-because the failure always reaches the caller that owned the teardown, and
-`EventDrain` carries it to observers either way. Do not write an ordering
-oracle, or a test, that requires the ancestor to hear it: one did, and failed
-about one run in eight. `TestReview4ChildStopReportsItsOwnDrainFailure` is
-that test with the assertion narrowed, and
-`TestReview5RootStopReportsAChildsDrainFailure` pins the half that is fixed --
-an ancestor that does own the teardown.
+ran the hook.** A sweep settles a descendant's failures into that descendant's
+phase, so the descendant's own `Stop` reports them, and an ancestor inherits
+them by stopping that descendant and joining what its `Stop` returns. When a
+second `Stop` of that descendant is already in flight, that call owns the
+teardown, hears the failure, and detaches the scope as it finishes -- so
+whether the ancestor also hears it depends on whether the detach beats the
+ancestor's read of its child list. Both orders are correct, because the failure
+always reaches the caller that owned the teardown, and `EventDrain` carries it
+to observers either way.
 
-Taking the child list before the drain as well as after it would make the
-ancestor hear it always, and it is the wrong trade: the ancestor would then
-also inherit a deadline the *other* caller set, so a `Stop` that waited
-properly and released everything would report `context.DeadlineExceeded`.
-`TestReview3LostDrainWaitStillReleases` and
-`TestConcurrentImpatientStopStillReleases` both fail that way; they are the
-guard on this paragraph.
+**Do not write an ordering oracle, or a test, that requires the ancestor to
+hear it**: one did, and failed about one run in eight.
+`TestReview4ChildStopReportsItsOwnDrainFailure` is that test with the assertion
+narrowed, and `TestReview5RootStopReportsAChildsDrainFailure` pins the half
+that is fixed -- an ancestor that does own the teardown. Taking the child list
+before the drain as well as after would make the ancestor hear it always, and
+it is the wrong trade: the ancestor would then also inherit a deadline the
+*other* caller set, so a `Stop` that waited properly and released everything
+would report `context.DeadlineExceeded`. `TestReview3LostDrainWaitStillReleases`
+and `TestConcurrentImpatientStopStillReleases` are the guard on that.
 
-Both levels now wait out `phaseStarting` rather than stepping around it,
-which is what the no-`Stop`-from-a-hook rule buys: the goroutine running that
-start step can no longer be this one. `drainIfNeeded` waits for it because a
-service that is starting owes a drain as soon as it has started, and leaving
-it undecided for a later pass meant a start step that outlasted the phase was
-never drained at all.
+Both levels wait out `phaseStarting` rather than stepping around it, which is
+what the no-`Stop`-from-a-hook rule buys: the goroutine running that start step
+can no longer be this one. `drainIfNeeded` waits for it because a service that
+is starting owes a drain as soon as it has started, and leaving it undecided
+for a later pass meant a start step that outlasted the phase was never drained.
 
 **`freeze` is transactional.** Registrations queue in `pending` and commit in
 one batch. The batch is validated against *prospective copies* of
@@ -283,9 +243,9 @@ registration nobody resolves; a child shadows its parent without the marker,
 since that is a different registry. Then `used` (the key has served),
 `resolving` (a resolution is in flight) and `served` (this scope handed the key
 down from an ancestor) each reject a replacement the marker cannot excuse. The
-"nothing to override" check is deliberately same-scope only: checking
-ancestors from inside `freeze` would mean taking a parent's mutex while holding
-the child's, and no two state mutexes are ever ordered against each other.
+"nothing to override" check is deliberately same-scope only: checking ancestors
+from inside `freeze` would mean taking a parent's mutex while holding the
+child's, and no two state mutexes are ever ordered against each other.
 
 **Two levels of registration semantics.** Lifetime and hooks belong to one
 registration, because they are typed on that value. Eagerness belongs to the
@@ -299,11 +259,11 @@ through a `Scope` view carrying the function's name; `register` stamps it on
 the binding, `view` and `Child` propagate it, and `construct` hands a
 constructor a view labelled with its own binding's module, so a registration
 made from inside a constructor is attributed to the module that registered the
-constructor. Nothing about lookup changes: modules are attribution for
-messages and events, and privacy -- if it is ever wanted -- must be a
-namespace *within* a scope, never a child scope with exports, because teardown
-is children-first and an exported dependency in a child would be torn down
-before its dependants in the parent (#6, the analysis).
+constructor. Nothing about lookup changes: modules are attribution for messages
+and events, and privacy -- if it is ever wanted -- must be a namespace *within*
+a scope, never a child scope with exports, because teardown is children-first
+and an exported dependency in a child would be torn down before its dependants
+in the parent (#6, the analysis).
 
 **The graph is recorded by watching, and only while a constructor runs.**
 `resolve` appends the instance it just produced to `deps` on the instance of
@@ -327,92 +287,94 @@ mistake here cannot break resolution.
 constructor's signature with reflection once, at registration, and stores the
 parameter types on the binding as `wants`; the build is an ordinary `build`
 func that calls `s.get` for each and then `reflect.Call`, so everything below
-`register` is shared with `Provide` and the machine never sees the
-difference. `T` is spelled out because it cannot be inferred from `any`, and a
-result merely assignable to `T` is accepted, which is how a concrete
-constructor serves an interface key. The typed alternative, `Wire0..Wire6`
-with `E` variants, was prototyped beside it and dropped: fourteen methods to
-save a repeated type argument, with the compiler checking only an arity the
-reflective form cannot get wrong. Every registration method calls `register`
-directly, because `callsite` counts a fixed number of frames; a `Wire` that
-went through `Provide` would record a site inside `di.go`. `Explain` draws
-`wants` under an unbuilt node with dashed edges (`declaredInto`), switching
-back to the recorded tree wherever a declared dependency has been built;
-`declaredBy` is the reverse direction and reads only committed registrations
-(`peek`, a lookup without the freeze), because it walks every scope of the
-container and a root `Explain` must not be the call that rejects a child's
-pending batch. `Graph` is unchanged: it lists built instances only, and a
-built `Wire` instance's recorded edges are its declared ones. `Modules` is
-the third renderer, grouping live bindings by `binding.module` and resolving
-each binding's `wants` from its holder to name the serving module; keys use
+`register` is shared with `Provide` and the machine never sees the difference.
+`T` is spelled out because it cannot be inferred from `any`, and a result
+merely assignable to `T` is accepted, which is how a concrete constructor
+serves an interface key. (A typed `Wire0..Wire6` with `E` variants was
+prototyped beside it and dropped: fourteen methods to save a repeated type
+argument, with the compiler checking only an arity the reflective form cannot
+get wrong.) Every registration method calls `register` directly, because
+`callsite` counts a fixed number of frames and a `Wire` that went through
+`Provide` would record a site inside `di.go`.
+
+`Explain` draws `wants` under an unbuilt node with dashed edges
+(`declaredInto`), switching back to the recorded tree wherever a declared
+dependency has been built; `declaredBy` is the reverse direction and reads only
+committed registrations (`peek`, a lookup without the freeze), because it walks
+every scope of the container and a root `Explain` must not be the call that
+rejects a child's pending batch. `Graph` lists built instances only, and a
+built `Wire` instance's recorded edges are its declared ones. `Modules` is the
+third renderer, grouping live bindings by `binding.module` and resolving each
+binding's `wants` from its holder to name the serving module; keys use
 `shortName`, package-qualified rather than import-path-qualified, because a
-module report is read beside module labels of the same shape. Its dedupe set
-is keyed by section as well as line, since a closure's key is listed under
+module report is read beside module labels of the same shape. Its dedupe set is
+keyed by section as well as line, since a closure's key is listed under
 "provides" and again under "unchecked". The guide pins its report in
 `examples/guide/testdata/modules.txt` next to the Explain golden.
 
-**`Wrap` binds at registration.** `Wrap[T]` finds what serves `T` when it
-is called -- `state.current`, which reads this scope's pending batch and
-index *without* freezing, because a freeze here would end the batch for every
-registration made so far and make a later `Eager()` on one of them a
-"modified after the scope was first resolved" panic; then `lookup` from the
-parent, which freezes ancestors as a resolution would -- and stores it as
+**`Wrap` binds at registration.** `Wrap[T]` finds what serves `T` when it is
+called -- `state.current`, which reads this scope's pending batch and index
+*without* freezing, because a freeze here would end the batch for every
+registration made so far and make a later `Eager()` on one of them a "modified
+after the scope was first resolved" panic; then `lookup` from the parent, which
+freezes ancestors as a resolution would -- and stores it as
 `binding.inner`/`innerAt`. The build resolves the inner through
 `resolve(inner, innerAt)` rather than by key, since the key now names the
-wrapper, and calls `markServed` as `get` would; the edge, the build order
-and the cycle check all fall out of that. The wrapper serves the key from
-its scope down, so a child's wrapper is that child's registration of the key
-over the parent's instance, which is what makes it fx's module-scoped
-`Decorate` without a new mechanism. Three guards: `freeze` exempts a wrapper
-from the collision rule and applies the used/resolving/served guards to it
-as to an override, sets `scoped` from the inner there rather than at
-registration because the inner's own `Scoped()` may come later in the
-batch, and rejects an `Override` of a binding whose `wrappedBy` is set --
-the cross-scope case, where a parent's later override would leave a child's
-wrapper composing over a registration nothing else can reach. `validate.go`'s
-`live` follows `inner` chains so the wrapped registration gets its own turn
-though it is no longer in `index`; `declared` puts the inner edge first,
-bound rather than looked up, for both `Validate` and `Explain`.
+wrapper, and calls `markServed` as `get` would; the edge, the build order and
+the cycle check all fall out of that. The wrapper serves the key from its scope
+down, so a child's wrapper is that child's registration of the key over the
+parent's instance, which is what makes it fx's module-scoped `Decorate` without
+a new mechanism.
 
-`Validate` walks `wants`. Its node is a binding *in the scope it would be
-built in*, because a `Scoped` binding built in one scope looks its
-dependencies up from there, so the same binding under two holders is two
-nodes and the memo (`done`) is keyed by both -- and so is the path used for
-cycle detection (`step`), which once compared bindings alone and called a
-valid graph that visits one `Scoped` binding from a child and again from the
-root a cycle (#35). Three modes say what a missing
-dependency means: a singleton on its own turn is `strict`; a `Scoped` binding
-as the validating scope would resolve it is `lenient`, and what is missing is
-`Owed` rather than an error, because a descendant may provide it and no
-scope-position rule can tell an intermediate scope from a leaf -- only the
-caller knows it is one, and says so with `Provided` stubs, which name what
-the resolving scope will hold and make everything else it lacks an error
-(`leaf`); a stub is honoured on the `lenient` path only, since a singleton
-builds in its own scope where a descendant's values are not; a singleton
-reached from anything else is `cyclesOnly`, since its own turn reports what
-it misses. `dihttp.Validate` was the throwaway-child version of this and
-went in 0.11.0. A `Scoped` dependency is walked in the caller's
-mode under the same holder, which is how a singleton that would build a
-`Scoped` service its scope cannot satisfy becomes an error -- the one definite
-failure a singleton-captures-Scoped shape has; a capture that is satisfiable
-works at runtime and is not reported. Cycles are reported once, keyed by
-their members, whichever turn finds them.
+Three guards: `freeze` exempts a wrapper from the collision rule and applies
+the used/resolving/served guards to it as to an override, sets `scoped` from
+the inner there rather than at registration because the inner's own `Scoped()`
+may come later in the batch, and rejects an `Override` of a binding whose
+`wrappedBy` is set -- the cross-scope case, where a parent's later override
+would leave a child's wrapper composing over a registration nothing else can
+reach. `validate.go`'s `live` follows `inner` chains so the wrapped
+registration gets its own turn though it is no longer in `index`; `declared`
+puts the inner edge first, bound rather than looked up, for both `Validate` and
+`Explain`.
+
+**`Validate` walks `wants`.** Its node is a binding *in the scope it would be
+built in*, because a `Scoped` binding built in one scope looks its dependencies
+up from there, so the same binding under two holders is two nodes and the memo
+(`done`) is keyed by both -- and so is the path used for cycle detection
+(`step`), which once compared bindings alone and called a valid graph that
+visits one `Scoped` binding from a child and again from the root a cycle (#35).
+
+Three modes say what a missing dependency means: a singleton on its own turn is
+`strict`; a `Scoped` binding as the validating scope would resolve it is
+`lenient`, and what is missing is `Owed` rather than an error, because a
+descendant may provide it and no scope-position rule can tell an intermediate
+scope from a leaf -- only the caller knows it is one, and says so with
+`Provided` stubs, which name what the resolving scope will hold and make
+everything else it lacks an error (`leaf`); a stub is honoured on the `lenient`
+path only, since a singleton builds in its own scope where a descendant's
+values are not; a singleton reached from anything else is `cyclesOnly`, since
+its own turn reports what it misses. A `Scoped` dependency is walked in the
+caller's mode under the same holder, which is how a singleton that would build
+a `Scoped` service its scope cannot satisfy becomes an error -- the one
+definite failure a singleton-captures-`Scoped` shape has; a capture that is
+satisfiable works at runtime and is not reported. Cycles are reported once,
+keyed by their members, whichever turn finds them.
 
 **A key is served to a whole route, not just to its destination.**
 `binding.used` protects the owner; `markServed` records the key in every scope
 between the resolver and that owner. Both halves matter: an earlier version
-marked only the endpoint, and a scope in the middle could then shadow a key
-it had already handed out. `Bind` aliases used to add hops to the route and
-a cycle detector of their own; an interface is now served by a constructor
-returning the implementation, which is an ordinary binding.
+marked only the endpoint, and a scope in the middle could then shadow a key it
+had already handed out. An interface is served by a constructor returning the
+implementation, which is an ordinary binding -- `Bind` aliases, which added
+hops to the route and needed a cycle detector of their own, are gone.
 
 **A stopped scope refuses to serve, and that is checked twice.** `resolve`
 checks on the way in, and `await` checks again after the wait, because the
-scope can stop while a resolution is parked on someone else's build. The
-second check is on the *resolving* scope, not the instance's holder: the
-holder is always that scope or an ancestor, so checking the resolver covers
-both, and a stopped child must refuse the request whether or not what it asked
-for is still alive above it.
+scope can stop while a resolution is parked on someone else's build. The second
+check is on the *resolving* scope, not the instance's holder: the holder is
+always that scope or an ancestor, so checking the resolver covers both, and a
+stopped child must refuse the request whether or not what it asked for is still
+alive above it.
 
 **Errors versus panics.** A *wiring* failure (missing dependency, cycle, failed
 constructor) is an internal `abort{err}` panic that unwinds to the nearest
@@ -428,10 +390,10 @@ plain destructor. A service built but never started is *not* torn down. Only a
 start hook that *returned* counts as succeeded: `startClaimed` recovers a
 panicking hook into a failed start, or the instance would sit at
 `phaseStarted`, be served to a caller that recovered the panic, and be paired
-with an `OnStop` for an `OnStart` that never finished.
-`binding.used` is set only when a resolution actually served a value, and
-`state.served` records keys a scope resolved from an *outer* scope, because
-`used` lives on the outer binding and cannot protect the inner scope.
+with an `OnStop` for an `OnStart` that never finished. `binding.used` is set
+only when a resolution actually served a value, and `state.served` records keys
+a scope resolved from an *outer* scope, because `used` lives on the outer
+binding and cannot protect the inner scope.
 
 ## Invariants that are easy to break
 
@@ -443,27 +405,26 @@ with an `OnStop` for an `OnStart` that never finished.
   -- so a teardown outlives `Stop` only when `ctx` expired. The old asymmetry
   (a mid-start teardown handed off via `stopWanted`) existed because a start
   hook was allowed to call `Stop` and Go cannot tell that goroutine from any
-  other; every review reported the asymmetry as a bug. The rule is now the
-  documented one, and `Stop` reports the misuse instead of waiting whenever it
-  can see it: hook contexts carry their scope (`inHook`/`hookOwner`), so a
-  hook that passes on the context it was given gets an error naming
-  `Shutdown`. A hook that passes a context of its own is invisible and waits,
-  which is why the fallback still has to be a bounded wait rather than a
-  promise.
+  other; every review reported the asymmetry as a bug. `Stop` reports the
+  misuse instead of waiting whenever it can see it: hook contexts carry their
+  scope (`inHook`/`hookOwner`), so a hook that passes on the context it was
+  given gets an error naming `Shutdown`. A hook that passes a context of its
+  own is invisible and waits, which is why the fallback still has to be a
+  bounded wait rather than a promise.
 - Every user hook is called through `callHook` (or `startClaimed`'s
-  equivalent), which turns a panic into that hook's error. A cancelled `Worker`'s return is dropped only when it says
-  nothing beyond `context.Canceled` (`onlyCancellation` walks the error
-  tree); `errors.Is` matched `errors.Join(ctx.Err(), failure)` and dropped
-  the failure with it (#35). A hook can panic by
-  resolving something whose registration is rejected -- the rejection is a
-  panic, and `Resolve` re-panics anything that is not an `abort`. Letting one
-  escape `Stop` leaves `stopOnce` claimed and never settled, which is a hang
-  for every later `Stop` and a leak of everything behind it.
-- Nothing in the teardown path may run a user hook against a value another
-  hook still holds. That is one rule with three instances: `OnStop` after
-  `OnDrain`, `OnStop` after a `Worker` hook (deferred to `releaseAfterWorker` when
-  `ctx` expires rather than run alongside it), and a parent's hooks after a
-  child's.
+  equivalent), which turns a panic into that hook's error. A cancelled
+  `Worker`'s return is dropped only when it says nothing beyond
+  `context.Canceled` (`onlyCancellation` walks the error tree); `errors.Is`
+  matched `errors.Join(ctx.Err(), failure)` and dropped the failure with it
+  (#35). A hook can panic by resolving something whose registration is rejected
+  -- the rejection is a panic, and `Resolve` re-panics anything that is not an
+  `abort`. Letting one escape `Stop` leaves `stopOnce` claimed and never
+  settled, which is a hang for every later `Stop` and a leak of everything
+  behind it.
+- Nothing in the teardown path may run a user hook against a value another hook
+  still holds. That is one rule with three instances: `OnStop` after `OnDrain`,
+  `OnStop` after a `Worker` hook (deferred to `releaseAfterWorker` when `ctx`
+  expires rather than run alongside it), and a parent's hooks after a child's.
 - `Start`'s rollback goes through `Stop` with `context.WithoutCancel`, so it
   stops child scopes and waits for `Worker` hooks.
 - Whichever `Stop` call queues a handoff owns that teardown's context; a later
@@ -471,178 +432,158 @@ with an `OnStop` for an `OnStart` that never finished.
 
 ## Testing strategy
 
-Four layers, each catching a different class:
+Five layers, each catching a different class.
 
-- The regression files — one test per historical defect, grouped by the part
-  of the library the defect lived in rather than by the review that found it:
-  `cycles_test.go` (the resolution path), `wiring_test.go` (registration and
-  lookup), `teardown_test.go` (start, stop, rollback), `drain_test.go` and
-  `worker_test.go` (`Worker` hooks and `Shutdown`), with the stand-in types they
-  share in `fixtures_test.go`. A new one goes wherever its rule lives.
+**The regression files** — one test per historical defect, grouped by the part
+of the library the defect lived in rather than by the review that found it:
+`cycles_test.go` (the resolution path), `wiring_test.go` (registration and
+lookup), `teardown_test.go` (start, stop, rollback), `drain_test.go` and
+`worker_test.go` (`Worker` hooks and `Shutdown`), with the stand-in types they
+share in `fixtures_test.go`. A new one goes wherever its rule lives.
+Provenance is a tag on each test -- `(review 2, 5)`, `(pass 4)` -- because
+grouping by it put three files between two tests of the same machine; each
+file's header explains the tags and the commit each review was checked against.
+**Verify a new test fails against the commit that preceded the fix**, e.g. by
+restoring the old `di.go` from git and running just that test, and tag it.
+Several tests here turned out to pass both before and after; say so rather than
+implying coverage.
 
-  Provenance moved into a tag on each test -- `(review 2, 5)`, `(pass 4)` --
-  because grouping by it put three files between two tests of the same
-  machine. Each file's header lists the tags and the commit each review was
-  checked against. **Verify a new test fails against the commit that preceded
-  the fix**, e.g. by restoring the old `di.go` from git and running just that
-  test, and tag it. Several tests here turned out to pass both before and
-  after; say so rather than implying coverage.
-- `property_test.go` — random *registration* sequences checked against a model
-  of the eager rules and of which registration serves a key: a repeat must be
-  marked `Override`, an `Override` needs a target, a group member does neither.
-  A predictive model can be wrong in the same way as the code, so treat it as
-  needing its own scrutiny; the override half was mutation-tested when added.
-- `machine_test.go` — random *operation* sequences (register, resolve, start,
-  stop, shutdown) across a root, two children and a grandchild,
-  checked against invariants taken from documented guarantees rather than
-  predicted values. This is the layer that catches error-path and cross-scope
-  bugs. I4 has no exemptions now that every lifetime is tracked. The old
-  exemption for aliased keys is what once hid a scope handing out two live
-  values for one interface, so do not reintroduce one lightly.
+**`property_test.go`** — random *registration* sequences checked against a model
+of the eager rules and of which registration serves a key: a repeat must be
+marked `Override`, an `Override` needs a target, a group member does neither. A
+predictive model can be wrong in the same way as the code, so treat it as
+needing its own scrutiny; the override half was mutation-tested when added.
 
-  `op.wire` is a bit that was spare in the fifth byte, so adding it kept every
-  corpus entry's meaning: when set, the shapes that have a constructor to hand
-  over register it through `Wire` instead of `Provide`, in both this machine
-  and the concurrent driver, which is what puts `reflect.Call` under `-race`
-  and gives `Validate` declared edges to walk. `Validate` itself is checked
-  at the end of every sequence (I8: builds nothing, repeatable) and inside the
-  concurrent render lane; what it *says* is pinned by `validate_test.go`,
-  because predicting it here would model the lookup rules a second time.
-  The same bit turns shape 1 (machine) and shape 2 (concurrent) into a
-  wrapper over whatever serves the key, or a registration-time rejection;
-  the property model tracks a per-key chain length, since an eager wrapped
-  key builds every registration in its chain under one name.
-- `lifecyclemodel_test.go` — the one place that *does* predict, because the
-  argument against predicting does not hold for it. What serves a key depends
-  on overrides and the eager rules, and modelling that would be
-  modelling the code twice; what happens to an instance *once it exists* is a
-  small state machine the package documents completely, and it is the half
-  every review found defects in. So the model takes builds as given -- the
-  constructors report themselves -- and predicts the rest: which hooks are
-  owed, in what order, exactly once (M1-M6). It is what lets the sequential
-  layer check the thing the concurrent driver says it cannot: that an instance
-  owing a drain gets one.
+**`machine_test.go`** — random *operation* sequences (register, resolve, start,
+stop, shutdown) across a root, two children and a grandchild, checked against
+invariants taken from documented guarantees rather than predicted values. This
+is the layer that catches error-path and cross-scope bugs. I4 has no exemptions
+now that every lifetime is tracked; the old exemption for aliased keys is what
+once hid a scope handing out two live values for one interface, so do not
+reintroduce one lightly.
 
-  Two facts are observed rather than predicted, and both are marked in the
-  file. Whether a start step succeeded, because a rollback stops what had
-  started at the moment it failed. And whether `Start` was ever called on a
-  scope, read back through `Scope.Context`, because whether a rejected `Start`
-  had already recorded its context depends on which panic came first, which
-  is not a documented guarantee.
+`op.wire` is a bit that was spare in the fifth byte, so adding it kept every
+corpus entry's meaning: when set, the shapes that have a constructor to hand
+over register it through `Wire` instead of `Provide`, in both this machine and
+the concurrent driver, which is what puts `reflect.Call` under `-race` and
+gives `Validate` declared edges to walk. `Validate` is checked at the end of
+every sequence (I8: builds nothing, repeatable) and inside the concurrent
+render lane; what it *says* is pinned by `validate_test.go`, because predicting
+it here would model the lookup rules a second time. The same bit turns shape 1
+(machine) and shape 2 (concurrent) into a wrapper over whatever serves the key,
+or a registration-time rejection; the property model tracks a per-key chain
+length, since an eager wrapped key builds every registration in its chain under
+one name.
 
-  Mutation-tested, and the result is worth keeping in mind: stopping in build
-  order instead of reverse is caught by the fuzzer in 0.06s and *not* by the
-  400 seeded sequences. The seeded sweep is thinner than the accumulated fuzz
-  corpus; when a model check finds nothing, run the fuzzer before believing
-  it.
-- `concurrent_test.go` — the same operations run in parallel lanes under
-  `-race`, in two phases (wire, then everything else). It checks only what
-  survives concurrency: nothing panics unexpectedly, every operation returns,
-  nothing is stopped more often than built, and the stop-order oracle, which
-  is the layer that catches a parent running ahead of a child. Five more
-  oracles cover the drain phase and the classes C1 cannot see: no stop hook of
-  an instance begins inside or before that instance's drain hook (C6), a drain
-  hook can still resolve (C7), one fixed graph gives one verdict, so two
-  resolutions of a key never disagree about a cycle (C8), every instance that
-  owes a stop step gets exactly one by quiescence (C9), and a resolution
-  *begun* after its scope's Stop returned fails (C10).
+**`lifecyclemodel_test.go`** — the one place that *does* predict, because the
+argument against predicting does not hold for it. What serves a key depends on
+overrides and the eager rules, and modelling that would be modelling the code
+twice; what happens to an instance *once it exists* is a small state machine
+the package documents completely, and it is the half every review found defects
+in. So the model takes builds as given -- the constructors report themselves --
+and predicts the rest: which hooks are owed, in what order, exactly once
+(M1-M6). It is what lets the sequential layer check the thing the concurrent
+driver says it cannot: that an instance owing a drain gets one.
 
-  C9 is the one that needed a definition of quiescence, since a release
-  deferred past a missed deadline lands after every Stop has returned:
-  `settle` polls until no hook is running and nothing owed is unreleased.
-  Starts and stops share one phase now that `Stop` waits for a start step;
-  keeping them apart was a workaround for the handoff.
+Two facts are observed rather than predicted, and both are marked in the file:
+whether a start step succeeded, because a rollback stops what had started at
+the moment it failed; and whether `Start` was ever called on a scope, read back
+through `Scope.Context`, because whether a rejected `Start` had already
+recorded its context depends on which panic came first, which is not a
+documented guarantee.
 
-  `scheduler_test.go` makes the interleaving an input. Every hook and every
-  operation parks at a scheduling point, and a seed decides which parked
-  goroutine goes next, so `TestMachineScheduled` replays one sequence under
-  many orderings with every oracle live. It explores rather than verifies: a
-  released goroutine can block inside the container where no test can see it,
-  and the next release then happens on a timer, so two runs of a seed can
-  still differ. The loop waits ~200µs for goroutines to gather before it
-  chooses, because releasing each one as it arrives leaves nothing to decide
-  and the seed decides nothing -- that single change took a sample sequence
-  from two distinct schedules across twelve seeds to six.
+**`concurrent_test.go`** — the same operations run in parallel lanes under
+`-race`, in two phases (wire, then everything else). It checks only what
+survives concurrency, as ten oracles listed at the top of the file: only a
+configuration rejection may panic (C1), every operation returns (C2), `Stop`
+respects scope order (C3, the one that catches a parent running ahead of a
+child), nothing is stopped more often than built (C4), a service is built once
+however many resolutions race for it (C5), no stop hook of an instance begins
+while that instance's own drain hook runs (C6), drain hooks resolve (C7), one
+fixed graph gives one verdict so two resolutions of a key never disagree about
+a cycle (C8), every instance owing a stop step gets exactly one by quiescence
+(C9), and a resolution *begun* after its scope's `Stop` returned fails (C10).
+C9 needed a definition of quiescence, since a release deferred past a missed
+deadline lands after every `Stop` has returned: `settle` polls until no hook is
+running and nothing owed is unreleased.
 
-  `TestMachineConcurrentShapes` builds op sequences directly rather than from
-  bytes. A byte seed has to survive four modulos to reach a particular
-  interleaving, and the three shapes there -- an impatient `Stop` under an
-  ancestor's drain, the same a level deeper, and an impatient `Stop` of a
-  running worker -- are what the coverage gap said no random sequence was
-  reaching. Both were checked by mutation: delete either deferred release in
-  `di.go` and C9 fails.
-- The three September 2026 reviews are the source of most of those tests: the
-  first found eleven defects plus a gap it did not count, the second six plus
-  the `Worker`-hook overlap and then two the tightened driver found on its own,
-  and the third six that were all cross-phase or cross-branch -- a drain hook
-  stopping a sibling scope, a release dropped with a missed deadline, a
-  shutdown cause published after `Run` had read it, a false cycle through a
-  finished frame, a `Transient` skipping the stopped check, and a child scope
-  made in a constructor starting a fresh path. No generator reaches any of
-  the third review's six, which is the same lesson as the second: they need
-  shapes the driver does not build.
+The driver's hooks can panic -- a drain hook resolves through child scopes, and
+one left with a permanently rejected registration meets the rejection as a
+panic out of `Resolve`, which the container recovers into the hook's error. So
+every piece of bookkeeping a hook does after its first line must be deferred,
+or an oracle reads a hook that panicked as one that never ended. C6 reported
+exactly that once.
 
-  The driver's hooks can panic -- a drain hook resolves through child scopes,
-  and one left with a permanently rejected registration meets the rejection
-  as a panic out of `Resolve` -- and the container recovers that into the
-  hook's error, which is right. So every piece of bookkeeping a hook does
-  after its first line must be deferred, or the oracle reads a hook that
-  panicked as one that never ended. C6 reported exactly that once.
+**The exemptions these oracles need are the most dangerous part of them.** C3
+cannot order a release that a missed deadline deferred, so it is switched off
+for scopes where a `Stop` reported one -- and switching C6 off with it, which
+looked like the same exemption, silently disabled the drain/stop overlap check
+for the one shape that needs it. C6 holds however impatient the `Stop` was: a
+missed deadline defers a release, it never runs one early. Mutation-test an
+exemption before believing it.
 
-  The exemptions these oracles need are the most dangerous part of them. C3
-  cannot order a release that a missed deadline deferred, so it is switched
-  off for scopes where a `Stop` reported one -- and switching C6 off with it,
-  which looked like the same exemption, silently disabled the drain/stop
-  overlap check for the one shape that needs it. C6 holds however impatient
-  the `Stop` was: a missed deadline defers a release, it never runs one early.
-  Mutation-test an exemption before believing it.
+`scheduler_test.go` makes the interleaving an input: every hook and every
+operation parks at a scheduling point and a seed decides which parked goroutine
+goes next, so `TestMachineScheduled` replays one sequence under many orderings
+with every oracle live. It explores rather than verifies -- a released
+goroutine can block inside the container where no test can see it -- and the
+loop waits ~200µs for goroutines to gather before it chooses, because releasing
+each one as it arrives leaves the seed nothing to decide.
+`TestMachineConcurrentShapes` builds op sequences directly rather than from
+bytes, because a byte seed has to survive four modulos to reach a particular
+interleaving; its three shapes are what the coverage gap said no random
+sequence was reaching. Delete either deferred release in `di.go` and C9 fails.
 
-  Every defect in both reviews lived in a gap the generators could not see,
-  and closing those gaps found a seventh. Two things had been missing, both
-  now fixed: C1 accepted *any* `panic(error)` as legitimate, because that is
-  how `Get` reports failure, so a false `ErrCycle` read as normal; and the
-  drain hooks returned nil and touched nothing, so the phase was exercised
-  without being checked.
-
-  The lesson is about *shapes*, not oracles. Adding C6 changed nothing until
-  the driver gained a registration that is `Scoped` **and** draining: every
-  other draining shape is a plain singleton, so resolving one from a child
-  hands back the instance the owner already holds, and a drain-owing instance
-  could never appear in a child scope at all. One missing registration made a
-  whole class of defect unreachable. When an oracle finds nothing, suspect the
-  generator before believing the code.
-- `FuzzMachine` — the same invariants under coverage-guided search. Corpus in
-  `testdata/fuzz/` is committed; CI runs 90s in its own job.
-- The rendering is generated against too: the sequential machine renders
-  every scope and explains every key at the end of a sequence (I7), and the
-  concurrent driver renders inside its lanes, which is the only way a
-  generator meets an instance mid-build or mid-start and the only thing that
-  puts the rendering's reads under `-race`. Both tolerate a configuration
-  rejection from `Explain`, which looks a key up and so commits the pending
-  batch exactly as a resolution would, and nothing else.
-- `scripts/generatorgap.go` — the map of what only the hand-written tests
-  reach, which is the map of where the next review will dig: every defect the
-  four September 2026 reviews found lived on such a line. CI runs it with a
-  floor of 90% generator coverage. When the floor moves, move it up.
-
-  CI also checks the script's arithmetic against `go tool cover -func`,
-  because the fourth review found the script wrong: it keyed coverage blocks
-  by line number, and `di.go` has eighteen lines carrying more than one block
-  -- a hook registered and its body declared in a single expression. Reaching
-  the registration made the body look covered. A tool that measures a gap has
-  to be measured itself.
-
-  It was wrong a second way, found when `explain.go` arrived: it indexed
-  functions from `di.go` alone and attributed a block by line without
-  looking at which file it came from, so every block of the new file was
-  charged to whichever function of the old one started above the same line.
-  The answer looked plausible, which is the dangerous kind of wrong.
-`FuzzMachineConcurrent` is the coverage-guided driver for the concurrent
-oracles; run it with `-race` or it checks almost nothing.
-
-The sequential generators do not explore goroutine interleavings. That is what
-`concurrent_test.go` and the stress loops under `-race` are for (see
+`FuzzMachine` and `FuzzMachineConcurrent` run the same invariants under
+coverage-guided search; the corpus in `testdata/fuzz/` is committed and CI runs
+90s in its own job. Run the concurrent one with `-race` or it checks almost
+nothing. The sequential generators do not explore goroutine interleavings; that
+is what `concurrent_test.go` and the stress loops under `-race` are for (see
 `TestRegressionStartRace`).
+
+The rendering is generated against too: the sequential machine renders every
+scope and explains every key at the end of a sequence (I7), and the concurrent
+driver renders inside its lanes, which is the only way a generator meets an
+instance mid-build or mid-start and the only thing that puts the rendering's
+reads under `-race`. Both tolerate a configuration rejection from `Explain`,
+which looks a key up and so commits the pending batch exactly as a resolution
+would, and nothing else.
+
+`scripts/generatorgap.go` is the map of what only the hand-written tests reach,
+which is the map of where the next review will dig: every defect the September
+2026 reviews found lived on such a line. CI runs it with a floor of 90%
+generator coverage; when the floor moves, move it up. CI also checks the
+script's arithmetic against `go tool cover -func`, because it has been wrong
+twice -- once keying coverage blocks by line number, when `di.go` has eighteen
+lines carrying more than one block, and once attributing a block to a function
+in the wrong file when `explain.go` arrived. Both answers looked plausible,
+which is the dangerous kind of wrong. A tool that measures a gap has to be
+measured itself.
+
+**Where the defects came from.** Five reviews in September 2026, preceded by
+seven narrower passes. The first found eleven defects plus a gap it did not
+count; the second six plus the `Worker`-hook overlap, and then two more the
+tightened driver found on its own; the third six that were all cross-phase or
+cross-branch -- a drain hook stopping a sibling scope, a release dropped with a
+missed deadline, a shutdown cause published after `Run` had read it, a false
+cycle through a finished frame, a `Transient` skipping the stopped check, and a
+child scope made in a constructor starting a fresh path. No generator reaches
+any of the third review's six.
+
+That is the recurring lesson, and it is about *shapes*, not oracles. Adding C6
+changed nothing until the driver gained a registration that is `Scoped` **and**
+draining: every other draining shape is a plain singleton, so resolving one
+from a child hands back the instance the owner already holds, and a
+drain-owing instance could never appear in a child scope at all. One missing
+registration made a whole class of defect unreachable. Two other things had
+been missing and are now fixed: C1 accepted *any* `panic(error)` as
+legitimate, because that is how `Get` reports failure, so a false `ErrCycle`
+read as normal; and the drain hooks returned nil and touched nothing, so the
+phase was exercised without being checked. **When an oracle or a model check
+finds nothing, suspect the generator before believing the code** -- and run the
+fuzzer, since the seeded sweep is thinner than the accumulated corpus.
+Mutation-testing showed the difference: stopping in build order instead of
+reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
 
 ## Repo conventions
 
@@ -651,50 +592,28 @@ The sequential generators do not explore goroutine interleavings. That is what
   fails on the sync check.
 - **`benchmarks/` is a separate module** with a `replace ../` directive, so the
   library itself stays dependency-free. `samber/do` is a dependency there only.
-- **`site/` is the landing page and guide**, a React project built with
-  Gravity UI and prerendered to static HTML, deployed to GitHub Pages by
-  `.github/workflows/pages.yml` on pushes to `main` that touch it or
-  `examples/guide/`. It ships no React: `vite build` makes a server bundle and
-  `scripts/prerender.ts` runs it once per locale, so the only JavaScript on the
-  page is `src/inline-script.ts`, inlined into the head: it settles the theme
-  before the first paint, and drives the theme button, the copy button, the
-  active item in the `Toc`, the star count on the GitHub button (the one
-  third-party request, made after paint), and the dismissal of the language
-  menu, which opens by itself because it is a `details`. Nothing re-renders,
-  so both states of a toggle are in the markup and CSS shows the one that
-  applies. Every uikit component is imported through `src/uikit.ts` because
-  that list is what gives the dev server its CSS (`src/dev-styles.ts`): a
-  build collects each component's own stylesheet out of the server bundle,
-  and the dev server, having no client bundle, has nothing to collect them
-  with -- so a component imported around that list is styled in the build and
-  bare in dev, and a page with uikit's tokens and none of its components
-  looks like a botched design rather than a missing file.
-  Without `BASE_PATH` the built URLs are relative, so `build/` can be opened
-  off the filesystem, and `npm run preview` takes the base from the built HTML
-  rather than the environment: every way of serving the build at the wrong
-  prefix produces a page whose stylesheet 404s, and that page looks like a
-  botched design rather than a missing file, so it gets reported as one. The
-  page is in
-  English at `/` and Russian at `/ru/`; both locales are one value of the
-  `Content` type, so a missing translation is a compile error. Its code blocks
-  are the files of `examples/guide`,
-  imported as raw text at build time, so the guide cannot drift from code the
-  Go CI compiles and tests; the `Explain` tree it shows is
-  `examples/guide/testdata/explain.txt`, pinned by a golden test with an
-  `-update` flag. Code is never translated: it is Go source and output the Go
-  tests own. `site/README.md` has the rest, including the two configuration
-  traps -- `ssr.noExternal` for Gravity UI, whose components' CSS imports are
-  what build the stylesheet, and `build.ssrEmitAssets`, which writes it out.
-  `examples/guide` is a multi-package application (config,
-  storage, cache, mail, api) whose `cmd/api` blocks on signals like the other
-  servers; its tests start it on a random port instead. It uses no `Provide`
-  closure: the one thing that needs the scope, the request-scope middleware,
-  comes from `dihttp.Module` as a `dihttp.Middleware` dependency, and routes
-  resolve their handler types through `dihttp.Handle((*Users).Show)`. Its
-  packages export only their contract and `Module`: keys are types, so an
-  unexported type is a private service, which is the whole privacy model
-  (the `Private()` marker and child-scope exports were considered and are
-  not needed; see the Modules section of the README).
+- **`site/` is the landing page and guide** at https://floatdrop.github.io/di/,
+  a React project built with Gravity UI, prerendered to static HTML in English
+  at `/` and Russian at `/ru/`, and deployed by `.github/workflows/pages.yml`
+  on pushes to `main` that touch it or `examples/guide/`. It ships no React;
+  the only JavaScript is one inlined script. Its code blocks are the files of
+  `examples/guide`, imported as raw text at build time, so the guide cannot
+  drift from code the Go CI compiles and tests; the `Explain` tree and the
+  `Modules` report it shows are `examples/guide/testdata/`, pinned by golden
+  tests with an `-update` flag. Code is never translated. **`site/README.md`
+  has the rest**, including the traps -- every one of them produces a page that
+  reads as a botched design rather than a missing file, so read it before
+  believing a rendering bug.
+- **`examples/guide` is a multi-package application** (config, storage, cache,
+  mail, api) whose `cmd/api` blocks on signals like the other servers; its
+  tests start it on a random port instead. It uses no `Provide` closure: the one
+  thing that needs the scope, the request-scope middleware, comes from
+  `dihttp.Module` as a `dihttp.Middleware` dependency, and routes resolve their
+  handler types through `dihttp.Handle((*Users).Show)`. Its packages export only
+  their contract and `Module`: keys are types, so an unexported type is a
+  private service, which is the whole privacy model (the `Private()` marker and
+  child-scope exports were considered and are not needed; see the Modules
+  section of the README).
 - **`examples/app` and `examples/server` block on signals.** To exercise them,
   build and run with output going to the terminal, not redirected to a file —
   this harness loses a backgrounded server's startup output when redirected,
@@ -705,16 +624,17 @@ The sequential generators do not explore goroutine interleavings. That is what
   `Stop` issued. The deadline bounds how long `Stop` waits, never whether the
   release is owed, and `Stop` has already taken the instance off its scope's
   list, so nothing else will reach it: the handoff goroutine re-enters
-  `stopIfNeeded` with `context.WithoutCancel`, whose `Done` is nil, so it
-  waits properly and cannot recurse again. Any ordering oracle has to model them
-  or it will report them as defects; the concurrent driver does it by running
-  every `Start` before any `Stop`, so no start step is ever in flight.
+  `stopIfNeeded` with `context.WithoutCancel`, whose `Done` is nil, so it waits
+  properly and cannot recurse again. Any ordering oracle has to model them or it
+  will report them as defects; the concurrent driver does it by running every
+  `Start` before any `Stop`, so no start step is ever in flight.
 - **CHANGELOG is enforced.** `.github/workflows/release.yml` fails a tag push
-  when `CHANGELOG.md` has no `## [<version>]` section. The public API has been
+  when `CHANGELOG.md` has no `## [<version>]` section. It tracks library
+  behaviour: a docs- or site-only change adds no entry. The public API has been
   stable across tags; verify with `go doc -all` diffed between tags before
   choosing a version number.
 
-## Tooling caveat
+## Tooling caveats
 
 Generic methods need gopls **v0.23.0 or newer**. v0.21.1 rejects the code with
 `method must have no type parameters` and then reports cascading phantom type
