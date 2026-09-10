@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write # to publish the release
 
 jobs:
   changelog:
@@ -20,3 +20,40 @@ jobs:
             exit 1
           fi
           echo "found a CHANGELOG entry for $version"
+      # The notes are the section the step above just insisted on, so the
+      # release and the CHANGELOG cannot say different things. The heading is
+      # matched by prefix rather than by regex, because a version is full of
+      # dots. The section ends at the next release heading, or at the block of
+      # link definitions -- which only the oldest section is followed by, and
+      # a new section never is, but reading to end of file there would have
+      # published every compare link as release notes.
+      - name: publish the release with those notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { inside = 1; next }
+            inside && index($0, "## [") == 1 { exit }
+            inside && /^\[[^]]+\]:[ \t]/ { exit }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::the '## [$version]' section in CHANGELOG.md is empty"
+            exit 1
+          fi
+          # A tag pointing at a prerelease version is published as one.
+          case "$version" in
+            *-*) prerelease=--prerelease ;;
+            *) prerelease= ;;
+          esac
+          # Re-running the workflow, or moving a tag, updates the notes
+          # rather than failing on a release that is already there.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file notes.md \
+              --verify-tag $prerelease
+          fi
