@@ -4,6 +4,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/floatdrop/di.svg)](https://pkg.go.dev/github.com/floatdrop/di)
 [![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Ffloatdrop.github.io%2Fdi%2Fcoverage.json)](https://floatdrop.github.io/di/coverage.html)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Mentioned in Awesome Go](https://awesome.re/mentioned-badge-flat.svg)](https://github.com/avelino/awesome-go#dependency-injection)
 
 A dependency-injection container for Go 1.27+. Constructors are plain
 functions, keys are Go types, and the container builds, starts and stops
