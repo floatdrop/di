@@ -42,6 +42,16 @@ jobs:
           go run ./observe
       - name: test
         run: go test -race -count=1 -coverprofile=coverage.out ./...
+      # The profile the step above just wrote, which covers di, dihttp and
+      # dislog -- examples/ and benchmarks/ are separate modules and not part
+      # of the library's number. An outage at Codecov is not a reason to fail
+      # a build, so the upload cannot break the gate.
+      - name: upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
       - name: what only the hand-written tests reach
         run: |
           go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=generators.out .

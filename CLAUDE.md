@@ -592,6 +592,11 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
 - **README code blocks are generated.** They are embedded from `examples/` with
   embedmd markers. Run `gofmt -w` on an example *before* re-embedding, or CI
   fails on the sync check.
+- **Coverage is published to Codecov** from the profile CI already writes,
+  which covers `di`, `dihttp` and `dislog` only -- the two separate modules
+  are not part of the library's number. The upload runs with
+  `fail_ci_if_error: false`, because an outage there is not a reason to fail a
+  build, so a missing report is a stale badge and never a red gate.
 - **`examples/` and `benchmarks/` are separate modules**, each with a
   `replace ../` directive, so the root module keeps zero requires and the
   library's "no dependency outside the standard library" claim stays true.

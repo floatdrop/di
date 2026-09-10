@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/floatdrop/di/actions/workflows/ci.yml/badge.svg)](https://github.com/floatdrop/di/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/floatdrop/di.svg)](https://pkg.go.dev/github.com/floatdrop/di)
+[![codecov](https://codecov.io/gh/floatdrop/di/branch/main/graph/badge.svg)](https://codecov.io/gh/floatdrop/di)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A dependency-injection container for Go 1.27+. Constructors are plain
