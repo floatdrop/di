@@ -1176,13 +1176,29 @@ registration site, the duration, and the error if any.
 ## Performance
 
 [`benchmarks/`](benchmarks/) is a separate module comparing this package with
-[samber/do](https://github.com/samber/do) on the same four-service graph, so
-the library itself stays dependency-free. On an Apple M3 Max:
+[samber/do](https://github.com/samber/do) and
+[uber-go/dig](https://github.com/uber-go/dig) on the same four-service graph,
+so the library itself stays dependency-free. On an Apple M3 Pro:
 
 | | Warm resolve | Cold register and build |
 |---|---|---|
-| `di` | 39 ns, 64 B, 2 allocs | 3.7 µs, 4.3 kB, 70 allocs |
-| `do` v2.1 | 130 ns, 192 B, 6 allocs | 6.5 µs, 11.5 kB, 120 allocs |
+| `di`, `Provide` closure | 38 ns, 64 B, 2 allocs | 3.7 µs, 4.5 kB, 70 allocs |
+| `di`, `Wire` | 38 ns, 64 B, 2 allocs | 4.2 µs, 4.9 kB, 77 allocs |
+| `do` v2.1 | 125 ns, 192 B, 6 allocs | 6.1 µs, 11.5 kB, 120 allocs |
+| `dig` v1.19 | 445 ns, 768 B, 24 allocs | 16.4 µs, 24.3 kB, 302 allocs |
+
+`di` is measured twice because `dig.Provide` is reflective like `Wire` rather
+than like a `Provide` closure. The two warm figures are the same, which is
+what "a warm `Get` is the same code for both" means; the cold difference is
+the signature read and `reflect.Call`, about 120 ns per constructor here.
+
+**The `dig` warm figure needs a caveat.** dig has no typed accessor, so the
+nearest thing to a resolve is `Invoke` with a function dig reflects over on
+every call, and an fx application invokes once at startup and never again.
+The cold comparison is the fair one, and it is the one fx cares about; read
+the warm number as what dig costs if used for something it does not set out
+to do — resolving on a request path, which is what `Scoped` bindings here are
+for.
 
 The cold figure counts the registration-site strings, so its byte total moves
 with how deep the source sits on disk; compare allocation counts across
