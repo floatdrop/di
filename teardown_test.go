@@ -617,6 +617,34 @@ func TestReview2PanickingStartHookIsAFailure(t *testing.T) {
 	}
 }
 
+// A panicking start hook is observed like a failing one: its EventStart is
+// emitted with the panic as Err, as a panicking drain or stop hook's already
+// was. It was not, because start called the hook directly rather than through
+// callHook, so the panic skipped the emit and observers saw a service that
+// was built and then never heard of again. Found by the September 2026
+// code-organisation review and checked against 80895d2.
+func TestPanickingStartHookIsObserved(t *testing.T) {
+	var events []di.Event
+	root := di.New()
+	root.Observe(func(ev di.Event) {
+		if ev.Kind == di.EventStart {
+			events = append(events, ev)
+		}
+	})
+	root.Provide(func(*di.Scope) *DB { return &DB{} }).
+		OnStart(func(context.Context, *DB) error { panic("boom") }).
+		Eager()
+	if err := root.Start(context.Background()); err == nil {
+		t.Fatal("Start succeeded with a panicking OnStart")
+	}
+	if len(events) != 1 {
+		t.Fatalf("observed %d start events, want 1", len(events))
+	}
+	if ev := events[0]; ev.Err == nil || !strings.Contains(ev.Err.Error(), "boom") {
+		t.Fatalf("the start event carries %v, want the panic", ev.Err)
+	}
+}
+
 // A hook that panics must not take the teardown down with it. The start step
 // was always recovered this way; the drain and stop steps were not, so a panic
 // in either propagated out of Stop halfway through -- stopOnce claimed and

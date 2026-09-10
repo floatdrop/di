@@ -374,7 +374,12 @@ scope stopped is undone the same way.
 
 | File | What it holds |
 |---|---|
-| [`di.go`](../di.go) | registration, resolution, the phase machine, scopes, lifecycle |
+| [`di.go`](../di.go) | the package doc, keys, events, `Scope`, modules, `Test` |
+| [`binding.go`](../binding.go) | registration: `Provide`, `Value`, `Wire`, `Wrap` and the `Binding` handle |
+| [`state.go`](../state.go) | a scope's registry, `freeze`, the readers that walk the parent chain |
+| [`resolve.go`](../resolve.go) | the resolution path, both cycle detectors, the build step, `Get` and friends |
+| [`lifecycle.go`](../lifecycle.go) | the phase machine, the hooks, `Start` and `Stop` |
+| [`run.go`](../run.go) | `Run` and `Shutdown` |
 | [`validate.go`](../validate.go) | the walk over declared dependencies |
 | [`explain.go`](../explain.go) | the two renderings of the graph |
 | [`dihttp/`](../dihttp) | the net/http adapter: request scopes and handlers |

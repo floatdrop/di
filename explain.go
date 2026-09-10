@@ -1,7 +1,7 @@
 package di
 
 // Rendering the graph. Nothing here participates in resolution or teardown:
-// it reads the edges di.go records while constructors run, under the same
+// it reads the edges resolve.go records while constructors run, under the same
 // mutex that guards every other field of an instance, and never holds two of
 // those at once, and it reads the dependency lists Wire declares, which never
 // change after registration. It is also the only part of the package that

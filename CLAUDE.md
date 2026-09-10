@@ -5,11 +5,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
 on generic methods. [`docs/DESIGN.md`](docs/DESIGN.md) explains resolution,
 lifetimes, phases, cycles and teardown with diagrams; this file is the working
-detail behind it, and the two are edited together. The library is `di.go`, the
-rendering of the recorded graph in `explain.go`, the check of the declared
-graph in `validate.go`, the net/http adapter in `dihttp/` and the slog bridge
-for `Observe` in `dislog/`; everything else is tests and two separate modules,
-`examples/` and `benchmarks/`.
+detail behind it, and the two are edited together. The library is six files:
+`di.go` (package doc, keys, events, `Scope`, modules, `Test`), `binding.go`
+(registration and the `Binding` handle), `state.go` (a scope's registry,
+`freeze`, the parent-chain readers), `resolve.go` (the resolution path, both
+cycle detectors, the build step, `Get` and friends), `lifecycle.go` (the
+instance phase machine, hooks, `Start` and `Stop`) and `run.go` (`Run` and
+`Shutdown`). Beside them are the rendering of the recorded graph in
+`explain.go`, the check of the declared graph in `validate.go`, the net/http
+adapter in `dihttp/` and the slog bridge for `Observe` in `dislog/`;
+everything else is tests and two separate modules, `examples/` and
+`benchmarks/`.
 
 ## Commands
 
@@ -44,8 +50,8 @@ test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./... \
 
 ## Architecture
 
-Reading `di.go` top to bottom does not reveal the model; these are the pieces
-that only make sense together.
+Reading the library top to bottom does not reveal the model; these are the
+pieces that only make sense together.
 
 **Three levels of state.** A `binding` is a registration: its key, lifetime,
 hooks, and `build` func. An `instance` is one built value of a binding. A
@@ -297,7 +303,7 @@ prototyped beside it and dropped: fourteen methods to save a repeated type
 argument, with the compiler checking only an arity the reflective form cannot
 get wrong.) Every registration method calls `register` directly, because
 `callsite` counts a fixed number of frames and a `Wire` that went through
-`Provide` would record a site inside `di.go`.
+`Provide` would record a site inside the library.
 
 `Explain` draws `wants` under an unbuilt node with dashed edges
 (`declaredInto`), switching back to the recorded tree wherever a declared
@@ -389,10 +395,12 @@ harness classify panics by that rule.
 **When a stop is owed.** `OnStop` runs when `OnStart` succeeded, or when there
 is no `OnStart` to pair with (or the scope was never started), making `OnStop` a
 plain destructor. A service built but never started is *not* torn down. Only a
-start hook that *returned* counts as succeeded: `startClaimed` recovers a
-panicking hook into a failed start, or the instance would sit at
-`phaseStarted`, be served to a caller that recovered the panic, and be paired
-with an `OnStop` for an `OnStart` that never finished. `binding.used` is set
+start hook that *returned* counts as succeeded: `callHook` turns a panicking
+hook into a failed start, or the instance would sit at `phaseStarted`, be
+served to a caller that recovered the panic, and be paired with an `OnStop`
+for an `OnStart` that never finished. `instance.paired` and `instance.owes`
+are the one statement of that predicate, shared by the drain and stop steps.
+`binding.used` is set
 only when a resolution actually served a value, and `state.served` records keys
 a scope resolved from an *outer* scope, because `used` lives on the outer
 binding and cannot protect the inner scope.
@@ -413,8 +421,9 @@ binding and cannot protect the inner scope.
   given gets an error naming `Shutdown`. A hook that passes a context of its
   own is invisible and waits, which is why the fallback still has to be a
   bounded wait rather than a promise.
-- Every user hook is called through `callHook` (or `startClaimed`'s
-  equivalent), which turns a panic into that hook's error. A cancelled
+- Every user hook is called through `callHook`, which turns a panic into that
+  hook's error, and every step is reported through `state.report`, so a
+  hook that panicked is observed like one that failed. A cancelled
   `Worker`'s return is dropped only when it says nothing beyond
   `context.Canceled` (`onlyCancellation` walks the error tree); `errors.Is`
   matched `errors.Join(ctx.Err(), failure)` and dropped the failure with it
@@ -446,7 +455,7 @@ Provenance is a tag on each test -- `(review 2, 5)`, `(pass 4)` -- because
 grouping by it put three files between two tests of the same machine; each
 file's header explains the tags and the commit each review was checked against.
 **Verify a new test fails against the commit that preceded the fix**, e.g. by
-restoring the old `di.go` from git and running just that test, and tag it.
+restoring the old library files from git and running just that test, and tag it.
 Several tests here turned out to pass both before and after; say so rather than
 implying coverage.
 
@@ -534,7 +543,8 @@ each one as it arrives leaves the seed nothing to decide.
 `TestMachineConcurrentShapes` builds op sequences directly rather than from
 bytes, because a byte seed has to survive four modulos to reach a particular
 interleaving; its three shapes are what the coverage gap said no random
-sequence was reaching. Delete either deferred release in `di.go` and C9 fails.
+sequence was reaching. Delete either deferred release in `lifecycle.go` and C9
+fails.
 
 `FuzzMachine` and `FuzzMachineConcurrent` run the same invariants under
 coverage-guided search; the corpus in `testdata/fuzz/` is committed and CI runs
@@ -556,9 +566,9 @@ which is the map of where the next review will dig: every defect the September
 2026 reviews found lived on such a line. CI runs it with a floor of 90%
 generator coverage; when the floor moves, move it up. CI also checks the
 script's arithmetic against `go tool cover -func`, because it has been wrong
-twice -- once keying coverage blocks by line number, when `di.go` has eighteen
-lines carrying more than one block, and once attributing a block to a function
-in the wrong file when `explain.go` arrived. Both answers looked plausible,
+twice -- once keying coverage blocks by line number, when the library has
+eighteen lines carrying more than one block, and once attributing a block to a
+function in the wrong file when `explain.go` arrived. Both answers looked plausible,
 which is the dangerous kind of wrong. A tool that measures a gap has to be
 measured itself.
 
