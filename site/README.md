@@ -83,7 +83,7 @@ Add its id to `StepId`, then add the step to `steps` in **every** locale;
 `tsc` will not let you forget one. If it shows a new file, add the id
 to `FigureId`, the import to `src/code.ts`, and the figure to `buildFigures`.
 
-## Seven things worth knowing
+## Eight things worth knowing
 
 `src/inline-script.ts` is inlined by calling `Function.prototype.toString` on
 it, so it is cut out of its module and must close over nothing: everything it
@@ -132,3 +132,13 @@ Gravity UI's own `styles/fonts.css` pulls Inter from Google Fonts. Nothing
 third-party is on the path to rendering the page, so `src/styles/main.css`
 overrides the font stack instead; there is a comment there saying how to get
 Inter back.
+
+`site/build` is not only the site. `pages.yml` writes `coverage.html` and
+`coverage.json` into it after `npm run build` and before the artifact is
+uploaded, so the coverage report is served by the same deploy as the pages
+that link to it. Two consequences: a local `npm run build` gives a tree
+without them, and the report is the one thing on this site no local build
+reproduces; and the workflow's path filter has `**/*.go` in it, so a change to
+Go code deploys the site. Narrow that filter back to `site/` and the badge in
+the root README goes on reading a figure from whenever the site last changed,
+with nothing failing to say so.

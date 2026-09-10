@@ -592,6 +592,16 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
 - **README code blocks are generated.** They are embedded from `examples/` with
   embedmd markers. Run `gofmt -w` on an example *before* re-embedding, or CI
   fails on the sync check.
+- **Coverage is published with the site, not to a service.** `pages.yml`
+  writes `go tool cover -html` and a shields endpoint JSON into `site/build`
+  before uploading the artifact, so the report at
+  `floatdrop.github.io/di/coverage.html` and the badge that links to it are
+  one deploy and cannot disagree. It covers `di`, `dihttp` and `dislog`: the
+  two separate modules are not part of the library's number. **That is why the
+  site workflow's path filter includes `**/*.go`** -- coverage moves when the
+  library or its tests do, and narrowing the paths back to `site/` would leave
+  the badge reading a figure from whenever the site last changed, with nothing
+  failing to say so.
 - **`examples/` and `benchmarks/` are separate modules**, each with a
   `replace ../` directive, so the root module keeps zero requires and the
   library's "no dependency outside the standard library" claim stays true.
