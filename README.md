@@ -134,7 +134,7 @@ To get a service back, call the scope, from a constructor or from outside:
 |---|---|
 | `s.Get[T]()` | `T`. Inside a constructor a failure unwinds to the caller; at top level it panics with the error. |
 | `s.Resolve[T]()` | `(T, error)`. Never panics on a wiring problem. |
-| `s.Maybe[T]()` | `(T, bool)`, for optional dependencies. |
+| `s.Maybe[T]()` | `(T, bool)`; see [Optional dependencies](#optional-dependencies). |
 | `s.All[T]()` | Every member of the group for `T`, across the scope chain. |
 | `s.Must(v, err)` | `v`, or aborts the constructor with `err`. |
 | `s.Context()` | The context passed to `Start`, so constructors can dial with a deadline. |
@@ -188,6 +188,167 @@ Three rules, all checked when the scope is next resolved:
   built nothing, so the key stays open.
 - `Eager` on a `Scoped` binding, and `Scoped` on a `Value`, are rejected
   whichever order the methods were called in.
+
+#### Optional dependencies
+
+There is no `optional` marker on a parameter. A key is provided or it is not,
+and a dependency nothing provides is an error — so a service that can do
+without something says so by providing the absence instead.
+
+The first way is a nil default. `s.Value[*Cache](nil)` provides the key with
+nothing in it, and `*Cache` stays an ordinary declared dependency: `Validate`
+checks the edge, `Explain` draws it, and a deployment that has a cache
+overrides it. The constructor takes the parameter as it takes any other and
+handles the nil.
+
+For an interface, a null object goes further: provide an implementation that
+does nothing, and nothing downstream has a branch to write at all. Either way
+the absence is a registration with a call site, which is what `Explain` and
+`Modules` report, and the key really is provided — so the rules above still
+hold. An `Override()` before anything resolves is how the real one gets in,
+and once the nil has been served a later registration of `*Cache` in that
+scope is rejected, so the two halves of the program cannot end up disagreeing
+about whether there is a cache.
+
+Branching on presence is the third way, and it is for a key nothing registers
+at all. `s.Maybe[T]()` returns `(T, bool)`, where false means no scope in the
+chain provides `T`, and only a `Provide` closure can ask:
+
+<details>
+<summary><code>examples/optional/main.go</code>, the program that prints the output below</summary>
+
+[embedmd]:# (examples/optional/main.go go)
+```go
+// Optional dependencies: a key that a deployment may or may not have. A nil
+// default and a null object keep every declared edge provided, so the graph
+// still checks; Maybe answers presence when a constructor has to branch on a
+// key nothing registered at all.
+package main
+
+import (
+	"fmt"
+
+	"github.com/floatdrop/di"
+)
+
+type Cache struct{ addr string }
+type Tracer struct{}
+type Store struct{ cache *Cache }
+type Report struct{ line string }
+
+type Metrics interface{ Count(string) }
+
+type nopMetrics struct{}
+type logMetrics struct{}
+
+func (nopMetrics) Count(string)   {}
+func (logMetrics) Count(n string) { fmt.Println("count:", n) }
+
+// The constructors know nothing about di. A dependency that may be absent is
+// a parameter like any other, and the nil is the absence.
+func NewCache() *Cache          { return &Cache{addr: "localhost:6379"} }
+func NewNopMetrics() nopMetrics { return nopMetrics{} }
+func NewLogMetrics() logMetrics { return logMetrics{} }
+
+func NewStore(c *Cache, m Metrics) *Store {
+	m.Count("store.built")
+	return &Store{cache: c}
+}
+
+// Something has to handle the absence, and this is where it happens.
+func (s *Store) Get(key string) string {
+	if s.cache == nil {
+		return "db:" + key
+	}
+	return "cache:" + key
+}
+
+// A closure is what can ask whether a key is registered at all: Maybe is
+// (T, bool), and false means nothing in this scope or above provides it.
+func NewReport(s *di.Scope) *Report {
+	line := s.Get[*Store]().Get("1")
+	if _, ok := s.Maybe[*Tracer](); ok {
+		line = "traced(" + line + ")"
+	}
+	return &Report{line: line}
+}
+
+// Base is the wiring every deployment shares. *Cache is provided as nil and
+// Metrics as a null object, so *Store has no unprovided dependency and needs
+// no di import to say it can do without them.
+func Base(s *di.Scope) {
+	s.Value[*Cache](nil)
+	s.Wire[Metrics](NewNopMetrics)
+	s.Wire[*Store](NewStore)
+	s.Provide(NewReport)
+}
+
+func main() {
+	plain := di.New()
+	plain.Use(Base)
+
+	// Every declared edge is provided, so there is nothing to report. The
+	// closure is unchecked, which is what asking with Maybe costs.
+	v := plain.Validate()
+	fmt.Println("errors:   ", v.Err())
+	fmt.Println("unchecked:", v.Unchecked)
+	fmt.Println("plain:    ", plain.Get[*Report]().line)
+
+	// A deployment that has a cache and a tracer registers them. The
+	// defaults are overridden, and nothing that depends on them changes.
+	full := di.New()
+	full.Use(Base)
+	full.Wire[*Cache](NewCache).Override()
+	full.Wire[Metrics](NewLogMetrics).Override()
+	full.Value(&Tracer{}) // a new key in this scope, so no marker is needed
+	fmt.Println("full:     ", full.Get[*Report]().line)
+	fmt.Print(full.Explain[*Store]())
+}
+```
+
+</details>
+
+```
+errors:    <nil>
+unchecked: [*main.Report (provided at main.Base (main.go:62))]
+plain:     db:1
+count: store.built
+full:      traced(cache:1)
+*main.Store: singleton in root, built (provided at main.go:61)
+├── *main.Cache: singleton in root, built (provided at main.go:80)
+└── main.Metrics: singleton in root, built (provided at main.go:81)
+needed by: *main.Report in root
+```
+
+Three things to know:
+
+- A nil default makes the key present, so `Maybe[*Cache]()` reports it as
+  provided — with a nil value. The two are answers to different questions:
+  whether anything provides the key, and whether there is anything in it.
+- `Maybe` records nothing when the key is absent, so a registration of it
+  afterwards is not rejected, and a constructor that already ran will not see
+  it. A nil default is the better answer whenever the key can be named up
+  front.
+- Asking with `Maybe` needs a closure, and a closure's dependencies are known
+  only once it runs, so it is listed as unchecked by
+  [Validate](#validate) instead of checked.
+
+Without the default, the same graph fails as any missing dependency does.
+`Validate` says so with nothing built, because `*Store` was wired, and the
+resolution says so again with its path:
+
+```
+di: *main.Cache: not provided (needed by [*main.Store], provided at main.Base (main.go:61))
+di: building *main.Report (...): di: building *main.Store (...): di: *main.Cache: not provided (needed by [*main.Report *main.Store])
+```
+
+A pointer parameter is not treated as optional on its own. Nearly every
+dependency in Go is a pointer or an interface, so that rule would make almost
+every wiring mistake a nil dereference inside a constructor rather than an
+error naming the resolution path, and would leave `Validate` with nothing to
+prove. Coming from fx or dig, this is the `optional:"true"` tag on a `dig.In`
+field; there are no parameter objects here, so the absence is registered
+rather than tagged.
 
 ### Lifecycle
 
