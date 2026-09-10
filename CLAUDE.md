@@ -665,11 +665,19 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
   properly and cannot recurse again. Any ordering oracle has to model them or it
   will report them as defects; the concurrent driver does it by running every
   `Start` before any `Stop`, so no start step is ever in flight.
-- **CHANGELOG is enforced.** `.github/workflows/release.yml` fails a tag push
-  when `CHANGELOG.md` has no `## [<version>]` section. It tracks library
-  behaviour: a docs- or site-only change adds no entry. The public API has been
-  stable across tags; verify with `go doc -all` diffed between tags before
-  choosing a version number.
+- **CHANGELOG is enforced, and it is the release notes.**
+  `.github/workflows/release.yml` fails a tag push when `CHANGELOG.md` has no
+  `## [<version>]` section, and then publishes the GitHub release with that
+  section as its body, so the two cannot say different things. Releases used to
+  be made by hand and v0.15.0 was tagged without one for six minutes, which is
+  why the workflow does it. Re-running it edits the notes rather than failing
+  on a release already there, a version with a `-` in it is published as a
+  prerelease, and the section ends at the next release heading or at the block
+  of link definitions -- the second only matters for the oldest section, and
+  reading to end of file there would have published every compare link as
+  notes. The CHANGELOG tracks library behaviour: a docs- or site-only change
+  adds no entry. The public API has been stable across tags; verify with
+  `go doc -all` diffed between tags before choosing a version number.
 
 ## Tooling caveats
 
