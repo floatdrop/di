@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400" role="img" aria-labelledby="title description">
+  <title id="title">di — the little wirer</title>
+  <desc id="description">A cyan Go gopher concentrates on joining two coral cable connectors. The continuous cable tangles into overlapping loops across its lower belly and around its feet.</desc>
+  <!-- Inspired by the Go gopher designed by Renee French. -->
+  <g stroke="#27343B" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Tiny ears and feet keep the original gopher silhouette. -->
+    <path d="M134 79 C111 62 108 87 124 101" fill="#79D6E8"/>
+    <path d="M126 86 L121 80" fill="none" stroke-width="2.5"/>
+    <path d="M264 78 C283 59 296 83 278 98" fill="#79D6E8"/>
+    <path d="M275 85 L281 78" fill="none" stroke-width="2.5"/>
+    <path d="M151 276 C145 288 143 301 151 303 C159 306 169 290 169 282" fill="#EED4B3"/>
+    <path d="M231 283 C232 294 241 305 248 301 C255 297 247 283 244 276" fill="#EED4B3"/>
+
+    <!-- Soft, deliberately asymmetric bean-shaped body. -->
+    <path d="M199 61 C143 58 119 88 119 137 C120 176 110 218 125 253 C138 285 166 291 202 289 C246 291 274 278 283 245 C291 215 281 180 282 145 C285 94 256 60 199 61 Z" fill="#79D6E8"/>
+
+    <!-- Unequal eyes; expression comes from the pupils, not eyebrows. -->
+    <path d="M185 119 C185 141 172 155 152 153 C132 152 126 137 128 118 C130 97 142 86 159 90 C176 92 185 103 185 119 Z" fill="#FFFDF8"/>
+    <path d="M268 120 C270 140 258 153 241 153 C222 154 209 141 210 122 C210 103 221 91 238 92 C256 92 266 103 268 120 Z" fill="#FFFDF8"/>
+    <ellipse cx="166" cy="130" rx="7.5" ry="10" fill="#27343B" stroke="none"/>
+    <ellipse cx="231" cy="130" rx="7.5" ry="10" fill="#27343B" stroke="none"/>
+    <circle cx="164" cy="127" r="2.5" fill="#FFFDF8" stroke="none"/>
+    <circle cx="229" cy="127" r="2.5" fill="#FFFDF8" stroke="none"/>
+
+    <!-- Two teeth, a small muzzle, and the characteristic little nose. -->
+    <path d="M189 166 L189 178 Q194 182 198 178 L199 165" fill="#FFFDF8" stroke-width="2.5"/>
+    <path d="M199 165 L198 178 Q203 182 207 178 L207 166" fill="#FFFDF8" stroke-width="2.5"/>
+    <path d="M183 157 C184 149 192 147 198 148 C206 147 214 153 213 159 C212 167 184 169 183 157 Z" fill="#EED4B3" stroke-width="2.5"/>
+    <path d="M189 147 C189 141 205 140 207 146 C208 153 190 154 189 147 Z" fill="#27343B" stroke-width="2"/>
+
+    <!-- One unbroken cable from boot to boot, with loose, asymmetric tangles.
+         Crossing overlays retrace existing curves to show over/under depth. -->
+    <defs>
+      <path id="cable" d="M147 218
+        C105 218 79 235 88 262
+        C98 300 197 300 239 264
+        C270 238 300 240 305 263
+        C320 317 193 347 153 300
+        C124 265 158 237 193 260
+        C232 286 129 345 98 311
+        C68 279 116 248 176 277
+        C239 308 320 311 320 257
+        C320 228 284 218 247 218"/>
+      <path id="cable-crossing-left" d="M193 260 C232 286 129 345 98 311"/>
+      <path id="cable-crossing-right" d="M176 277 C239 308 320 311 320 257"/>
+    </defs>
+    <use href="#cable" fill="none" stroke-width="11"/>
+    <use href="#cable" fill="none" stroke="#F58068" stroke-width="5"/>
+    <use href="#cable-crossing-left" fill="none" stroke-width="11" stroke-linecap="butt"/>
+    <use href="#cable-crossing-left" fill="none" stroke="#F58068" stroke-width="5"/>
+    <use href="#cable-crossing-right" fill="none" stroke-width="11" stroke-linecap="butt"/>
+    <use href="#cable-crossing-right" fill="none" stroke="#F58068" stroke-width="5"/>
+
+    <!-- Two simple inline connectors, poised to click together. -->
+    <path d="M152 207 L178 207 Q182 207 182 211 L182 225 Q182 229 178 229 L152 229 Z" fill="#F58068"/>
+    <path d="M182 212 L191 212 L191 224 L182 224 Z" fill="#FFFDF8" stroke-width="2.5"/>
+    <path d="M150 211 L143 211 L143 224 L150 224" fill="#F58068" stroke-width="2.5"/>
+    <path d="M216 207 L243 207 L243 229 L216 229 Q212 229 212 225 L212 211 Q212 207 216 207 Z" fill="#F58068"/>
+    <path d="M243 211 L250 211 L250 224 L243 224" fill="#F58068" stroke-width="2.5"/>
+    <path d="M219 213 L219 223" fill="none" stroke-width="2.5"/>
+
+    <!-- Paws touch the objects, without human fingers. -->
+    <path d="M132 197 C138 195 146 200 156 207 C162 211 158 218 152 216 L140 210" fill="#EED4B3" stroke-width="2.5"/>
+    <path d="M267 197 C261 195 253 200 241 208 C236 212 240 218 246 215 L258 209" fill="#EED4B3" stroke-width="2.5"/>
+
+    <!-- A small anticipation mark at the connection. -->
+    <path d="M198 194 L199 188 M204 197 L209 192" fill="none" stroke="#D86B54" stroke-width="3"/>
+  </g>
+
+</svg>
