@@ -112,3 +112,37 @@ func TestBuildRacingStopIsUndone(t *testing.T) {
 		})
 	}
 }
+
+// Event.Package is the import path of the type Service names, which is what
+// lets an observer shorten or group by it without parsing Service. The case
+// worth pinning is the pointer: a pointer type is unnamed, so its own
+// PkgPath is empty and the path has to come from what it points at.
+func TestEventPackage(t *testing.T) {
+	var evs []di.Event
+	s := di.New()
+	s.Observe(func(ev di.Event) { evs = append(evs, ev) })
+	s.Value(&DB{})                  // *di_test.DB, a pointer to a named type
+	s.Value(map[string]int{"a": 1}) // unnamed: no path to report
+	s.Get[*DB]()
+	s.Get[map[string]int]()
+	s.Shutdown(nil) // names no service, so no package either
+
+	const pkg = "github.com/floatdrop/di_test"
+	want := map[string]string{
+		"*" + pkg + ".DB": pkg,
+		"map[string]int":  "",
+		"":                "",
+	}
+	got := map[string]string{}
+	for _, ev := range evs {
+		got[ev.Service] = ev.Package
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for service, pkgPath := range want {
+		if got[service] != pkgPath {
+			t.Errorf("%q: package %q, want %q", service, got[service], pkgPath)
+		}
+	}
+}

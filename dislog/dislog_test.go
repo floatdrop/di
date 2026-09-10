@@ -52,8 +52,13 @@ func TestNewEventShapes(t *testing.T) {
 	}{
 		{
 			name: "the import path is a separate attribute",
-			ev:   di.Event{Kind: di.EventBuild, Service: "*github.com/acme/app/internal/mail.Mailer", Scope: "root", Duration: time.Millisecond},
+			ev:   di.Event{Kind: di.EventBuild, Service: "*github.com/acme/app/internal/mail.Mailer", Package: "github.com/acme/app/internal/mail", Scope: "root", Duration: time.Millisecond},
 			want: `level=INFO msg=build service=*mail.Mailer pkg=github.com/acme/app/internal/mail scope=root duration=1ms`,
+		},
+		{
+			name: "a key with no package keeps its whole name and gets no pkg",
+			ev:   di.Event{Kind: di.EventBuild, Service: "[]uint8", Scope: "root", Duration: time.Millisecond},
+			want: `level=INFO msg=build service=[]uint8 scope=root duration=1ms`,
 		},
 		{
 			name: "a build names the service, its scope and how long it took",
@@ -177,30 +182,36 @@ func TestNewSeesChildScopes(t *testing.T) {
 	}
 }
 
-// split is what keeps a service name short. Its job is to take off an import
-// path and to leave alone everything that only looks like one.
-func TestSplit(t *testing.T) {
+// short is what keeps a service name short. It composes from the pair the
+// event carries rather than parsing one of them, so the cases that used to
+// need guessing fall out: an unnamed type reports no package, and a generic
+// instantiation keeps its type arguments because a prefix is trimmed rather
+// than everything after a dot.
+func TestShort(t *testing.T) {
 	for _, tc := range []struct {
-		service, name, pkg string
+		service, pkg, want string
 	}{
-		{"github.com/acme/app.DB", "app.DB", "github.com/acme/app"},
-		{"*github.com/acme/app.DB", "*app.DB", "github.com/acme/app"},
-		{"**github.com/acme/app.DB", "**app.DB", "github.com/acme/app"},
-		{"*net/http.Server", "*http.Server", "net/http"},
-		{"github.com/acme/app.Cache[github.com/acme/app.Key]", "app.Cache[github.com/acme/app.Key]", "github.com/acme/app"},
-		// Nothing to take off: a main type, an unnamed type reflect already
-		// wrote short, a builtin. Each keeps its whole name and gets no pkg.
-		{"main.Config", "main.Config", ""},
-		{"*main.Config", "*main.Config", ""},
-		{"[]app.DB", "[]app.DB", ""},
-		{"map[string]app.DB", "map[string]app.DB", ""},
-		{"int", "int", ""},
-		{"[]byte", "[]byte", ""},
+		{"github.com/acme/app.DB", "github.com/acme/app", "app.DB"},
+		{"*github.com/acme/app.DB", "github.com/acme/app", "*app.DB"},
+		{"**github.com/acme/app.DB", "github.com/acme/app", "**app.DB"},
+		{"*net/http.Server", "net/http", "*http.Server"},
+		{"main.Config", "main", "main.Config"},
+		{"*main.Config", "main", "*main.Config"},
+		{
+			"github.com/acme/app.Cache[github.com/acme/app.Key]", "github.com/acme/app",
+			"app.Cache[github.com/acme/app.Key]",
+		},
+		// No package to take off: an unnamed type, a builtin, a shutdown.
+		{"[]github.com/acme/app.DB", "", "[]github.com/acme/app.DB"},
+		{"map[string]app.DB", "", "map[string]app.DB"},
+		{"int", "", "int"},
 		{"", "", ""},
+		// A pair that cannot be what it claims is reported whole rather than
+		// cut somewhere arbitrary.
+		{"github.com/acme/app.DB", "example.com/other", "github.com/acme/app.DB"},
 	} {
-		name, pkg := dislog.Split(tc.service)
-		if name != tc.name || pkg != tc.pkg {
-			t.Errorf("split(%q) = %q, %q; want %q, %q", tc.service, name, pkg, tc.name, tc.pkg)
+		if got := dislog.Short(tc.service, tc.pkg); got != tc.want {
+			t.Errorf("short(%q, %q) = %q; want %q", tc.service, tc.pkg, got, tc.want)
 		}
 	}
 }

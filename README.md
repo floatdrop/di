@@ -1170,8 +1170,8 @@ app.Observe(func(ev di.Event) {
 
 Observers receive an `Event` for every constructor and every `OnStart`,
 `OnDrain` and `OnStop` hook in the scope and its descendants, and one per
-`Shutdown`. Each event names the service, its scope and module, the
-registration site, the duration, and the error if any.
+`Shutdown`. Each event names the service and the import path of its type, its
+scope and module, the registration site, the duration, and the error if any.
 
 For logging, [`dislog`](dislog/) is that function already written against
 `log/slog`:
@@ -1261,8 +1261,8 @@ WARN stopped with failures err="di: stopping *store.DB: connection reset"
 
 A service is named the way it is written in Go, with the import path lifted
 out into `pkg`, since the path is most of the length and none of the meaning.
-A type with no path to take off -- one in `main`, a `[]byte` -- keeps its
-whole name and gets no `pkg`.
+Both come from the event -- `Service` and `Package` -- so nothing is parsed,
+and a key whose type is unnamed reports no package and keeps its whole name.
 
 Observers see the scope they are registered on and every scope under it, so
 one on the application scope logs request scopes too. Events arrive on the

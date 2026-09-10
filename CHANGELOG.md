@@ -20,8 +20,15 @@ below says plainly whether an upgrade can break a caller.
   written in Go, with the import path lifted out into a `pkg` attribute. The
   package imports nothing beyond `log/slog` and `di`, so the library stays
   dependency-free and any handler will do; `examples/` uses
-  `charmbracelet/log`. An upgrade cannot break a caller: nothing in `di` or
-  `dihttp` changed.
+  `charmbracelet/log`.
+- `Event.Package`, the import path of the type `Event.Service` names, so an
+  observer can shorten a service name or group by its package without parsing
+  one. It walks through pointers, since a pointer type is unnamed and carries
+  no path of its own, and is empty for a key whose type is unnamed -- a
+  `[]byte`, a `map[string]int` -- because reflect already writes those with a
+  short package name. An upgrade can break a caller only if it built an
+  `Event` with an unkeyed composite literal, which `go vet`'s composites check
+  reports.
 
 ## [0.14.0] - 2026-09-07
 

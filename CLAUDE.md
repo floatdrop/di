@@ -607,7 +607,18 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
   only. `dislog.New` returns the `func(di.Event)` that `Observe` takes -- not a
   `slog.Handler`, despite the shape of the name. A failed step logs at Error
   with the site attached; a step that succeeded logs at Info, or wherever
-  `Level` puts it. `samber/do` and `go.uber.org/dig` are
+  `Level` puts it.
+
+  It shortens a service name by composing `Event.Service` with
+  `Event.Package`, and that field exists because the alternative was parsing
+  the name back apart. There is no stdlib splitter for a qualified type name
+  and no correct heuristic either: `path.Base` drops a pointer's `*` and cuts
+  `app.Cache[github.com/acme/app.Key]` at the wrong dot, and a rule keyed on
+  a slash cannot tell a package path from `[]app.DB`, which reflect already
+  wrote short. `key.pkgPath` walks through pointers, because a pointer type
+  is unnamed and `PkgPath` on it is empty -- the same recursion `typeName`
+  does, and the two have to keep agreeing or `short` finds a prefix that is
+  not there and reports the name whole. `samber/do` and `go.uber.org/dig` are
   dependencies there only. Two of the three comparisons are like-for-like and
   one is not: dig has no typed accessor, so its warm number is `Invoke` with a
   function reflected over on every call, which is not how an fx application

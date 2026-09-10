@@ -118,6 +118,18 @@ type key struct{ t reflect.Type }
 
 func (k key) String() string { return typeName(k.t) }
 
+// pkgPath is the import path of the named type k stands for, walking through
+// pointers as typeName does, since a pointer type is unnamed and carries no
+// path of its own. It is empty for a type that has no path to report, which
+// is exactly the set typeName writes with reflect's own short spelling.
+func (k key) pkgPath() string {
+	t := k.t
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.PkgPath()
+}
+
 func typeName(t reflect.Type) string {
 	if t.Kind() == reflect.Pointer {
 		return "*" + typeName(t.Elem())
@@ -152,8 +164,14 @@ const (
 // Event describes one lifecycle step. Observers receive it after the step
 // completes, with its duration and error if any.
 type Event struct {
-	Kind     EventKind
-	Service  string // the service, e.g. "*github.com/acme/app.DB"; empty for shutdown
+	Kind    EventKind
+	Service string // the service, e.g. "*github.com/acme/app.DB"; empty for shutdown
+	// Package is the import path of the type Service names, e.g.
+	// "github.com/acme/app", so an observer can shorten or group by it
+	// without parsing Service. It is empty for a shutdown, and for a key
+	// whose type is unnamed -- a []byte, a map[string]int -- since reflect
+	// already writes those with a short package name.
+	Package  string
 	Scope    string // name of the scope that owns the instance
 	Site     string // file:line of the registration; empty for shutdown
 	Module   string // the Module the service was registered from; empty when none
@@ -490,7 +508,7 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 	if b.onStart != nil {
 		t0 := time.Now()
 		err := b.onStart(inHook(ctx, owner), in.value)
-		owner.emit(Event{Kind: EventStart, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
+		owner.emit(Event{Kind: EventStart, Service: b.key.String(), Package: b.key.pkgPath(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 		if err != nil {
 			return err
 		}
@@ -745,7 +763,7 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 
 	t0 := time.Now()
 	err := callHook(b.onDrain, inHook(ctx, owner), in.value)
-	owner.emit(Event{Kind: EventDrain, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
+	owner.emit(Event{Kind: EventDrain, Service: b.key.String(), Package: b.key.pkgPath(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 
 	owner.mu.Lock()
 	in.dr = drained
@@ -781,7 +799,7 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 		case <-ctx.Done():
 			err := fmt.Errorf("di: stopping %s: Worker hook did not return: %w", b.key, ctx.Err())
 			if b.onStop == nil {
-				owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
+				owner.emit(Event{Kind: EventStop, Service: b.key.String(), Package: b.key.pkgPath(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 				return err
 			}
 			// WithoutCancel keeps the values and drops the spent deadline; the
@@ -796,7 +814,7 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 		}
 	}
 	err := errors.Join(errs...)
-	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
+	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Package: b.key.pkgPath(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 	return err
 }
 
@@ -815,7 +833,7 @@ func (in *instance) releaseAfterWorker(ctx context.Context, owner *state, missed
 	if err := callHook(b.onStop, inHook(ctx, owner), in.value); err != nil {
 		errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
 	}
-	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: errors.Join(errs...)})
+	owner.emit(Event{Kind: EventStop, Service: b.key.String(), Package: b.key.pkgPath(), Scope: owner.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: errors.Join(errs...)})
 }
 
 // once is a teardown phase that runs at most once per scope: the first caller
@@ -1778,7 +1796,7 @@ func (s *Scope) construct(in *instance, holder *state) (err error) {
 				err = fmt.Errorf("di: building %s (provided at %s): panic: %v", b.key, b.where(), rec)
 			}
 		}
-		holder.emit(Event{Kind: EventBuild, Service: b.key.String(), Scope: holder.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
+		holder.emit(Event{Kind: EventBuild, Service: b.key.String(), Package: b.key.pkgPath(), Scope: holder.name, Site: b.site, Module: b.module, Duration: time.Since(t0), Err: err})
 	}()
 	in.value = b.build((&Scope{state: holder, module: b.module}).view(s.r))
 	return nil

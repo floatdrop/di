@@ -16,6 +16,7 @@ package dislog
 import (
 	"context"
 	"log/slog"
+	"path"
 	"strings"
 
 	"github.com/floatdrop/di"
@@ -29,8 +30,9 @@ import (
 // A service is named the way it is written in Go rather than the way an event
 // carries it: "service=*mail.Mailer" with the import path alongside as
 // "pkg=github.com/acme/app/internal/mail", since the path is most of the
-// length and none of the meaning. A type with no import path to lift out --
-// a type in main, a []byte -- keeps the whole name and gets no pkg.
+// length and none of the meaning. The two come from [di.Event.Service] and
+// [di.Event.Package], so nothing is parsed; a key whose type is unnamed
+// reports no package and keeps its whole name.
 //
 // An event carrying an error is logged at [slog.LevelError] with an "err"
 // attribute and the registration site, since that is what a failure is read
@@ -51,10 +53,9 @@ func New(l *slog.Logger, opts ...Option) func(di.Event) {
 		}
 		attrs := make([]slog.Attr, 0, 7)
 		if ev.Service != "" { // a shutdown names no service
-			name, pkg := split(ev.Service)
-			attrs = append(attrs, slog.String("service", name))
-			if pkg != "" {
-				attrs = append(attrs, slog.String("pkg", pkg))
+			attrs = append(attrs, slog.String("service", short(ev.Service, ev.Package)))
+			if ev.Package != "" {
+				attrs = append(attrs, slog.String("pkg", ev.Package))
 			}
 		}
 		attrs = append(attrs, slog.String("scope", ev.Scope))
@@ -74,37 +75,27 @@ func New(l *slog.Logger, opts ...Option) func(di.Event) {
 	}
 }
 
-// split takes the import path off a service name: "*github.com/acme/app.DB"
-// becomes "*app.DB" and "github.com/acme/app".
+// short is the service name with its import path taken off:
+// "*github.com/acme/app.DB" and "github.com/acme/app" become "*app.DB".
 //
-// An event carries the name di keys by, which is the import path so that two
-// packages of the same base name cannot collide. Only a named type has one:
-// an unnamed type is already written short by reflect, so "[]app.DB" has no
-// path to take off and must not be cut at its last dot. The test for that is
-// a slash in what precedes the type name, which an import path has and a
-// package name alone does not -- so a type in main keeps its whole name, and
-// loses nothing by it. A generic instantiation is cut before its bracket, so
-// the type arguments are left as they came.
-func split(service string) (name, pkg string) {
+// The event carries both, so there is nothing to guess. An empty pkg is a
+// type with no path to take off -- an unnamed type, which reflect already
+// writes short, or a shutdown, which names no service -- and its name is
+// returned as it came. A generic instantiation keeps its type arguments,
+// because what is trimmed is the prefix rather than everything after a dot.
+func short(service, pkg string) string {
+	if pkg == "" {
+		return service
+	}
 	stars := 0
 	for stars < len(service) && service[stars] == '*' {
 		stars++
 	}
-	qualified := service[stars:]
-	end := len(qualified)
-	if b := strings.IndexByte(qualified, '['); b >= 0 {
-		end = b
+	name, ok := strings.CutPrefix(service[stars:], pkg+".")
+	if !ok {
+		return service // not the shape the pair promises; report it whole
 	}
-	dot := strings.LastIndex(qualified[:end], ".")
-	if dot < 0 {
-		return service, ""
-	}
-	pkg = qualified[:dot]
-	slash := strings.LastIndex(pkg, "/")
-	if slash < 0 {
-		return service, ""
-	}
-	return service[:stars] + pkg[slash+1:] + qualified[dot:], pkg
+	return service[:stars] + path.Base(pkg) + "." + name
 }
 
 // Option configures the observer New returns.
