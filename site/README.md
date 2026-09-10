@@ -5,7 +5,10 @@ in English, Russian, Chinese and Japanese, prerendered to static HTML.
 
 It is a React project built with [Gravity UI](https://gravity-ui.com), and it
 ships no React: `vite build` produces a server bundle, `scripts/prerender.ts`
-runs it once per locale and writes the HTML out. The only JavaScript on the
+runs it once per locale and writes the HTML out. `scripts/serve.ts` is the
+other half, a Vite plugin that renders the same pages on request, so
+`npm run dev` is Vite's own server showing the output rather than an
+approximation of it. The only JavaScript on the
 page is `src/inline-script.ts`, inlined into the head. It settles the theme
 class before the first paint, and drives the five things on the page that
 move: the theme button, the copy button beside the install line, the active
@@ -16,7 +19,7 @@ included, is markup and CSS.
 ```sh
 npm ci
 npm run check          # tsc --noEmit
-npm run dev            # http://localhost:5173/ and /ru/
+npm run dev            # Vite's server: /, /ru/, /zh/, /ja/; an edit reloads the page
 npm run build          # build/ is the site
 npm run preview        # serves build/ the way Pages does
 
@@ -28,8 +31,8 @@ be opened straight off the filesystem. With one they are absolute, which is
 what Pages needs. `npm run preview` reads the base out of the built HTML
 rather than the environment, and redirects anything outside it.
 
-`.github/workflows/pages.yml` builds on pull requests that touch `site/` or
-`examples/guide/` and deploys on pushes to `main`.
+`.github/workflows/pages.yml` builds on pull requests that touch `site/`,
+`examples/guide/` or `docs/assets/` and deploys on pushes to `main`.
 
 ## How it fits together
 
@@ -47,6 +50,12 @@ rather than the environment, and redirects anything outside it.
   the Go CI compiles and tests. The `Explain` tree and the `Modules` report are
   `../examples/guide/testdata/`, pinned by golden tests. None of it is
   translated: it is Go source and output the Go tests own.
+- `src/components/Logo.tsx` reads `../docs/assets/logo.svg`, the logo the root
+  README shows, as raw text the same way, and puts its paths in the page once
+  as a sprite. The hero and the topbar are `use` instances of it, each with a
+  `viewBox` of its own, which is how the topbar shows only the face.
+  `public/favicon.svg` is that same frame as a file, because a tab icon has to
+  be a URL; a redrawn logo means re-cropping it, as its first line says.
 - `src/App.tsx` builds a figure per code block and hands the set to each
   section, which places the ones it shows. Everything visible is a Gravity UI
   component or a shape in `src/styles/main.css` that uikit has none for -- a

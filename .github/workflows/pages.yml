@@ -3,7 +3,8 @@ name: Site
 # The landing page and guide under site/, a React project prerendered to
 # static HTML and deployed to GitHub Pages. The guide's code blocks are the
 # files of examples/guide, imported at build time, so a change there rebuilds
-# the site, and the Go CI is what keeps them compiling.
+# the site, and the Go CI is what keeps them compiling; the logo under
+# docs/assets is imported the same way.
 #
 # Node 24 is a floor, not a preference: the build and prerender scripts are
 # TypeScript run straight by node, which needs its type stripping.
@@ -16,9 +17,9 @@ name: Site
 on:
   push:
     branches: [main]
-    paths: [site/**, examples/guide/**, "**/*.go", go.mod, .github/workflows/pages.yml]
+    paths: [site/**, examples/guide/**, docs/assets/**, "**/*.go", go.mod, .github/workflows/pages.yml]
   pull_request:
-    paths: [site/**, examples/guide/**, "**/*.go", go.mod, .github/workflows/pages.yml]
+    paths: [site/**, examples/guide/**, docs/assets/**, "**/*.go", go.mod, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:

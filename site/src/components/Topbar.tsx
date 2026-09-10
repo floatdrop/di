@@ -10,6 +10,7 @@ import { Button, Icon, Menu } from '../uikit.ts';
 import { REPO, url } from '../config.ts';
 import type { Content, Locale } from '../content/types.ts';
 import { LOCALES, localeDepth, localePath } from '../content/types.ts';
+import { Logo } from './Logo.tsx';
 
 interface TopbarProps {
 	content: Content;
@@ -25,6 +26,7 @@ export function Topbar({ content, names }: TopbarProps) {
 		<div className="di-topbar">
 			<div className="di-page di-topbar__inner">
 				<a className="di-topbar__brand" href={url(localePath[locale], depth)}>
+					<Logo frame="face" className="di-topbar__mark" />
 					floatdrop/di
 				</a>
 

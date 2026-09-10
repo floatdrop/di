@@ -1,15 +1,20 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
+import { pages } from './scripts/serve.ts';
+
 // There is one build: the server bundle. The page ships no JavaScript, so
 // there is no client bundle to make -- but the CSS the rendered markup needs
 // is exactly the CSS the server bundle imports (Gravity UI's components each
 // import their own), so `ssrEmitAssets` collects it and scripts/prerender.ts
 // copies the one file it produces next to the HTML.
 export default defineConfig({
-	plugins: [react()],
-	// The guide imports the Go sources of examples/guide as raw text, and they
-	// live above this project.
+	plugins: [react(), pages()],
+	// There is no index.html either: in dev the pages are rendered by
+	// scripts/serve.ts on request, and a build writes them out.
+	appType: 'custom',
+	// The guide imports the Go sources of examples/guide as raw text, and the
+	// logo docs/assets, and both live above this project.
 	server: { fs: { allow: ['..'] } },
 	// Gravity UI has to go through the bundler rather than be left to Node:
 	// uikit's components import their own `.css`, which only Vite knows what

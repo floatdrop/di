@@ -4,6 +4,7 @@ import { Button, Icon, Text, ThemeProvider, Toc } from './uikit.ts';
 
 import type { Code } from './code.ts';
 import { Figure, Highlighted, Plain } from './components/Figure.tsx';
+import { Logo, LogoSprite } from './components/Logo.tsx';
 import { Topbar } from './components/Topbar.tsx';
 import type { Content, Figures, Locale } from './content/types.ts';
 
@@ -99,29 +100,33 @@ export function App({ content, code, names }: AppProps) {
 
 	return (
 		<ThemeProvider theme="light" lang={content.locale}>
+			<LogoSprite />
 			<Topbar content={content} names={names} />
 
 			<header className="di-page di-hero">
-				<Text as="h1" variant="display-3" className="di-hero__title">
-					{hero.title}
-				</Text>
-				<Text as="p" variant="body-3" color="secondary" className="di-hero__lead">
-					{hero.lead}
-				</Text>
-				<div className="di-hero__install">
-					<code className="di-hero__install-code">{hero.install}</code>
-					{/* Driven by the inlined script; the icons swap on a class. */}
-					<Button id="di-copy" className="di-copy" view="flat" size="s" aria-label={labels.copy}>
-						<Button.Icon>
-							<span className="di-copy-icon di-copy-icon_idle">
-								<Icon data={Copy} size={16} />
-							</span>
-							<span className="di-copy-icon di-copy-icon_done">
-								<Icon data={Check} size={16} />
-							</span>
-						</Button.Icon>
-					</Button>
+				<div className="di-hero__copy">
+					<Text as="h1" variant="display-3" className="di-hero__title">
+						{hero.title}
+					</Text>
+					<Text as="p" variant="body-3" color="secondary" className="di-hero__lead">
+						{hero.lead}
+					</Text>
+					<div className="di-hero__install">
+						<code className="di-hero__install-code">{hero.install}</code>
+						{/* Driven by the inlined script; the icons swap on a class. */}
+						<Button id="di-copy" className="di-copy" view="flat" size="s" aria-label={labels.copy}>
+							<Button.Icon>
+								<span className="di-copy-icon di-copy-icon_idle">
+									<Icon data={Copy} size={16} />
+								</span>
+								<span className="di-copy-icon di-copy-icon_done">
+									<Icon data={Check} size={16} />
+								</span>
+							</Button.Icon>
+						</Button>
+					</div>
 				</div>
+				<Logo frame="full" className="di-hero__art" />
 			</header>
 
 			<div className="di-page di-layout">

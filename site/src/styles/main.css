@@ -125,10 +125,20 @@ body {
 }
 
 .di-topbar__brand {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--g-spacing-2);
 	font-family: var(--g-font-family-monospace);
 	font-size: var(--g-text-body-1-font-size);
 	color: var(--g-color-text-secondary);
 	text-decoration: none;
+}
+
+/* The face of the logo, at the size of the icons across from it. */
+.di-topbar__mark {
+	flex: none;
+	width: 24px;
+	height: 24px;
 }
 
 .di-topbar__brand:hover {
@@ -226,16 +236,42 @@ body {
 	color: var(--g-color-text-warning);
 }
 
+/* ---- logo ---------------------------------------------------------------- */
+
+/* The logo's paths, once, for every `use` on the page to draw. Zero-sized
+   rather than display: none, which some browsers take to mean there is nothing
+   there to reference. */
+.di-logo-sprite {
+	position: absolute;
+	width: 0;
+	height: 0;
+	overflow: hidden;
+}
+
 /* ---- hero ---------------------------------------------------------------- */
 
+/* The words alone in one column, and, from the page's two-column width in
+   the block below, the gopher beside them. The topbar's small mark is there
+   at every width. */
 .di-hero {
 	/* Gravity's spacing scale stops at 40px; the page rhythm above a section is
 	   coarser than any control's, so these few are spelled out. */
 	padding-block: 4.5rem 3.5rem;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	align-items: center;
+	gap: var(--g-spacing-6);
+}
+
+.di-hero__copy {
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
 	gap: var(--g-spacing-5);
+}
+
+.di-hero__art {
+	display: none;
 }
 
 /* display-3 is 40px, which is the right ceiling and far too much at 390px, so
@@ -280,21 +316,6 @@ body {
 	padding-bottom: 4rem;
 }
 
-@media (min-width: 64rem) {
-	.di-layout {
-		grid-template-columns: 15rem minmax(0, 1fr);
-		gap: var(--g-spacing-9);
-	}
-
-	.di-toc {
-		position: sticky;
-		top: calc(var(--di-topbar-height) + var(--g-spacing-5));
-		align-self: start;
-		max-height: calc(100vh - var(--di-topbar-height) - var(--g-spacing-8));
-		overflow-y: auto;
-	}
-}
-
 /* ---- table of contents --------------------------------------------------- */
 
 /* uikit's Toc draws the rail, the indent and every state, the active one
@@ -302,9 +323,46 @@ body {
    component leaves to the page is the type, since it inherits whatever it is
    dropped into. Nothing else here overrides it. */
 .di-toc {
+	display: none; /* shown beside the prose from the two-column width up */
 	min-width: 0;
 	font-size: var(--g-text-body-1-font-size);
 	line-height: var(--g-text-body-1-line-height);
+}
+
+/* ---- two columns --------------------------------------------------------- */
+
+/* The one breakpoint on the page. Below it the hero is the words alone and
+   the table of contents is not shown at all; from it up, the gopher sits
+   beside the words and the contents beside the prose, sticky. The two switch
+   together, so the page never has one of them without the other. This block
+   comes after every base rule it overrides, since the cascade breaks the tie
+   between equal selectors by order. */
+@media (min-width: 64rem) {
+	.di-hero {
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: var(--g-spacing-10);
+	}
+
+	.di-hero__art {
+		display: block;
+		width: 14rem;
+		height: auto;
+		aspect-ratio: 1;
+	}
+
+	.di-layout {
+		grid-template-columns: 15rem minmax(0, 1fr);
+		gap: var(--g-spacing-9);
+	}
+
+	.di-toc {
+		display: block;
+		position: sticky;
+		top: calc(var(--di-topbar-height) + var(--g-spacing-5));
+		align-self: start;
+		max-height: calc(100vh - var(--di-topbar-height) - var(--g-spacing-8));
+		overflow-y: auto;
+	}
 }
 
 
