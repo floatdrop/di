@@ -7,6 +7,21 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+`Binding.Worker` is now `Binding.Go`, after `errgroup.Group.Go` and
+`sync.WaitGroup.Go`, whose contract it has always had: run a function in a
+goroutine the group tracks, cancel it when the group winds down, wait for it,
+and let its error take the group down. `go doc -all` against 0.15.1 removes
+`Binding.Worker` and adds `Binding.Go` with the same signature. **An upgrade
+breaks a caller that registers a worker**: rename the call from `Worker` to
+`Go`, and nothing else changes.
+
+### Changed
+
+- `Binding.Worker` is renamed `Binding.Go`, with no alias left behind. The
+  word "worker" still names what the method registers, in the docs and in the
+  one error `Stop` reports about it, which now reads "worker did not return"
+  rather than "Worker hook did not return".
+
 ## [0.15.1] - 2026-09-10
 
 A code-organisation release: the library is six files rather than one, and

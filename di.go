@@ -54,7 +54,8 @@
 // built. [Scope.Stop] first drains, which lets work already in flight finish
 // while the scope still resolves, then stops child scopes, then services in
 // reverse build order, and afterwards the scope refuses to resolve anything.
-// [Binding.Worker] runs a long-lived function that is cancelled on stop.
+// [Binding.Go] runs a worker, a long-lived function in a goroutine of its
+// own, cancelled on stop.
 // [Scope.Run] ties it together
 // for a main function: start, wait for a signal or [Scope.Shutdown], stop
 // with a deadline. [Scope.Observe] reports every step for logging and
@@ -144,7 +145,7 @@ const (
 	EventBuild    EventKind = "build"    // a constructor ran
 	EventStart    EventKind = "start"    // an OnStart hook ran
 	EventDrain    EventKind = "drain"    // an OnDrain hook ran
-	EventStop     EventKind = "stop"     // a Worker hook was cancelled and/or an OnStop hook ran
+	EventStop     EventKind = "stop"     // a worker was cancelled and/or an OnStop hook ran
 	EventShutdown EventKind = "shutdown" // Shutdown was called
 )
 

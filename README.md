@@ -23,8 +23,8 @@ app.Wire[*Repo](NewRepo) // func NewRepo(*DB) *Repo
 repo := app.Get[*Repo]() // builds Config, then DB, then Repo, each once
 ```
 
-A registration takes `OnStart`, `OnStop` and `Worker` hooks typed on the
-service, and `app.Run(ctx)` starts everything in dependency order, waits for
+A registration takes `OnStart` and `OnStop` hooks and a `Go` worker, typed on
+the service, and `app.Run(ctx)` starts everything in dependency order, waits for
 a signal, and stops it in reverse. Child scopes hold what belongs to one
 request or one test; a second registration of a key is rejected unless it
 says `Override()`; and `Explain`, `Graph` and `Modules` show what was built,
@@ -132,7 +132,7 @@ registration and must be called before the scope is first resolved.
 | `.Override()` | Replace an earlier registration of `T` in this scope; a second one without it is rejected. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
-| `.Worker(f)` | A long-running function, cancelled on stop. |
+| `.Go(f)` | A worker: a long-running function in a goroutine of its own, cancelled on stop. |
 
 To get a service back, call the scope, from a constructor or from outside:
 
@@ -398,11 +398,11 @@ keeps the handlers' scopes alive until they return.
 
 #### Workers
 
-`Worker` is for anything that loops until told to stop: consumers, pollers,
-schedulers.
+`Go` registers a worker, for anything that loops until told to stop:
+consumers, pollers, schedulers. It is errgroup's `Go`, applied to a service.
 
 ```go
-app.Wire[*Mailer](newMailer).Eager().Worker(func(ctx context.Context, m *Mailer) error {
+app.Wire[*Mailer](newMailer).Eager().Go(func(ctx context.Context, m *Mailer) error {
     return m.Loop(ctx) // returns when ctx is cancelled
 })
 ```

@@ -166,7 +166,7 @@ stateDiagram-v2
     Built --> Starting: the scope is running, so OnStart runs
     Starting --> Started: OnStart returned
     Starting --> Failed: OnStart failed or panicked
-    Started --> Stopped: Stop, after OnDrain and any Worker
+    Started --> Stopped: Stop, after OnDrain and any worker
     Built --> Stopped: Stop, no OnStart was owed
     Failed --> [*]: served as an error to every later resolution
     Stopped --> [*]
@@ -254,8 +254,8 @@ nothing is torn down while something that depends on it is still alive. And
 uses to finish in-flight requests: those requests still hold their scopes and
 everything under them, which would not be true from `OnStop`.
 
-`Stop` is synchronous. It waits for start steps, drain hooks and `Worker`
-functions it has cancelled. The single exception is its own context expiring,
+`Stop` is synchronous. It waits for start steps, drain hooks and the workers
+it has cancelled. The single exception is its own context expiring,
 in which case the missed deadline is reported to the caller and the release
 finishes on its own goroutine, reaching observers either way. A second
 `Stop`, concurrent or later, does not run a second teardown: it waits for the
@@ -277,14 +277,15 @@ cancels the stop context, so a hung hook cannot keep the process alive.
 ```
 Run(ctx) ── Start ──► running ──┬── SIGINT / SIGTERM ──┐
                                 ├── s.Shutdown(cause) ─┼──► Stop(timeout) ──► return cause
-                                └── a Worker returned ─┘         and every stop error
+                                └── a worker returned ─┘         and every stop error
 ```
 
 `Shutdown(cause)` never blocks, may be called from any goroutine, and
 propagates to ancestor scopes, so a service in a child can stop the
 application. The first cause wins and is what `Run` returns.
 
-A `Worker` is a function that runs for as long as its service does. It is
+A worker, registered with `Go`, is a function that runs for as long as its
+service does, which is errgroup's `Go` applied to a service. It is
 started in its own goroutine as part of the start step, its context is
 cancelled by `Stop`, and `Stop` waits for it to return before `OnStop` runs
 and before anything it depends on is released. A worker that returns its own

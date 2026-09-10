@@ -128,7 +128,7 @@ export const zh: Content = {
 			body: (f) => (
 				<>
 					<p>
-						<C>Worker</C>与它的服务同寿：服务启动时它在自己的 goroutine 里启动，由<C>Stop</C>
+						用<C>Go</C>注册的 worker 与它的服务同寿：服务启动时它在自己的 goroutine 里启动，由<C>Stop</C>
 						取消，并且在它依赖的任何东西被拆除之前会等它结束。从它返回错误会停止整个应用。<C>Eager</C>
 						表示邮件服务在<C>Start</C>返回时就已经存在，而不是等到第一次使用才创建。
 					</p>

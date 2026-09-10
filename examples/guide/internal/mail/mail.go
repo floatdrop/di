@@ -40,5 +40,5 @@ func (m *Mailer) Run(ctx context.Context) error {
 func Module(s *di.Scope) {
 	s.Wire[*Mailer](New).
 		Eager().
-		Worker(func(ctx context.Context, m *Mailer) error { return m.Run(ctx) })
+		Go(func(ctx context.Context, m *Mailer) error { return m.Run(ctx) })
 }

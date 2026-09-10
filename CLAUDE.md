@@ -424,7 +424,7 @@ binding and cannot protect the inner scope.
 - Every user hook is called through `callHook`, which turns a panic into that
   hook's error, and every step is reported through `state.report`, so a
   hook that panicked is observed like one that failed. A cancelled
-  `Worker`'s return is dropped only when it says nothing beyond
+  worker's return is dropped only when it says nothing beyond
   `context.Canceled` (`onlyCancellation` walks the error tree); `errors.Is`
   matched `errors.Join(ctx.Err(), failure)` and dropped the failure with it
   (#35). A hook can panic by resolving something whose registration is rejected
@@ -434,10 +434,10 @@ binding and cannot protect the inner scope.
   behind it.
 - Nothing in the teardown path may run a user hook against a value another hook
   still holds. That is one rule with three instances: `OnStop` after `OnDrain`,
-  `OnStop` after a `Worker` hook (deferred to `releaseAfterWorker` when `ctx`
+  `OnStop` after a `Go` worker (deferred to `releaseAfterWorker` when `ctx`
   expires rather than run alongside it), and a parent's hooks after a child's.
 - `Start`'s rollback goes through `Stop` with `context.WithoutCancel`, so it
-  stops child scopes and waits for `Worker` hooks.
+  stops child scopes and waits for workers.
 - Whichever `Stop` call queues a handoff owns that teardown's context; a later
   `Stop` must not clobber it.
 
@@ -574,7 +574,7 @@ measured itself.
 
 **Where the defects came from.** Five reviews in September 2026, preceded by
 seven narrower passes. The first found eleven defects plus a gap it did not
-count; the second six plus the `Worker`-hook overlap, and then two more the
+count; the second six plus the worker overlap, and then two more the
 tightened driver found on its own; the third six that were all cross-phase or
 cross-branch -- a drain hook stopping a sibling scope, a release dropped with a
 missed deadline, a shutdown cause published after `Run` had read it, a false
@@ -676,7 +676,7 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
   this harness loses a backgrounded server's startup output when redirected,
   which once produced a false failure report.
 - **A teardown finishes after `Stop` returns only when `Stop`'s context
-  expired** -- waiting for a `Worker` hook, a start step or a drain hook -- plus
+  expired** -- waiting for a worker, a start step or a drain hook -- plus
   the one that undoes a build completing after the scope stopped, which no
   `Stop` issued. The deadline bounds how long `Stop` waits, never whether the
   release is owed, and `Stop` has already taken the instance off its scope's

@@ -17,7 +17,7 @@ func TestWorkerHookLifecycle(t *testing.T) {
 	stopped := make(chan struct{})
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).Eager().
-		Worker(func(ctx context.Context, w *Worker) error {
+		Go(func(ctx context.Context, w *Worker) error {
 			log = append(log, "run")
 			<-ctx.Done()
 			close(stopped)
@@ -35,7 +35,7 @@ func TestWorkerHookLifecycle(t *testing.T) {
 	select {
 	case <-stopped:
 	default:
-		t.Fatal("Stop returned before the Worker hook was cancelled")
+		t.Fatal("Stop returned before the Go hook was cancelled")
 	}
 	if got := strings.Join(log, ","); got != "run,stop" {
 		t.Fatalf("order %q", got)
@@ -46,7 +46,7 @@ func TestWorkerHookFailureStopsApplication(t *testing.T) {
 	boom := errors.New("queue disconnected")
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).Eager().
-		Worker(func(ctx context.Context, w *Worker) error { return boom })
+		Go(func(ctx context.Context, w *Worker) error { return boom })
 	done := make(chan error, 1)
 	go func() { done <- s.Run(context.Background()) }()
 	select {
@@ -62,7 +62,7 @@ func TestWorkerHookFailureStopsApplication(t *testing.T) {
 func TestWorkerHookErrorAfterCancelIsReportedByStop(t *testing.T) {
 	flushFailed := errors.New("flush failed")
 	s := di.New()
-	s.Value(&Worker{}).Eager().Worker(func(ctx context.Context, w *Worker) error { <-ctx.Done(); return flushFailed })
+	s.Value(&Worker{}).Eager().Go(func(ctx context.Context, w *Worker) error { <-ctx.Done(); return flushFailed })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestWorkerHookErrorAfterCancelIsReportedByStop(t *testing.T) {
 
 func TestWorkerHookIgnoringCancelHitsStopTimeout(t *testing.T) {
 	s := di.New()
-	s.Value(&Worker{}).Eager().Worker(func(ctx context.Context, w *Worker) error {
+	s.Value(&Worker{}).Eager().Go(func(ctx context.Context, w *Worker) error {
 		time.Sleep(2 * time.Second)
 		return nil
 	})
@@ -92,7 +92,7 @@ func TestWorkerHookStartsForLateBuiltService(t *testing.T) {
 	running := make(chan struct{})
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).
-		Worker(func(ctx context.Context, w *Worker) error { close(running); <-ctx.Done(); return nil })
+		Go(func(ctx context.Context, w *Worker) error { close(running); <-ctx.Done(); return nil })
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestWorkerHookStartsForLateBuiltService(t *testing.T) {
 	select {
 	case <-running:
 	case <-time.After(time.Second):
-		t.Fatal("Worker hook not started for a service built after Start")
+		t.Fatal("Go hook not started for a service built after Start")
 	}
 	if err := s.Stop(context.Background()); err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestWorkerHookFailureDecidedBeforeCancelReachesRun(t *testing.T) {
 	root := di.New()
 	child := root.Child("c")
 	child.Provide(func(*di.Scope) *Worker { return &Worker{} }).Eager().
-		Worker(func(ctx context.Context, _ *Worker) error {
+		Go(func(ctx context.Context, _ *Worker) error {
 			close(failed) // the failure is decided here
 			<-ctx.Done()  // the worker flushes while the scope winds down
 			return boom   // and is reported here
@@ -152,7 +152,7 @@ func TestWorkerHookFailureDecidedBeforeCancelReachesRun(t *testing.T) {
 func TestWorkerHookCancellationIsNotAFailure(t *testing.T) {
 	root := di.New()
 	root.Value(&Worker{}).Eager().
-		Worker(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); return ctx.Err() })
+		Go(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); return ctx.Err() })
 	if err := root.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
