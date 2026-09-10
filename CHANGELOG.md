@@ -7,6 +7,13 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-10
+
+An application can say what it is doing. `go doc -all` against 0.14.0 adds one
+field to `Event`, leaves every signature alone and leaves `dihttp` untouched;
+`dislog` is a new package beside it. An upgrade cannot break a caller unless
+it built an `Event` with an unkeyed composite literal.
+
 ### Added
 
 - `dislog`, a new package that logs a scope's lifecycle events through
@@ -919,7 +926,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/floatdrop/di/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/floatdrop/di/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/floatdrop/di/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/floatdrop/di/compare/v0.12.0...v0.13.0
