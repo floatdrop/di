@@ -7,6 +7,15 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+No signature changes. An upgrade cannot break a caller.
+
+### Fixed
+
+- A panicking `OnStart` hook reports its `EventStart`, with the panic as
+  `Err`, the way a panicking `OnDrain` or `OnStop` hook already reported
+  theirs. Observers saw no start step at all for such a service; the failure
+  still reached `Start` and `Resolve` as before.
+
 ## [0.15.0] - 2026-09-10
 
 An application can say what it is doing. `go doc -all` against 0.14.0 adds one
