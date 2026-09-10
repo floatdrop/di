@@ -7,13 +7,18 @@ name: Site
 #
 # Node 24 is a floor, not a preference: the build and prerender scripts are
 # TypeScript run straight by node, which needs its type stripping.
+#
+# The artifact also carries the coverage report, which is why a change to any
+# Go file rebuilds the site: coverage is the library's number, so it moves
+# when the library or its tests do, and narrowing these paths back to site/
+# would leave the badge reading a figure from whenever the site last changed.
 
 on:
   push:
     branches: [main]
-    paths: [site/**, examples/guide/**, .github/workflows/pages.yml]
+    paths: [site/**, examples/guide/**, "**/*.go", go.mod, .github/workflows/pages.yml]
   pull_request:
-    paths: [site/**, examples/guide/**, .github/workflows/pages.yml]
+    paths: [site/**, examples/guide/**, "**/*.go", go.mod, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -41,6 +50,24 @@ jobs:
         working-directory: site
         env:
           BASE_PATH: /di
+      # Written into the built site rather than served from anywhere else, so
+      # the report and the badge it links from are one deploy and cannot
+      # disagree. The profile covers di, dihttp and dislog: examples/ and
+      # benchmarks/ are separate modules and not part of the number.
+      - name: coverage report and badge, into the artifact
+        run: |
+          go test -count=1 -coverprofile=coverage.out ./...
+          go tool cover -html=coverage.out -o site/build/coverage.html
+          pct=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}')
+          n=${pct%\%}
+          color=red
+          awk -v n="$n" 'BEGIN { exit !(n >= 90) }' && color=brightgreen
+          awk -v n="$n" 'BEGIN { exit !(n >= 80 && n < 90) }' && color=green
+          awk -v n="$n" 'BEGIN { exit !(n >= 70 && n < 80) }' && color=yellowgreen
+          awk -v n="$n" 'BEGIN { exit !(n >= 60 && n < 70) }' && color=yellow
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s","color":"%s"}\n' \
+            "$pct" "$color" > site/build/coverage.json
+          echo "coverage $pct ($color)"
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site/build
