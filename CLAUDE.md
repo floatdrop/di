@@ -591,7 +591,15 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
   embedmd markers. Run `gofmt -w` on an example *before* re-embedding, or CI
   fails on the sync check.
 - **`benchmarks/` is a separate module** with a `replace ../` directive, so the
-  library itself stays dependency-free. `samber/do` is a dependency there only.
+  library itself stays dependency-free. `samber/do` and `go.uber.org/dig` are
+  dependencies there only. Two of the three comparisons are like-for-like and
+  one is not: dig has no typed accessor, so its warm number is `Invoke` with a
+  function reflected over on every call, which is not how an fx application
+  resolves. The file says so, and so does the README; do not quote the dig warm
+  figure without it. `di` is measured twice, because dig's `Provide` is
+  reflective like `Wire` and not like a `Provide` closure -- and the warm
+  figures for the two are the same to within noise, which is the check on the
+  claim that a warm `Get` is one code path.
 - **`site/` is the landing page and guide** at https://floatdrop.github.io/di/,
   a React project built with Gravity UI, prerendered to static HTML in English
   at `/` and Russian, Chinese and Japanese at `/ru/`, `/zh/` and `/ja/`, each
