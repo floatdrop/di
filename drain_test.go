@@ -485,7 +485,7 @@ func TestReview3DrainHookCanStopASiblingScope(t *testing.T) {
 // A Stop whose context runs out while another Stop's drain hook holds the
 // instance still owes the release: it took the instance off the scope's list,
 // so nothing else will reach it. The release is finished off the hook's own
-// return, as it is for a Worker hook that outlasts the same deadline.
+// return, as it is for a Go hook that outlasts the same deadline.
 // (review 3, 2)
 func TestReview3LostDrainWaitStillReleases(t *testing.T) {
 	root := di.New()

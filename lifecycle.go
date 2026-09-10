@@ -90,7 +90,7 @@ type instance struct {
 	// concurrent builds visible.
 	builder *resolver
 
-	// Worker hook bookkeeping, guarded by the phase machine rather than a mutex.
+	// Worker bookkeeping, guarded by the phase machine rather than a mutex.
 	// cancel and runDone are written by start, on the goroutine that owns the
 	// start step, and read by stop, which stopIfNeeded reaches only after
 	// startClaimed has moved the phase past phaseStarting under the owning
@@ -207,7 +207,7 @@ func callHook(hook func(context.Context, any) error, ctx context.Context, v any)
 	return hook(ctx, v)
 }
 
-// start runs OnStart and launches the Worker hook. The worker's context is
+// start runs OnStart and launches the worker. The worker's context is
 // detached from ctx so the worker is cancelled by Stop, in dependency order,
 // rather than the moment the application context is cancelled.
 func (in *instance) start(ctx context.Context, owner *state) error {
@@ -415,12 +415,12 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 	return true, nil
 }
 
-// stop cancels the Worker hook, waits for it within ctx, then runs OnStop.
+// stop cancels the worker, waits for it within ctx, then runs OnStop.
 //
-// A Worker hook that outlasts ctx still holds the value, so OnStop cannot run yet
-// without racing the worker. The missed deadline is reported to the caller and
-// the release is finished when the worker returns, as Stop does for a start
-// step in flight.
+// A worker that outlasts ctx still holds the value, so OnStop cannot run yet
+// without racing it. The missed deadline is reported to the caller and the
+// release is finished when the worker returns, as Stop does for a start step
+// in flight.
 func (in *instance) stop(ctx context.Context, owner *state) error {
 	b := in.b
 	if in.cancel == nil && b.onStop == nil {
@@ -436,7 +436,7 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 				errs = append(errs, in.runErr)
 			}
 		case <-ctx.Done():
-			err := fmt.Errorf("di: stopping %s: Worker hook did not return: %w", b.key, ctx.Err())
+			err := fmt.Errorf("di: stopping %s: worker did not return: %w", b.key, ctx.Err())
 			if b.onStop == nil {
 				owner.report(EventStop, b, t0, err)
 				return err
@@ -455,7 +455,7 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 	return err
 }
 
-// releaseAfterWorker finishes a stop step whose Worker hook outlasted Stop's
+// releaseAfterWorker finishes a stop step whose worker outlasted Stop's
 // context, once the hook returns. missed is what Stop returned to its caller;
 // the instance's single EventStop is emitted here and carries it along with
 // the release's own result, so no observer sees a service stopped twice.
@@ -628,7 +628,7 @@ func (s *Scope) Context() context.Context {
 //
 // Stop is synchronous. It waits out whatever another goroutine is still
 // running for a service it is tearing down -- a start step in flight, a drain
-// hook another Stop began, a Worker hook being cancelled -- so when it returns,
+// hook another Stop began, a worker being cancelled -- so when it returns,
 // the teardown has happened and its failures are in the error. A teardown
 // outlives the call only when ctx expires first: the missed deadline is
 // reported here, and the release is finished once the outstanding step

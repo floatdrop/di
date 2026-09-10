@@ -21,7 +21,7 @@ package di_test
 //	I4  A singleton is stable: two successful resolutions of a key from one
 //	    scope return the identical value.
 //	I5  Nothing is stopped more often than it was built.
-//	I6  Once the root is stopped, every Worker hook has returned.
+//	I6  Once the root is stopped, every Go hook has returned.
 //	I7  Explain and Graph render whatever state the sequence reached,
 //	    panicking only where a resolution from the same scope would, and
 //	    never deadlocking against the phase machine they read.
@@ -151,7 +151,7 @@ type machine struct {
 	starts map[string]int
 	stops  map[string]int
 
-	runsLive atomic.Int32 // Worker hooks currently executing
+	runsLive atomic.Int32 // Go hooks currently executing
 
 	// values seen per (scope, key), to check singleton stability
 	seen map[string]any
@@ -560,7 +560,7 @@ func (m *machine) finish() {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if n := m.runsLive.Load(); n != 0 {
-		m.fail("%d Worker hooks still executing after the root was stopped", n)
+		m.fail("%d Go hooks still executing after the root was stopped", n)
 	}
 }
 
@@ -627,7 +627,7 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 			OnStart(hook("OnStart")).OnStop(hook("OnStop"))
 	case 4:
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
-			Worker(func(ctx context.Context, _ T) error {
+			Go(func(ctx context.Context, _ T) error {
 				m.runsLive.Add(1)
 				defer m.runsLive.Add(-1)
 				<-ctx.Done()

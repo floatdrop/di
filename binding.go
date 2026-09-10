@@ -378,19 +378,21 @@ func (b Binding[T]) OnStop(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.onStop = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
 }
 
-// Worker registers a long-running function for T, such as a consumer loop. It is
-// started in its own goroutine once the service starts and its context is
-// cancelled when the service stops; Stop waits for it to return, bounded by
-// its own context. A hook that outlasts that deadline is reported by Stop,
-// and OnStop then waits for it rather than releasing the value underneath a
+// Go registers a worker for T: a long-running function, such as a consumer
+// loop, that runs in a goroutine of its own for as long as the service does.
+// It is the contract of errgroup's Go, applied to a service. The worker
+// starts once the service has started; its context is cancelled when the
+// service stops, and Stop waits for it to return, bounded by Stop's own
+// context. A worker that outlasts that deadline is reported by Stop, and
+// OnStop then waits for it rather than releasing the value underneath a
 // worker still reading it.
 //
 // Returning a non-nil error calls Shutdown with it, stopping the application,
 // even if the scope was already stopping: a worker may fail, flush while the
 // scope winds down, and only then report. The exception is context.Canceled
-// from a hook that was already cancelled, which is a worker reporting the
-// cancellation and nothing else. A hook that wants to stay quiet during
+// from a worker that was already cancelled, which is a worker reporting the
+// cancellation and nothing else. A worker that wants to stay quiet during
 // shutdown should return nil.
-func (b Binding[T]) Worker(f func(context.Context, T) error) Binding[T] {
+func (b Binding[T]) Go(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.worker = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
 }

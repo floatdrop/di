@@ -50,7 +50,7 @@ package di_test
 //
 // C9 and C10 exist because the third review found two more the same way. The
 // coverage the generators reached was 78% against the suite's 97%, and the
-// whole gap was the lifecycle: no Worker hook, no Shutdown, no context expiring
+// whole gap was the lifecycle: no Go hook, no Shutdown, no context expiring
 // mid-Stop, and starts kept strictly before stops. Everything the reviews
 // found lived in that gap. It is closed here.
 
@@ -414,7 +414,7 @@ func (m *cmachine) register(s *di.Scope, o op) {
 	}
 }
 
-// errWorker is a Worker hook failing of its own accord rather than because it
+// errWorker is a Go hook failing of its own accord rather than because it
 // was cancelled, which is what makes the container hand it to Shutdown. A
 // worker that only ever returns nil leaves that whole path unreached.
 var errWorker = errors.New("worker failed")
@@ -519,16 +519,16 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 	switch o.reg % 6 {
 	case 0:
 		if o.wire {
-			b = s.Wire[T](wired).Worker(work).OnStop(down)
+			b = s.Wire[T](wired).Go(work).OnStop(down)
 		} else {
-			b = s.Provide(build).Worker(work).OnStop(down)
+			b = s.Provide(build).Go(work).OnStop(down)
 		}
 	case 1:
 		// Scoped through Wire puts a reflect.Call under every child build.
 		if o.wire {
-			b = s.Wire[T](wired).Scoped().Worker(work).OnStop(down)
+			b = s.Wire[T](wired).Scoped().Go(work).OnStop(down)
 		} else {
-			b = s.Provide(build).Scoped().Worker(work).OnStop(down)
+			b = s.Provide(build).Scoped().Go(work).OnStop(down)
 		}
 	case 2:
 		build := func(sc *di.Scope) T { return own(sc, dep(sc)) }
@@ -542,7 +542,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 			wrapped = s.Provide(build)
 		}
 		b = wrapped.
-			Worker(work).
+			Go(work).
 			OnStop(func(ctx context.Context, v T) error {
 				// Slow enough that an impatient Stop misses its deadline
 				// here, which is the only way this driver reaches the
@@ -561,11 +561,11 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// survived this driver.
 		b = s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).
 			OnDrain(drainHook).
-			Worker(work).
+			Go(work).
 			OnStop(down)
 	case 4:
 		// The one shape with an OnStart, so its stop step is owed only when
-		// the start step succeeded. Its Worker hook is what puts a worker under
+		// the start step succeeded. Its Go hook is what puts a worker under
 		// a Stop that has to cancel it and wait.
 		b = s.Provide(build).
 			OnStart(func(_ context.Context, v T) error {
@@ -574,7 +574,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 				m.owed.Store(any(v), m.holderOf(any(v)))
 				return nil
 			}).
-			Worker(work).
+			Go(work).
 			OnStop(down)
 	default:
 		// Scoped *and* draining. Without this shape the driver could not put
@@ -584,7 +584,7 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 		// drain defect was unreachable for want of one registration.
 		b = s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).Scoped().
 			OnDrain(drainHook).
-			Worker(work).
+			Go(work).
 			OnStop(down)
 	}
 	if o.override {
@@ -871,7 +871,7 @@ func (m *cmachine) run() {
 // release it still owed has happened.
 //
 // The second half cannot be a WaitGroup. A release deferred past a missed
-// deadline is issued by a goroutine that first waits for the Worker hook to
+// deadline is issued by a goroutine that first waits for the Go hook to
 // return, so between that hook finishing and the release starting there is a
 // moment when no hook is running and the work is still owed. Polling for the
 // owed set to empty is what closes that gap, and it keeps C9 to the property
@@ -1022,7 +1022,7 @@ func TestMachineConcurrentSeeds(t *testing.T) {
 	seeds := [][]byte{
 		{0, 1, 0, 1, 0, 1, 3, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // scoped in gc, then stop c1 and root
 		{0, 0, 0, 2, 1, 5, 0, 0, 0, 0, 1, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // start racing a resolve from a child
-		{0, 0, 0, 3, 1, 5, 0, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // a Worker hook, then overlapping stops
+		{0, 0, 0, 3, 1, 5, 0, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // a Go hook, then overlapping stops
 		{0, 0, 0, 4, 1, 1, 3, 0, 0, 0, 1, 1, 0, 0, 0, 5, 0, 0, 0, 0},    // late build racing Start's hook phase
 		{0, 3, 0, 0, 0, 1, 3, 0, 0, 0, 6, 3, 0, 0, 0, 6, 1, 0, 0, 0, 6}, // stop the grandchild and its ancestors
 		{0, 1, 0, 3, 0, 1, 1, 0, 0, 0, 6, 1, 0, 0, 0, 6, 0, 0, 0, 0},    // a drain hook in c1, then c1 and root stopped at once

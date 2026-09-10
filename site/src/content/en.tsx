@@ -143,7 +143,7 @@ export const en: Content = {
 			body: (f) => (
 				<>
 					<p>
-						A <C>Worker</C> runs for as long as its service does: started in its own goroutine
+						A worker, registered with <C>Go</C>, runs for as long as its service does: started in its own goroutine
 						when the service starts, cancelled by <C>Stop</C>, and waited for before anything
 						it depends on is torn down. Returning an error from it stops the application.{' '}
 						<C>Eager</C> says the mailer exists by the time <C>Start</C> returns rather than on

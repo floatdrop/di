@@ -29,11 +29,11 @@ func ExampleBinding_Scoped() {
 
 type Queue struct{ jobs chan string }
 
-func ExampleBinding_Worker() {
+func ExampleBinding_Go() {
 	app := di.New()
 	done := make(chan string, 1)
 	app.Provide(func(*di.Scope) *Queue { return &Queue{jobs: make(chan string, 1)} }).Eager().
-		Worker(func(ctx context.Context, q *Queue) error {
+		Go(func(ctx context.Context, q *Queue) error {
 			for {
 				select {
 				case job := <-q.jobs:

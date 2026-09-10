@@ -1,5 +1,5 @@
 // A complete service: request scopes through middleware, a background
-// worker with a Worker hook, a health endpoint, and graceful shutdown.
+// worker with a Go hook, a health endpoint, and graceful shutdown.
 package main
 
 import (
@@ -49,7 +49,7 @@ func main() {
 	// DB it depends on is closed. Returning an error stops the application.
 	app.Wire[*Mailer](func(*DB) *Mailer { return &Mailer{queue: make(chan string, 16)} }).
 		Eager().
-		Worker(func(ctx context.Context, m *Mailer) error {
+		Go(func(ctx context.Context, m *Mailer) error {
 			for {
 				select {
 				case msg := <-m.queue:
