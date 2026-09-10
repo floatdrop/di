@@ -1170,8 +1170,104 @@ app.Observe(func(ev di.Event) {
 
 Observers receive an `Event` for every constructor and every `OnStart`,
 `OnDrain` and `OnStop` hook in the scope and its descendants, and one per
-`Shutdown`. Each event names the service, its scope and module, the
-registration site, the duration, and the error if any.
+`Shutdown`. Each event names the service and the import path of its type, its
+scope and module, the registration site, the duration, and the error if any.
+
+For logging, [`dislog`](dislog/) is that function already written against
+`log/slog`:
+
+```go
+app.Observe(dislog.New(slog.Default()))
+```
+
+The event's kind is the message and the rest are attributes. A step that
+failed is logged at `slog.LevelError` with the error and the registration
+site, since that is what a failure is read with; anything else at
+`slog.LevelInfo`, or at the level `dislog.Level` sets — `slog.LevelDebug` is
+the usual second choice, because every build is worth a line while an
+application is being wired and noise once it works. `dislog.Site()` logs the
+site every time. The package imports nothing beyond `log/slog`, so any
+handler will do, including one that colours its output:
+
+<details>
+<summary><code>examples/observe/main.go</code>, the program that prints the output below</summary>
+
+[embedmd]:# (examples/observe/main.go go)
+```go
+// Observe: the container's lifecycle as log lines. dislog.New turns a
+// *slog.Logger into the observer Observe takes, so the application says what
+// it is doing as it builds, starts and stops.
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+
+	charm "github.com/charmbracelet/log"
+	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dislog"
+	"github.com/floatdrop/di/examples/observe/internal/store"
+)
+
+type Repo struct{ db *store.DB }
+
+func NewRepo(db *store.DB) *Repo { return &Repo{db} }
+
+func main() {
+	// dislog imports only log/slog, so any handler will do. This one is
+	// charmbracelet/log, which is an slog handler that colours its output.
+	logger := slog.New(charm.New(os.Stderr))
+
+	app := di.New()
+
+	// Observers see this scope and every scope under it, so registering first
+	// means the whole wiring is logged.
+	app.Observe(dislog.New(logger))
+
+	app.Value(store.Config{DSN: "postgres://localhost/app"})
+	app.Use(store.Module)
+	app.Wire[*Repo](NewRepo)
+
+	ctx := context.Background()
+	if err := app.Start(ctx); err != nil {
+		logger.Error("start", "err", err)
+		os.Exit(1)
+	}
+
+	// Built after Start, so this build is logged here, between the two
+	// phases, and its OnStart would run as it is handed out. It is a type in
+	// main, which has no import path to lift out, so it gets no pkg.
+	_ = app.Get[*Repo]()
+
+	// Stop returns what the hooks reported as well as logging it, so a
+	// caller that wants to act on a teardown failure still can.
+	if err := app.Stop(ctx); err != nil {
+		logger.Warn("stopped with failures", "err", err)
+	}
+}
+```
+
+</details>
+
+```
+INFO build service=store.Config pkg=github.com/acme/app/internal/store scope=root duration=25.667µs
+INFO build service=*store.DB pkg=github.com/acme/app/internal/store scope=root module=store.Module duration=286.333µs
+INFO start service=*store.DB pkg=github.com/acme/app/internal/store scope=root module=store.Module duration=792ns
+INFO build service=*main.Repo scope=root duration=26.417µs
+ERRO stop service=*store.DB pkg=github.com/acme/app/internal/store scope=root module=store.Module duration=4.709µs site=store.go:20 err="di: stopping *store.DB: connection reset"
+WARN stopped with failures err="di: stopping *store.DB: connection reset"
+```
+
+A service is named the way it is written in Go, with the import path lifted
+out into `pkg`, since the path is most of the length and none of the meaning.
+Both come from the event -- `Service` and `Package` -- so nothing is parsed,
+and a key whose type is unnamed reports no package and keeps its whole name.
+
+Observers see the scope they are registered on and every scope under it, so
+one on the application scope logs request scopes too. Events arrive on the
+goroutine that did the work, so a slow handler slows the application down.
+[`examples/guide/cmd/api`](examples/guide/cmd/api/main.go) wires it this way.
 
 ## Performance
 
