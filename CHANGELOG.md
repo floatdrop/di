@@ -7,6 +7,22 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Added
+
+- `dislog`, a new package that logs a scope's lifecycle events through
+  `log/slog`: `app.Observe(dislog.New(logger))` gives one line per constructor
+  and per hook, so an application says what it is doing as it builds, starts,
+  drains and stops. The event's kind is the message; the service, its scope,
+  the module it came from and the duration are attributes. A step that failed
+  logs at `slog.LevelError` with the error and the registration site, a step
+  that succeeded at `slog.LevelInfo` or wherever `dislog.Level` puts it, and
+  `dislog.Site()` logs the site every time. A service is named the way it is
+  written in Go, with the import path lifted out into a `pkg` attribute. The
+  package imports nothing beyond `log/slog` and `di`, so the library stays
+  dependency-free and any handler will do; `examples/` uses
+  `charmbracelet/log`. An upgrade cannot break a caller: nothing in `di` or
+  `dihttp` changed.
+
 ## [0.14.0] - 2026-09-07
 
 A module dependency report, derived from what registrations already carry.

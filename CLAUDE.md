@@ -7,8 +7,9 @@ on generic methods. [`docs/DESIGN.md`](docs/DESIGN.md) explains resolution,
 lifetimes, phases, cycles and teardown with diagrams; this file is the working
 detail behind it, and the two are edited together. The library is `di.go`, the
 rendering of the recorded graph in `explain.go`, the check of the declared
-graph in `validate.go`, and the net/http adapter in `dihttp/`; everything else
-is tests, examples, and a separate benchmarks module.
+graph in `validate.go`, the net/http adapter in `dihttp/` and the slog bridge
+for `Observe` in `dislog/`; everything else is tests and two separate modules,
+`examples/` and `benchmarks/`.
 
 ## Commands
 
@@ -24,7 +25,8 @@ go run github.com/campoy/embedmd@v1.0.0 -w README.md   # re-embed after editing 
 cd benchmarks && go test -bench . -benchmem   # separate module, see below
 
 cd site && npm ci && npm run check && npm run build   # the guide site; BASE_PATH=/di for Pages
-go test ./examples/guide -update                       # rewrite testdata/ after rewiring the guide app
+cd examples && go test ./...                  # separate module, charmbracelet/log lives there
+cd examples && go test ./guide -update        # rewrite testdata/ after rewiring the guide app
 
 go test -count=1 -run 'TestMachine|TestConcurrent|TestProperty|FuzzMachine' -coverprofile=gen.out .
 go test -count=1 -coverprofile=all.out .
@@ -590,8 +592,22 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
 - **README code blocks are generated.** They are embedded from `examples/` with
   embedmd markers. Run `gofmt -w` on an example *before* re-embedding, or CI
   fails on the sync check.
-- **`benchmarks/` is a separate module** with a `replace ../` directive, so the
-  library itself stays dependency-free. `samber/do` and `go.uber.org/dig` are
+- **`examples/` and `benchmarks/` are separate modules**, each with a
+  `replace ../` directive, so the root module keeps zero requires and the
+  library's "no dependency outside the standard library" claim stays true.
+  Each module path is its directory's old import path, so nothing an example
+  imports changed when it moved out. The consequence to remember: a root
+  `go test ./...` no longer covers the examples, and `golangci-lint run ./...`
+  no longer lints them -- CI runs `go vet`, the tests and the runnable examples
+  from `examples/` in their own step. `gofmt -l .` still walks both, since
+  gofmt does not stop at a module boundary.
+- **`dislog/` is the slog bridge for `Observe`**, and it imports nothing but
+  `log/slog` and the library, which is what keeps the root module clean:
+  `charmbracelet/log` is an slog handler, so it is a dependency of `examples/`
+  only. `dislog.New` returns the `func(di.Event)` that `Observe` takes -- not a
+  `slog.Handler`, despite the shape of the name. A failed step logs at Error
+  with the site attached; a step that succeeded logs at Info, or wherever
+  `Level` puts it. `samber/do` and `go.uber.org/dig` are
   dependencies there only. Two of the three comparisons are like-for-like and
   one is not: dig has no typed accessor, so its warm number is `Invoke` with a
   function reflected over on every call, which is not how an fx application

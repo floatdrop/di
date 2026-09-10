@@ -17,7 +17,9 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-          cache-dependency-path: benchmarks/go.sum
+          cache-dependency-path: |
+            benchmarks/go.sum
+            examples/go.sum
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -d . && exit 1)
       - name: vet
@@ -28,12 +30,16 @@ jobs:
           version: v2.13.1
       - name: README examples are in sync
         run: go run github.com/campoy/embedmd@v1.0.0 -d README.md
-      - name: run examples
+      - name: examples vet, test and run
+        working-directory: examples
         run: |
-          go run ./examples/quickstart
-          go run ./examples/scopes
-          go run ./examples/explain
-          go run ./examples/optional
+          go vet ./...
+          go test -race -count=1 ./...
+          go run ./quickstart
+          go run ./scopes
+          go run ./explain
+          go run ./optional
+          go run ./observe
       - name: test
         run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: what only the hand-written tests reach
@@ -65,7 +71,9 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-          cache-dependency-path: benchmarks/go.sum
+          cache-dependency-path: |
+            benchmarks/go.sum
+            examples/go.sum
       - name: fuzz the container against its invariants
         run: go test -run '^$' -fuzz 'FuzzMachine$' -fuzztime 90s .
       - name: fuzz the concurrent oracles
