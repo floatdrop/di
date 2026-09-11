@@ -40,6 +40,7 @@ jobs:
           go run ./explain
           go run ./optional
           go run ./observe
+          go run ./factory
       - name: test
         run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: what only the hand-written tests reach
