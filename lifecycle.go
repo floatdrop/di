@@ -226,7 +226,11 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 		hctx := inHook(rctx, owner)
 		go func() {
 			defer close(in.runDone)
-			err := b.worker(hctx, in.value)
+			// Through callHook like every other user function: a worker that
+			// panics is a worker that failed, reported by Stop and received
+			// by Run, rather than a crash of the process with no OnStop run
+			// and no event emitted.
+			err := callHook(b.worker, hctx, in.value)
 			if err == nil {
 				return
 			}

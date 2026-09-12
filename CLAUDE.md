@@ -421,9 +421,11 @@ binding and cannot protect the inner scope.
   given gets an error naming `Shutdown`. A hook that passes a context of its
   own is invisible and waits, which is why the fallback still has to be a
   bounded wait rather than a promise.
-- Every user hook is called through `callHook`, which turns a panic into that
-  hook's error, and every step is reported through `state.report`, so a
-  hook that panicked is observed like one that failed. A cancelled
+- Every user function is called through `callHook`, the `Go` worker
+  included, which turns a panic into that hook's error, and every step is
+  reported through `state.report`, so a hook that panicked is observed like
+  one that failed. The worker was the one exception until 0.16.1, and its
+  panic took the process down with no `OnStop` and no event. A cancelled
   worker's return is dropped only when it says nothing beyond
   `context.Canceled` (`onlyCancellation` walks the error tree); `errors.Is`
   matched `errors.Join(ctx.Err(), failure)` and dropped the failure with it

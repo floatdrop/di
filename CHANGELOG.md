@@ -7,6 +7,16 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+No signature changes. An upgrade cannot break a caller.
+
+### Fixed
+
+- A worker registered with `Go` that panics is now a worker that failed: the
+  panic becomes its error, `Shutdown` receives it, `Run` returns it, `OnStop`
+  runs and the stop event carries it, as for a panicking hook. It was the one
+  user function not called through the recovering wrapper, so its panic took
+  the process down with no release and no event.
+
 ## [0.16.0] - 2026-09-10
 
 `Binding.Worker` is now `Binding.Go`, after `errgroup.Group.Go` and
