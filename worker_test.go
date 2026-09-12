@@ -262,3 +262,39 @@ func TestWorkerFailureJoinedWithCancellationIsReported(t *testing.T) {
 		t.Fatalf("a bare cancellation is not a failure: %v", err)
 	}
 }
+
+// A worker that panics is a worker that failed: the panic becomes its error,
+// Shutdown receives it, Run returns it, and OnStop still runs. Called directly
+// rather than through callHook, the panic took the process down with no
+// OnStop and no event. Found by the supervision-tree question of 2026-09-12
+// and checked against c44198f.
+func TestPanickingWorkerIsAFailure(t *testing.T) {
+	var stops atomic.Int32
+	var events []di.Event
+	s := di.New()
+	s.Observe(func(ev di.Event) {
+		if ev.Kind == di.EventStop {
+			events = append(events, ev)
+		}
+	})
+	s.Value(&Worker{}).Eager().
+		Go(func(context.Context, *Worker) error { panic("consumer exploded") }).
+		OnStop(func(context.Context, *Worker) error { stops.Add(1); return nil })
+	done := make(chan error, 1)
+	go func() { done <- s.Run(context.Background()) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a panicking worker did not stop the application")
+	}
+	if err == nil || !strings.Contains(err.Error(), "consumer exploded") {
+		t.Fatalf("Run must report the panic as the worker's failure, got %v", err)
+	}
+	if stops.Load() != 1 {
+		t.Fatalf("OnStop ran %d times, want 1", stops.Load())
+	}
+	if len(events) != 1 || events[0].Err == nil {
+		t.Fatalf("stop event %+v, want one carrying the failure", events)
+	}
+}
