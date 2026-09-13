@@ -46,6 +46,20 @@ func TestObserveSeesWholeLifecycle(t *testing.T) {
 	}
 }
 
+// Observe replaces the scope's observer list whole, so that emit can read it
+// without a lock. A second observer on one scope must keep the first.
+func TestObserveTwiceOnOneScopeKeepsBoth(t *testing.T) {
+	var first, second int
+	s := di.New()
+	s.Observe(func(di.Event) { first++ })
+	s.Observe(func(di.Event) { second++ })
+	s.Provide(func(*di.Scope) *DB { return &DB{} })
+	s.Get[*DB]()
+	if first != 1 || second != 1 {
+		t.Fatalf("the observers saw %d and %d build events, want 1 each", first, second)
+	}
+}
+
 func TestObserveOnRootSeesChildAndMiddlewareStopErrors(t *testing.T) {
 	var evs []di.Event
 	closeFailed := errors.New("close failed")

@@ -177,10 +177,7 @@ func as[T any](v any) T {
 func (s *Scope) lookup(k key) (*binding, *state) {
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
-		st.mu.Lock()
-		b, ok := st.index[k]
-		st.mu.Unlock()
-		if ok {
+		if b, ok := st.reg.Load().index[k]; ok {
 			return b, st
 		}
 	}
@@ -304,6 +301,15 @@ func (r *resolver) dependOn(in *instance, holder *state) {
 // OnStart is still in flight. A wait that would close a cycle between two
 // concurrent builds is reported as ErrCycle rather than deadlocking.
 func (s *Scope) await(in *instance, holder *state) (any, error) {
+	if in.ready.Load() && !s.isStopped() {
+		// The warm path, without the holder's mutex: the build is settled,
+		// no start step is owed or in flight, and the value is final. The
+		// flag is written under that mutex at every change that could make
+		// the answer below differ (see refresh), so a load that sees it set
+		// is ordered before any such change, when the loop below would have
+		// returned the same value.
+		return in.value, nil
+	}
 	holder.mu.Lock()
 	for in.ph == phaseNew || !in.settled || in.ph == phaseStarting {
 		if in.ph == phaseNew {
@@ -349,6 +355,7 @@ func (s *Scope) await(in *instance, holder *state) (any, error) {
 // holder's mutex held.
 func (in *instance) claimBuild(holder *state, r *resolver) {
 	in.ph = phaseBuilding
+	in.refresh()
 	g := holder.graph
 	g.mu.Lock()
 	in.builder = r
@@ -360,6 +367,7 @@ func (in *instance) claimBuild(holder *state, r *resolver) {
 func (in *instance) settle(holder *state) {
 	holder.mu.Lock()
 	in.settled = true
+	in.refresh()
 	g := holder.graph
 	g.mu.Lock()
 	in.builder = nil
@@ -372,6 +380,7 @@ func (in *instance) settle(holder *state) {
 func (in *instance) fail(holder *state, err error) {
 	holder.mu.Lock()
 	in.ph, in.err = phaseFailed, err
+	in.refresh()
 	holder.mu.Unlock()
 }
 
@@ -417,6 +426,7 @@ func (in *instance) publish(owner *state) bool {
 	owner.mu.Lock()
 	stopped := owner.isStopped()
 	in.ph = phaseBuilt
+	in.refresh()
 	if !stopped {
 		owner.started = append(owner.started, in)
 	}
@@ -427,6 +437,7 @@ func (in *instance) publish(owner *state) bool {
 	err := errors.Join(fmt.Errorf("di: %s: %w", in.b.key, ErrStopped), in.stopIfNeeded(owner.stopContext(), owner))
 	owner.mu.Lock()
 	in.err = err
+	in.refresh()
 	owner.mu.Unlock()
 	return false
 }
@@ -446,6 +457,7 @@ func (in *instance) startIfRunning(owner *state) {
 		// Stop ran while we were starting and waited for the step, so the
 		// instance is torn down: do not hand it out.
 		in.err = fmt.Errorf("di: %s: %w", in.b.key, ErrStopped)
+		in.refresh()
 	}
 	owner.mu.Unlock()
 }
@@ -477,10 +489,7 @@ func (s *Scope) All[T any]() []T {
 	var out []T
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
-		st.mu.Lock()
-		bs := slices.Clone(st.groups[k])
-		st.mu.Unlock()
-		for _, b := range bs {
+		for _, b := range st.reg.Load().groups[k] { // immutable: freeze appends to a copy
 			out = append(out, as[T](s.resolve(b, st)))
 		}
 	}

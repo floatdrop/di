@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -60,6 +61,11 @@ type instance struct {
 	settled bool       // guarded by the owning state's mutex
 	dr      drainPhase // guarded by the owning state's mutex
 
+	// ready summarises ph, err and settled for the warm path, which reads it
+	// without the mutex: set, the value is final and a resolution may return
+	// it without waiting for anything. Written only by refresh.
+	ready atomic.Bool
+
 	// deps are the services this instance's constructor resolved, in the
 	// order it asked for them, each recorded once however many times it
 	// asked. Guarded by the owning state's mutex, because a constructor may
@@ -100,6 +106,17 @@ type instance struct {
 	cancel  context.CancelFunc
 	runDone chan struct{}
 	runErr  error
+}
+
+// refresh recomputes ready from the fields it summarises: the build has
+// settled without an error and the instance is built with no start step in
+// flight, or started. It is exactly the state in which await's locked loop
+// would hand the value straight back. Called with the owning state's mutex
+// held, after every change to ph, err or settled; a site that forgets it
+// leaves the flag stale in one direction or the other, and only the false
+// direction is harmless.
+func (in *instance) refresh() {
+	in.ready.Store(in.settled && in.err == nil && (in.ph == phaseBuilt || in.ph == phaseStarted))
 }
 
 // wake closes a step's channel if a waiter made one.
@@ -259,6 +276,7 @@ func (in *instance) claim(owner *state) bool {
 		return false
 	}
 	in.ph = phaseStarting
+	in.refresh()
 	return true
 }
 
@@ -280,6 +298,7 @@ func (in *instance) startClaimed(ctx context.Context, owner *state) error {
 			in.err = fmt.Errorf("di: starting %s (provided at %s): %w", in.b.key, in.b.where(), err)
 		}
 	}
+	in.refresh()
 	wake(in.startingCh)
 	owner.mu.Unlock()
 	return err
@@ -319,6 +338,7 @@ func (in *instance) stopIfNeeded(ctx context.Context, owner *state) error {
 		if step == nil {
 			owed := in.owes(paired)
 			in.ph = phaseStopped
+			in.refresh()
 			owner.mu.Unlock()
 			if !owed {
 				return nil
@@ -529,23 +549,17 @@ func (s *Scope) Start(ctx context.Context) error {
 func (s *Scope) start(ctx context.Context, rollbackCtx func() (context.Context, func())) (err error) {
 	defer recoverAbort(&err)
 	s.freeze()
-	s.mu.Lock()
-	if s.startCtx != nil {
-		s.mu.Unlock()
+	if !s.startCtx.CompareAndSwap(nil, &ctx) {
 		return errors.New("di: Start called twice")
 	}
-	s.startCtx = ctx
-	eager := slices.Clone(s.eager) // derived at freeze; clone so a later freeze cannot truncate it
-	s.mu.Unlock()
+	eager := s.reg.Load().eager // a registry is never written to; a later freeze stores a new one
 
 	// A failing eager constructor must roll back like a failing hook.
 	if err := s.buildEager(eager); err != nil {
 		return errors.Join(err, s.rollback(rollbackCtx))
 	}
 
-	s.mu.Lock()
-	s.running = true
-	s.mu.Unlock()
+	s.running.Store(true)
 
 	// Drain: anything built before the flag was set is still waiting here,
 	// and starting one service may build more.
@@ -595,6 +609,7 @@ func (st *state) claimNext() (*instance, *state) {
 	for _, in := range st.started {
 		if in.ph == phaseBuilt {
 			in.ph = phaseStarting
+			in.refresh()
 			st.mu.Unlock()
 			return in, st
 		}

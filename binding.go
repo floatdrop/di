@@ -101,6 +101,7 @@ func (s *Scope) register(k key, build func(*Scope) any) *binding {
 	b.single = &instance{b: b}
 	s.mu.Lock()
 	s.pending = append(s.pending, b)
+	s.hasPending.Store(true)
 	s.mu.Unlock()
 	return b
 }
@@ -260,7 +261,7 @@ func (st *state) current(k key) (*binding, *state) {
 			return b, st
 		}
 	}
-	if b, ok := st.index[k]; ok {
+	if b, ok := st.reg.Load().index[k]; ok {
 		return b, st
 	}
 	return nil, nil

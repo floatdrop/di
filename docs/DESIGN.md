@@ -210,6 +210,17 @@ to wait. An uncontended build allocates none of them. The drain channel is
 what lets `Stop` wait out an `OnDrain` still running for a value it is about
 to release.
 
+Once a value is built, and started if a start was owed, a resolution takes no
+lock in the scope that holds it. Each scope's committed registrations are an
+immutable snapshot behind an atomic pointer, replaced whole when a new batch
+commits, and each instance carries a ready flag, written under the scope's
+mutex whenever its phase changes, that says the value can be handed back
+without waiting. So a thousand request scopes resolving the same application
+singleton do not queue on the application scope. What still locks is local to
+the resolving side: a `Scoped` service is found in the resolving scope's own
+map, under that scope's mutex, and a constructor records each dependency it
+resolves on its own instance while it builds.
+
 ## Two cycle detectors
 
 One resolution's path catches a cycle inside a single branch. It cannot catch
