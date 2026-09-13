@@ -28,7 +28,7 @@ func TestSealDecidesAClaimedStart(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			st := s.state
+			st := s.st
 			ch := make(chan struct{})
 			st.mu.Lock()
 			st.sealCh = ch

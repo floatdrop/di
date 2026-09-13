@@ -215,7 +215,7 @@ func as[T any](v any) T {
 // and the scope that owns it. A nil binding means nothing is registered for
 // k anywhere in the chain.
 func (s *Scope) lookup(k key) (*binding, *state) {
-	for st := s.state; st != nil; st = st.parent {
+	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
 		if b, ok := st.reg.Load().index[k]; ok {
 			return b, st
@@ -261,7 +261,7 @@ func (s *Scope) get(k key) any {
 // between each handed out a value for k as well, and registering k in one of
 // them afterwards would give the key two live values there.
 func (s *Scope) markServed(owner *state, k key) {
-	for st := s.state; st != nil && st != owner; st = st.parent {
+	for st := s.st; st != nil && st != owner; st = st.parent {
 		st.mu.Lock()
 		if st.served == nil {
 			st.served = make(map[key]bool, 4)
@@ -274,7 +274,7 @@ func (s *Scope) markServed(owner *state, k key) {
 // resolve produces b's value for the resolving scope s, honouring the
 // binding's lifetime and starting the instance when the scope is running.
 func (s *Scope) resolve(b *binding, owner *state) any {
-	if s.isStopped() {
+	if s.st.isStopped() {
 		panic(abort{fmt.Errorf("di: %s: %w%s", b.key, ErrStopped, s.r.path())})
 	}
 	// The holder owns the instance's lifecycle: a singleton lives in the
@@ -282,7 +282,7 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	// resolves it, so it can see that scope's values.
 	holder := owner
 	if b.scoped {
-		holder = s.state
+		holder = s.st
 	}
 	if s.r.onPath(b, holder) {
 		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.pathStr(), b.key)})
@@ -341,7 +341,7 @@ func (r *resolver) dependOn(in *instance, holder *state) {
 // OnStart is still in flight. A wait that would close a cycle between two
 // concurrent builds is reported as ErrCycle rather than deadlocking.
 func (s *Scope) await(in *instance, holder *state) (any, error) {
-	if in.ready.Load() && !s.isStopped() {
+	if in.ready.Load() && !s.st.isStopped() {
 		// The warm path, without the holder's mutex: the build is settled,
 		// no start step is owed or in flight, and the value is final. The
 		// flag is written under that mutex at every change that could make
@@ -380,7 +380,7 @@ func (s *Scope) await(in *instance, holder *state) (any, error) {
 		holder.mu.Lock()
 	}
 	value, err := in.value, in.err
-	if err == nil && s.isStopped() {
+	if err == nil && s.st.isStopped() {
 		// The scope stopped while this branch was building or waiting;
 		// resolve's check was before the wait. The check is on the resolving
 		// scope, which covers the holder (always that scope or an ancestor):
@@ -456,7 +456,7 @@ func (s *Scope) construct(in *instance, holder *state) (err error) {
 		}
 		holder.report(EventBuild, b, t0, err)
 	}()
-	in.value = b.build(&Scope{state: holder, r: s.r, module: b.module})
+	in.value = b.build(&Scope{st: holder, r: s.r, module: b.module})
 	return nil
 }
 
@@ -528,7 +528,7 @@ func (s *Scope) All[T any]() []T {
 	}
 	k := key{t: reflect.TypeFor[T]()}
 	var out []T
-	for st := s.state; st != nil; st = st.parent {
+	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
 		for _, b := range st.reg.Load().groups[k] { // immutable: freeze appends to a copy
 			out = append(out, as[T](s.resolve(b, st)))

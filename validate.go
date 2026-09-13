@@ -53,7 +53,7 @@ func (v Validation) Err() error { return errors.Join(v.Errors...) }
 // panic.
 func (s *Scope) Validate(stubs ...Stub) Validation {
 	var chain []*state
-	for st := s.state; st != nil; st = st.parent {
+	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
 		chain = append(chain, st)
 	}
@@ -69,7 +69,7 @@ func (s *Scope) Validate(stubs ...Stub) Validation {
 			case b.wants == nil:
 				v.out.Unchecked = append(v.out.Unchecked, fmt.Sprintf("%s (provided at %s)", b.key, b.where()))
 			case b.scoped:
-				v.walk(b, s.state, lenient, nil)
+				v.walk(b, s.st, lenient, nil)
 			default:
 				v.walk(b, st, strict, nil)
 			}
@@ -249,7 +249,7 @@ func declared(b *binding, holder *state) []edge {
 		out = append(out, edge{b.key, b.inner, b.innerAt})
 	}
 	for _, k := range b.wants {
-		dep, owner := (&Scope{state: holder}).lookup(k)
+		dep, owner := (&Scope{st: holder}).lookup(k)
 		out = append(out, edge{k, dep, owner})
 	}
 	return out

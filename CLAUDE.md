@@ -56,7 +56,8 @@ pieces that only make sense together.
 **Three levels of state.** A `binding` is a registration: its key, lifetime,
 hooks, and `build` func. An `instance` is one built value of a binding. A
 `state` is a scope's registry and lifecycle bookkeeping. `Scope` is a thin
-handle over `*state` plus a `*resolver` carrying the current resolution path;
+handle over `*state` (the named field `st`, not an embedding, so a handle
+never reads as the state it views) plus a `*resolver` carrying the current resolution path;
 the `Scope` handed to a constructor is a *view* over the same state with that
 path attached, which is how cycle detection and error paths work.
 
@@ -374,8 +375,12 @@ serves an interface key. (A typed `Wire0..Wire6` with `E` variants was
 prototyped beside it and dropped: fourteen methods to save a repeated type
 argument, with the compiler checking only an arity the reflective form cannot
 get wrong.) Every registration method calls `register` directly, because
-`callsite` counts a fixed number of frames and a `Wire` that went through
-`Provide` would record a site inside the library.
+`callsite` skips the two frames `register` tells it to, and a `Wire` that went
+through `Provide` would record a site inside the library.
+`TestRegistrationSiteNamesTheCaller` guards that count in the root module,
+comparing each method's site with the exact line that called it, so a count
+one frame short or long fails. The guide's golden files catch a wrong count
+too, but they live in `examples/`, which a root `go test` does not run.
 
 `Explain` draws `wants` under an unbuilt node with dashed edges
 (`declaredInto`), switching back to the recorded tree wherever a declared

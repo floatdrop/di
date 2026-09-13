@@ -18,15 +18,15 @@ import (
 // application.
 func (s *Scope) Shutdown(cause error) {
 	first := false
-	for st := s.state; st != nil; st = st.parent {
+	for st := s.st; st != nil; st = st.parent {
 		st.shutdownOnce.Do(func() {
 			st.shutdownErr = cause
 			close(st.shutdownCh)
-			first = first || st == s.state
+			first = first || st == s.st
 		})
 	}
 	if first {
-		s.emit(Event{Kind: EventShutdown, Scope: s.name, Err: cause})
+		s.st.emit(Event{Kind: EventShutdown, Scope: s.st.name, Err: cause})
 	}
 }
 
@@ -79,8 +79,8 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 	var cause error
 	select {
 	case <-sigCtx.Done():
-	case <-s.shutdownCh:
-		cause = s.shutdownErr
+	case <-s.st.shutdownCh:
+		cause = s.st.shutdownErr
 	}
 
 	stopCtx, cancel := cfg.stopContext(ctx)
@@ -104,8 +104,8 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 // that never finished.
 func (s *Scope) publishedCause() error {
 	select {
-	case <-s.shutdownCh:
-		return s.shutdownErr
+	case <-s.st.shutdownCh:
+		return s.st.shutdownErr
 	default:
 		return nil
 	}

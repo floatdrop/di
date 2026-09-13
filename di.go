@@ -181,13 +181,13 @@ type Event struct {
 // Scope is a container. A Scope value handed to a constructor is a view over
 // the same state that carries the current resolution path.
 type Scope struct {
-	*state
+	st     *state // what this handle is a view over
 	r      *resolver
 	module string // the Module registering through this handle, or ""
 }
 
 // New creates a root scope: a container with no parent.
-func New() *Scope { return &Scope{state: newState("root", nil)} }
+func New() *Scope { return &Scope{st: newState("root", nil)} }
 
 func newState(name string, parent *state) *state {
 	st := &state{
@@ -214,14 +214,14 @@ func newState(name string, parent *state) *state {
 // goes inert when the constructor returns (see resolver.done), so a child kept
 // for later, such as a request scope, resolves as an independent branch.
 func (s *Scope) Child(name string) *Scope {
-	st := newState(name, s.state)
-	s.mu.Lock()
-	s.children = append(s.children, st)
-	s.mu.Unlock()
-	return &Scope{state: st, r: s.r, module: s.module}
+	st := newState(name, s.st)
+	s.st.mu.Lock()
+	s.st.children = append(s.st.children, st)
+	s.st.mu.Unlock()
+	return &Scope{st: st, r: s.r, module: s.module}
 }
 
-func (s *Scope) view(r *resolver) *Scope { return &Scope{state: s.state, r: r, module: s.module} }
+func (s *Scope) view(r *resolver) *Scope { return &Scope{st: s.st, r: r, module: s.module} }
 
 // A Module is a unit of wiring: a function that registers into a scope.
 // Modules compose by ordinary function composition, and [Scope.Use] applies
@@ -236,7 +236,7 @@ type Module func(*Scope)
 // closures, or the name is the enclosing function's.
 func (s *Scope) Use(mods ...Module) {
 	for _, m := range mods {
-		m(&Scope{state: s.state, r: s.r, module: moduleName(m)})
+		m(&Scope{st: s.st, r: s.r, module: moduleName(m)})
 	}
 }
 
@@ -260,14 +260,14 @@ func moduleName(m Module) string {
 // Observe registers fn to receive lifecycle events from this scope and every
 // scope under it. Use it for logging and metrics.
 func (s *Scope) Observe(fn func(Event)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.st.mu.Lock()
+	defer s.st.mu.Unlock()
 	var obs []func(Event)
-	if p := s.observers.Load(); p != nil {
+	if p := s.st.observers.Load(); p != nil {
 		obs = slices.Clone(*p)
 	}
 	obs = append(obs, fn)
-	s.observers.Store(&obs)
+	s.st.observers.Store(&obs)
 }
 
 // emit delivers ev to the observers of st and its ancestors. It takes no

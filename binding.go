@@ -94,16 +94,16 @@ type Binding[T any] struct {
 // teardown read it under the scope's mutex, and a field written afterwards is a
 // race with both.
 func (s *Scope) register(k key, build func(*Scope) any, init func(*binding)) *binding {
-	b := &binding{key: k, site: callsite(), module: s.module, build: build}
+	b := &binding{key: k, site: callsite(2), module: s.module, build: build}
 	b.single = &instance{b: b}
 	if init != nil {
 		init(b)
 	}
-	s.mu.Lock()
-	s.pending = append(s.pending, b)
-	s.hasPending.Store(true)
-	stopped := s.stopped.Load()
-	s.mu.Unlock()
+	s.st.mu.Lock()
+	s.st.pending = append(s.st.pending, b)
+	s.st.hasPending.Store(true)
+	stopped := s.st.stopped.Load()
+	s.st.mu.Unlock()
 	if stopped && b.inner != nil {
 		// teardown collected this scope's wrappers before this one was
 		// queued, so it will not drop the mark Wrap made. A stopped scope
@@ -125,8 +125,12 @@ func (s *Scope) Value[T any](v T) Binding[T] {
 	return Binding[T]{s, b}
 }
 
-func callsite() string {
-	_, file, line, _ := runtime.Caller(3)
+// callsite is the file:line skip frames above its caller: register passes 2,
+// for itself and the registration method the user called. Every registration
+// method calls register directly for that reason; one that went through
+// another would record a site inside this package.
+func callsite(skip int) string {
+	_, file, line, _ := runtime.Caller(skip + 1)
 	return fmt.Sprintf("%s:%d", file, line)
 }
 
@@ -191,12 +195,12 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 	// This scope is read as it is, pending batch included, because committing
 	// the batch here would end it for every registration made so far.
 	// Ancestors are looked up as a resolution would look them up.
-	inner, at := s.current(k)
-	if inner == nil && s.parent != nil {
-		inner, at = (&Scope{state: s.parent}).lookup(k)
+	inner, at := s.st.current(k)
+	if inner == nil && s.st.parent != nil {
+		inner, at = (&Scope{st: s.st.parent}).lookup(k)
 	}
 	if inner == nil {
-		panic(fmt.Sprintf("di: %s: nothing provides %s in scope %s or above; a group is read with All and cannot be wrapped", name, k, s.name))
+		panic(fmt.Sprintf("di: %s: nothing provides %s in scope %s or above; a group is read with All and cannot be wrapped", name, k, s.st.name))
 	}
 	wants := params(ft, 1)
 	b := s.register(k, func(s *Scope) any {
@@ -415,9 +419,9 @@ func call(fv reflect.Value, args []reflect.Value, fails bool, want reflect.Type)
 // edit applies a builder method to the binding, rejecting one made after the
 // scope committed the registration.
 func (b Binding[T]) edit(f func(*binding)) Binding[T] {
-	b.s.mu.Lock()
-	defer b.s.mu.Unlock()
-	if b.s.frozen && !slices.Contains(b.s.pending, b.b) {
+	b.s.st.mu.Lock()
+	defer b.s.st.mu.Unlock()
+	if b.s.st.frozen && !slices.Contains(b.s.st.pending, b.b) {
 		panic(fmt.Sprintf("di: %s (provided at %s) modified after the scope was first resolved", b.b.key, b.b.where()))
 	}
 	f(b.b)

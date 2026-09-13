@@ -66,7 +66,7 @@ type found struct {
 // the order All resolves them.
 func (s *Scope) groupMembers(k key) []found {
 	var out []found
-	for st := s.state; st != nil; st = st.parent {
+	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
 		for _, b := range st.reg.Load().groups[k] {
 			out = append(out, found{b: b, owner: st})
@@ -79,7 +79,7 @@ func (s *Scope) groupMembers(k key) []found {
 func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen map[*instance]bool) {
 	holder := owner
 	if b.scoped {
-		holder = s.state
+		holder = s.st
 	}
 	holder.mu.Lock()
 	in := holder.instanceAt(b)
@@ -99,7 +99,7 @@ func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen m
 	} else {
 		seen[in] = true
 		explainInto(sb, deps, "", seen)
-		by = dependentsOf(s.root(), in)
+		by = dependentsOf(s.st.root(), in)
 	}
 	if len(by) > 0 {
 		names := make([]string, len(by))
@@ -170,7 +170,7 @@ func (s *Scope) declaredInto(sb *strings.Builder, b *binding, holder *state, pre
 // the chance to be rejected here.
 func (s *Scope) declaredBy(b *binding, except []dep) []string {
 	var out []string
-	for _, st := range walkScopes(s.root()) {
+	for _, st := range walkScopes(s.st.root()) {
 		for _, d := range st.live() {
 			if d == b || slices.ContainsFunc(except, func(e dep) bool { return e.in.b == d }) {
 				continue
@@ -231,7 +231,7 @@ func explainInto(sb *strings.Builder, deps []dep, prefix string, seen map[*insta
 // The detail is deliberately thin -- a registration site would not fit in a
 // box. Use Explain for one service in full.
 func (s *Scope) Graph() string {
-	scopes := walkScopes(s.state)
+	scopes := walkScopes(s.st)
 	type node struct {
 		d     dep
 		id    int
@@ -263,7 +263,7 @@ func (s *Scope) Graph() string {
 			continue
 		}
 		fmt.Fprintf(&sb, "  subgraph cluster%d {\n", i)
-		fmt.Fprintf(&sb, "    label=%s;\n", dotLabel(scopePath(st, s.state)))
+		fmt.Fprintf(&sb, "    label=%s;\n", dotLabel(scopePath(st, s.st)))
 		for _, n := range byScope[i] {
 			fmt.Fprintf(&sb, "    n%d [label=%s];\n", n.id,
 				dotLabel(n.d.in.b.key.String(), lifetime(n.d.in.b)+", "+n.phase))
@@ -433,7 +433,7 @@ func dotLabel(parts ...string) string {
 // by the same panic.
 func (s *Scope) Modules() string {
 	var chain []*state
-	for st := s.state; st != nil; st = st.parent {
+	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
 		chain = append(chain, st)
 	}
@@ -481,10 +481,10 @@ func (s *Scope) Modules() string {
 			}
 			holder := st
 			if b.scoped {
-				holder = s.state
+				holder = s.st
 			}
 			for _, k := range b.wants {
-				dep, _ := (&Scope{state: holder}).lookup(k)
+				dep, _ := (&Scope{st: holder}).lookup(k)
 				var from string
 				switch {
 				case dep == nil && b.scoped:

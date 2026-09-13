@@ -16,8 +16,10 @@ package di_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -417,5 +419,38 @@ func TestReview4CannotOverrideAKeyBeingResolved(t *testing.T) {
 	}
 	if got.dsn != "recovered" {
 		t.Fatalf("got %q", got.dsn)
+	}
+}
+
+// Every registration records the line that made it, and every message and
+// rendering names that line. callsite finds it by counting frames, so each
+// registration method is called directly here and its site compared with that
+// exact line: a count one frame short names a line in this package, and one
+// frame long names the testing package, and both fail.
+func TestRegistrationSiteNamesTheCaller(t *testing.T) {
+	// at returns the line it is called from, so at(s.Provide(...)) is the
+	// line of that Provide call.
+	at := func(any) int { _, _, line, _ := runtime.Caller(1); return line }
+	sites := map[string]int{}
+	want := func(name string, s *di.Scope, line int) {
+		t.Helper()
+		sites[name] = line
+		site := fmt.Sprintf("wiring_test.go:%d)", line)
+		if out := s.Explain[*DB](); !strings.Contains(out, site) {
+			t.Errorf("%s: want the site %s, got:\n%s", name, site, out)
+		}
+	}
+
+	s := di.New()
+	want("Provide", s, at(s.Provide(func(*di.Scope) *DB { return &DB{} })))
+	s = di.New()
+	want("Value", s, at(s.Value(&DB{})))
+	s = di.New()
+	want("Wire", s, at(s.Wire[*DB](func() *DB { return &DB{} })))
+	s = di.New()
+	s.Value(&DB{})
+	want("Wrap", s, at(s.Wrap[*DB](func(db *DB) *DB { return db })))
+	if len(sites) != 4 {
+		t.Fatalf("checked %d registration methods, want 4", len(sites))
 	}
 }
