@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
-	"sync"
 	"sync/atomic"
 )
 
@@ -33,11 +32,6 @@ type binding struct {
 	inner   *binding
 	innerAt *state
 
-	// retired is set on a link of a wrapper chain an Override replaced. It
-	// will never serve from its own scope again, but a live wrapper in a
-	// descendant may still compose over it, so it keeps its mark on what it
-	// wraps until nothing wraps it; see release.
-	retired atomic.Bool
 	onStart func(context.Context, any) error
 	onDrain func(context.Context, any) error
 	onStop  func(context.Context, any) error
@@ -230,7 +224,7 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 // The three use different idioms for one reason. resolve writes used and
 // resolving from whichever scope is resolving, without the owner's mutex,
 // which is what keeps a warm resolution off that mutex; so they are atomics.
-// wrappers is a list, so it has a leaf mutex of its own instead.
+// wraps is a small set, replaced whole by compare-and-swap.
 type guard struct {
 	// used is set once this binding has served a value. From then on the
 	// registration cannot be overridden, since that would leave two live
@@ -246,17 +240,25 @@ type guard struct {
 	// only until the first value is served; after that used says the same.
 	resolving atomic.Int32
 
-	// wrappers are the Wraps bound to this binding whose scopes are still
-	// alive, in registration order. An Override that replaced this binding
-	// would leave each of them composing over a registration that no longer
-	// serves the key, so freeze rejects one while any remain. Wrap adds
-	// itself; the scope that registered a wrapper removes it as it stops,
-	// since a stopped scope never serves the key again. It is a set rather
-	// than one mark because sibling scopes wrap one parent registration
-	// independently, and one of them stopping must not release the others.
-	// wmu is a leaf lock: nothing is taken while it is held.
-	wmu      sync.Mutex
-	wrappers []*binding
+	// wraps holds the Wraps bound to this binding whose scopes are still
+	// alive, in registration order, and whether the binding is retired. An
+	// Override that replaced this binding would leave each wrapper composing
+	// over a registration that no longer serves the key, so freeze rejects
+	// one while any remain. Wrap adds itself; the scope that registered a
+	// wrapper removes it as it stops, since a stopped scope never serves the
+	// key again. It is a set rather than one mark because sibling scopes wrap
+	// one parent registration independently, and one of them stopping must
+	// not release the others.
+	//
+	// retired is set on a wrapper in a chain an Override replaced. It will
+	// never serve from its own scope again, but a live wrapper in a
+	// descendant may still compose over it, so it keeps its mark on what it
+	// wraps until nothing wraps it; see release.
+	//
+	// Both change rarely, so they are one immutable wrapSet replaced whole by
+	// compare-and-swap, as the registry is, and nil for a binding nobody has
+	// wrapped or retired: every registration pays one pointer for them.
+	wraps atomic.Pointer[wrapSet]
 }
 
 // against says why replacer may not replace or wrap the registration g guards,
@@ -286,19 +288,69 @@ func (g *guard) against(replacer *binding) string {
 	return ""
 }
 
+// wrapSet is a guard's wrappers and retired flag. It is never written after
+// it is stored.
+type wrapSet struct {
+	wrappers []*binding
+	retired  bool
+}
+
+// update replaces the guard's wrapSet with what f makes of the current one,
+// retrying if another update landed first. f must not modify the slice it is
+// given. An empty, unretired set is stored as nil.
+func (g *guard) update(f func(cur wrapSet) wrapSet) {
+	for {
+		old := g.wraps.Load()
+		var cur wrapSet
+		if old != nil {
+			cur = *old
+		}
+		next := f(cur)
+		var p *wrapSet
+		if len(next.wrappers) > 0 || next.retired {
+			p = &next
+		}
+		if g.wraps.CompareAndSwap(old, p) {
+			return
+		}
+	}
+}
+
 // addWrapper records a Wrap bound to the guarded registration.
 func (g *guard) addWrapper(w *binding) {
-	g.wmu.Lock()
-	g.wrappers = append(g.wrappers, w)
-	g.wmu.Unlock()
+	g.update(func(cur wrapSet) wrapSet {
+		cur.wrappers = append(slices.Clip(cur.wrappers), w)
+		return cur
+	})
 }
 
 // dropWrapper forgets a Wrap bound to the guarded registration, once the
 // wrapper can no longer serve: its scope stopped, or an Override replaced it.
+// A wrapper is added before anything can drop it, so one that is not in the
+// set has been dropped already.
 func (g *guard) dropWrapper(w *binding) {
-	g.wmu.Lock()
-	g.wrappers = slices.DeleteFunc(g.wrappers, func(x *binding) bool { return x == w })
-	g.wmu.Unlock()
+	if s := g.wraps.Load(); s == nil || !slices.Contains(s.wrappers, w) {
+		return
+	}
+	g.update(func(cur wrapSet) wrapSet {
+		cur.wrappers = slices.DeleteFunc(slices.Clone(cur.wrappers), func(x *binding) bool { return x == w })
+		return cur
+	})
+}
+
+// retire marks the guarded registration as a wrapper in a chain an Override
+// replaced.
+func (g *guard) retire() {
+	g.update(func(cur wrapSet) wrapSet {
+		cur.retired = true
+		return cur
+	})
+}
+
+// isRetired reports whether retire was called.
+func (g *guard) isRetired() bool {
+	s := g.wraps.Load()
+	return s != nil && s.retired
 }
 
 // unwrap forgets w, a wrapper bound to b that can no longer serve, and lets b
@@ -313,7 +365,7 @@ func (b *binding) unwrap(w *binding) {
 // link is retired and unwrapped in turn. A link that is still wrapped keeps
 // its mark: the wrapper over it still composes over everything below.
 func (b *binding) release() {
-	for r := b; r.inner != nil && r.retired.Load() && r.wrapper() == nil; r = r.inner {
+	for r := b; r.inner != nil && r.isRetired() && r.wrapper() == nil; r = r.inner {
 		r.inner.dropWrapper(r)
 	}
 }
@@ -321,12 +373,10 @@ func (b *binding) release() {
 // wrapper returns the first live Wrap bound to the guarded registration, or
 // nil.
 func (g *guard) wrapper() *binding {
-	g.wmu.Lock()
-	defer g.wmu.Unlock()
-	if len(g.wrappers) == 0 {
-		return nil
+	if s := g.wraps.Load(); s != nil && len(s.wrappers) > 0 {
+		return s.wrappers[0]
 	}
-	return g.wrappers[0]
+	return nil
 }
 
 var errorType = reflect.TypeFor[error]()

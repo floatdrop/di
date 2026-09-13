@@ -27,10 +27,10 @@ type state struct {
 	// lookup that finds it clear skips the lock as well.
 	reg        atomic.Pointer[registry]
 	hasPending atomic.Bool
+	frozen     bool // guarded by mu
 
 	mu       sync.Mutex
-	pending  []*binding // registrations not yet indexed
-	frozen   bool
+	pending  []*binding             // registrations not yet indexed
 	started  []*instance            // build order; stopped in reverse
 	scoped   map[*binding]*instance // per-scope instances of Scoped bindings
 	served   map[key]bool           // keys this scope resolved from an outer scope; lazily made
@@ -40,10 +40,6 @@ type state struct {
 	// by emit, which runs for every step in every scope below this one.
 	observers atomic.Pointer[[]func(Event)]
 
-	stopped  atomic.Bool     // set by Stop or a failed Start; resolution then fails with ErrStopped
-	stopCtx  context.Context // the context Stop was called with
-	stopOnce once            // this scope's teardown; later Stop calls wait for it
-
 	// startCtx is set once, by Start, and running once Start reaches its
 	// hook phase, which is when a service built later starts itself. Both
 	// are atomic because every build reads them up the whole scope chain.
@@ -51,6 +47,10 @@ type state struct {
 	// publish, not a mutex: see startIfRunning.
 	startCtx atomic.Pointer[context.Context]
 	running  atomic.Bool
+
+	stopped  atomic.Bool     // set by the seal that ends Stop's drain, a failed Start's included; resolution then fails with ErrStopped
+	stopCtx  context.Context // the context Stop was called with
+	stopOnce once            // this scope's teardown; later Stop calls wait for it
 
 	// drainOnce is the scope-wide drain phase, once-with-wait like stopOnce:
 	// a second Stop reaching this scope waits for the first drain instead of
@@ -62,9 +62,12 @@ type state struct {
 	// sealCh are how a teardown ends the drain phase against those without a
 	// lock the two sides share; see seal and announce.
 	drainGen atomic.Uint64
+	sealCh   chan struct{} // guarded by mu; made by an announcer that must wait, closed when the seal is decided
 	sealed   atomic.Bool
-	sealCh   chan struct{} // guarded by mu; closed when the seal is decided
 
+	// The fields are ordered so the 4-byte atomics and the bool pack
+	// together: a state is allocated per request scope, and scattered they
+	// padded it into the next size class.
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{}
 	shutdownErr  error
@@ -164,9 +167,9 @@ func (st *state) freeze() {
 	// and that link lets go when the descendant stops. Not before the commit,
 	// since a rejected batch keeps every mark it made.
 	for _, prev := range replaced {
-		for r := prev; ; r = r.inner {
-			r.retired.Store(true)
-			if r.inner == nil || r.innerAt != st {
+		for r := prev; r.inner != nil; r = r.inner {
+			r.retire() // only a wrapper's flag is ever read, so a plain registration is not marked
+			if r.innerAt != st {
 				break
 			}
 		}

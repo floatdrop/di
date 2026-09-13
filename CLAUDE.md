@@ -436,8 +436,9 @@ made in `register`'s init, before the binding is queued, and `register` drops
 it itself if it finds the scope already stopped: teardown takes its list of
 wrappers under the mutex after storing `stopped`, so a wrapper queued later is
 not on it. Setting the wrapped registration after queueing, as `Wrap` once
-did, let teardown read it unset and skip the prune. `binding.wmu` is a leaf
-lock, taken under a state mutex in `freeze` and under none elsewhere. One window stays open, and it is the one
+did, let teardown read it unset and skip the prune. The set and `retired` are one
+immutable `wrapSet` behind an atomic pointer, replaced by compare-and-swap, so
+there is no lock to order and a registration nobody wraps pays one nil pointer. One window stays open, and it is the one
 the single mark had too: `Wrap` reads what it wraps and makes its mark later,
 so a descendant's `Wrap` racing an ancestor's `Override` can mark a link the
 `Override` has already checked and is about to replace or retire. Closing it
