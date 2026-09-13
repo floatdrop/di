@@ -7,6 +7,9 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+`go doc -all` against 0.16.1 is unchanged in `di`, `dihttp` and `dislog`
+apart from the package doc's own text; an upgrade cannot break a caller.
+
 ### Changed
 
 - A warm resolution, of a service that is already built, no longer takes a

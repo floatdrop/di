@@ -73,6 +73,16 @@ func TestSealDecidesAClaimedStart(t *testing.T) {
 				if !errors.Is(err, ErrStopped) || started.Load() || ph != phaseBuilt {
 					t.Fatalf("Start: %v, started=%v, phase=%v; want ErrStopped, not started, built", err, started.Load(), ph)
 				}
+				// Undoing the claim left a built, settled instance, so refresh
+				// set ready. What refuses it from here on is the stopped scope:
+				// resolve checks before it waits, and await's warm path checks
+				// again for a scope that stops mid-resolution.
+				if !in.ready.Load() {
+					t.Fatal("the undone claim did not leave ready set")
+				}
+				if _, err := s.Resolve[*sealProbe](); !errors.Is(err, ErrStopped) {
+					t.Fatalf("Resolve after the refused start: %v, want ErrStopped", err)
+				}
 				return
 			}
 			if err != nil || !started.Load() || ph != phaseStarted {
