@@ -732,8 +732,8 @@ func (s *Scope) teardown(ctx context.Context) error {
 	}
 	s.st.mu.Unlock()
 	// This scope serves nothing from here on, so its wrappers no longer hold
-	// what they wrap against an Override. Released outside the mutex: wmu is
-	// a leaf, and the binding may belong to an ancestor.
+	// what they wrap against an Override. Released outside the mutex, since the
+	// binding may belong to an ancestor.
 	for _, w := range wrappers {
 		w.inner.unwrap(w)
 	}
@@ -814,22 +814,22 @@ func (s *Scope) drain(ctx context.Context) error {
 // decision between the two stores is two atomic reads: nothing waits on a
 // hook while a scope is sealed.
 func (st *state) seal(ctx context.Context, g0 uint64) bool {
-	ch := make(chan struct{})
-	st.mu.Lock()
-	st.sealCh = ch
 	st.sealed.Store(true)
-	st.mu.Unlock()
 
 	ok := st.drainGen.Load() == g0 || ctx.Err() != nil
 	if ok {
 		st.stopped.Store(true)
 	}
 
+	// Like every other step's channel, sealCh exists only if an announcer
+	// had to wait: it checks sealed and makes the channel under the mutex,
+	// and this clears sealed and wakes it under the same mutex, so the wake
+	// cannot fall between the two. An unwatched Stop allocates nothing here.
 	st.mu.Lock()
 	st.sealed.Store(false)
+	wake(st.sealCh)
 	st.sealCh = nil
 	st.mu.Unlock()
-	close(ch)
 	return ok
 }
 
@@ -846,8 +846,11 @@ func (st *state) announce() (stopped bool) {
 		if !a.sealed.Load() {
 			continue
 		}
+		var ch chan struct{}
 		a.mu.Lock()
-		ch := a.sealCh
+		if a.sealed.Load() {
+			ch = waitOn(&a.sealCh) // still sealed under the mutex: the wake is ahead of us
+		}
 		a.mu.Unlock()
 		if ch != nil {
 			<-ch // a decision two atomic reads away
