@@ -1,10 +1,9 @@
 package di
 
-// Checking the declared graph. Only a constructor registered with Wire
-// declares its dependencies; a Provide closure reveals them as it runs, and is
-// reported here as unchecked. Nothing in this file resolves or builds: it
-// reads bindings and their declared dependency lists after committing pending
-// registrations, exactly as a lookup would.
+// Checking the declared graph. Only a Wire constructor declares its
+// dependencies; a Provide closure reveals them as it runs and is reported as
+// unchecked. Nothing here resolves or builds: it reads bindings and their
+// declared lists after committing pending registrations, as a lookup would.
 
 import (
 	"errors"
@@ -41,16 +40,14 @@ func (v Validation) Err() error { return errors.Join(v.Errors...) }
 //
 //	v := app.Validate() // *http.Request is owed to a request scope
 //
-// The stubs say what such a descendant will hold, so that the check can be
-// made from the application scope as that descendant would make it. With
-// stubs the caller has described the resolving scope, and a dependency neither
-// this scope nor the stubs provide is an error:
+// The stubs say what such a descendant will hold, so the check is made as
+// that descendant would make it, and a dependency neither this scope nor the
+// stubs provide is an error:
 //
 //	err := app.Validate(di.Provided[*http.Request]()).Err()
 //
-// Like Explain, Validate commits pending registrations the way a resolution
-// would, so a configuration this scope would reject is reported by the same
-// panic.
+// Like Explain, Validate commits pending registrations as a resolution would,
+// so a configuration this scope would reject is reported by the same panic.
 func (s *Scope) Validate(stubs ...Stub) Validation {
 	var chain []*state
 	for st := s.st; st != nil; st = st.parent {
@@ -80,12 +77,11 @@ func (s *Scope) Validate(stubs ...Stub) Validation {
 
 // live returns the bindings that can serve a key from this scope, in
 // registration order: what index and groups hold, without the registrations
-// an Override replaced.
+// an Override replaced. A wrapper's whole chain is live, since what it wraps
+// is built underneath it.
 func (st *state) live() []*binding {
 	reg := st.reg.Load()
 	serving := map[*binding]bool{}
-	// A wrapper serves the key and what it wraps is built underneath it,
-	// so the whole chain is live; a chain an Override replaced is not.
 	chain := func(b *binding) {
 		for ; b != nil && !serving[b]; b = b.inner {
 			serving[b] = true
@@ -124,9 +120,9 @@ type Stub struct{ k key }
 // scope holds an *http.Request.
 func Provided[T any]() Stub { return Stub{k: key{t: reflect.TypeFor[T]()}} }
 
-// A node of the declared graph is a binding in the scope it would be built
-// in. The same binding is a different node under a different holder, since a
-// Scoped binding built in one scope looks its dependencies up from there.
+// visit is a node of the declared graph: a binding in the scope it would be
+// built in. The same binding under another holder is another node, since a
+// Scoped binding looks its dependencies up from where it is built.
 type visit struct {
 	b      *binding
 	holder *state
@@ -142,10 +138,9 @@ const (
 	cyclesOnly             // a singleton reached from elsewhere: its own turn reports what it misses
 )
 
-// step is one node on a walk's path: a binding in the scope it would be
-// built in. The holder is part of the identity, as it is on a resolution
-// path at run time: a Scoped binding reached again under another holder is
-// another instance, not a cycle, and a valid graph can visit one twice.
+// step is one node on a walk's path. The holder is part of the identity, as
+// on a resolution path at run time: a Scoped binding reached again under
+// another holder is another instance, not a cycle.
 type step struct {
 	b      *binding
 	holder *state
@@ -153,9 +148,9 @@ type step struct {
 
 // walk follows b's declared dependencies from holder, the scope b would be
 // built in. A Scoped dependency is built in the same holder and walked in the
-// same mode. A singleton dependency is built in its own scope, and its
-// missing dependencies are that scope's report on its own turn, so it is
-// walked only for cycles. Cycles are reported once, by their members.
+// same mode. A singleton dependency is built in its own scope and reports its
+// own misses on its own turn, so it is walked only for cycles. Cycles are
+// reported once, by their members.
 func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 	node := visit{b, holder, md}
 	if v.done[node] {
@@ -170,15 +165,14 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 		}
 		switch {
 		case dep == nil && md == lenient && v.stubs[k]:
-			// The resolving scope will hold it, the caller says, and a value
-			// declares nothing further. Only on the Scoped path: a singleton
-			// builds in its own scope, where that scope's values are not.
+			// A stub is honoured on the Scoped path only: a singleton builds
+			// in its own scope, where the resolving scope's values are not.
 		case dep == nil:
 			v.missing(k, b, holder, md, path)
 		case slices.Contains(path, next):
 			v.cycle(path[slices.Index(path, next):], k)
 		case dep.wants == nil:
-			// A Provide closure or a Value: nothing declared to follow.
+			// A Provide closure or a Value declares nothing to follow.
 		case dep.scoped:
 			v.walk(dep, holder, md, path)
 		default:
@@ -203,8 +197,7 @@ func (v *validator) missing(k key, b *binding, holder *state, md mode, path []st
 	}
 }
 
-// cycle reports the members once however many turns reach them, so a cycle
-// of two is one line rather than one per participant.
+// cycle reports the members once however many turns reach them.
 func (v *validator) cycle(members []step, closing key) {
 	names := make([]string, len(members))
 	for i, m := range members {
@@ -241,8 +234,8 @@ type edge struct {
 }
 
 // declared lists what b declares, in build order: the registration a wrapper
-// composes over, which is bound rather than looked up, and then the
-// parameter types, each looked up from holder as the build would.
+// composes over, bound rather than looked up, then the parameter types, each
+// looked up from holder as the build would.
 func declared(b *binding, holder *state) []edge {
 	out := make([]edge, 0, len(b.wants)+1)
 	if b.inner != nil {

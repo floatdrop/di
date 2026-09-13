@@ -19,15 +19,13 @@ import (
 type abort struct{ err error }
 
 // resolver is one node of a resolution path: what is being resolved and the
-// node that needed it. The path is a linked list, not a slice, because a
-// constructor may resolve from several goroutines at once; a node is never
-// mutated after it is made (except done), so branches share nothing and each
-// carries the whole path for cycle detection and error messages.
+// node that needed it. The path is a linked list because a constructor may
+// resolve from several goroutines at once; a node is never mutated after it
+// is made, except done, so branches share nothing.
 //
 // A node is identified by binding and holder, not by key: a group member and
 // a plain registration of the same type are different bindings, and one
-// Scoped binding is a different node in each scope that holds an instance of
-// it.
+// Scoped binding is a different node in each scope that holds an instance.
 type resolver struct {
 	parent *resolver
 	b      *binding // nil on the root node, which resolves nothing itself
@@ -35,10 +33,9 @@ type resolver struct {
 
 	// done marks a node whose resolution has returned. The path stays whole
 	// for error messages, but a finished node is no longer a dependency: a
-	// constructor may keep the Scope it was handed and resolve through it
-	// later, and that resolution must not meet its own finished frame and be
-	// called a cycle. Written once by the resolution that owns the node, read
-	// from any branch.
+	// constructor may keep its Scope and resolve through it later, and that
+	// resolution must not meet its own finished frame and be called a cycle.
+	// Written once by the resolution that owns the node, read from any branch.
 	done atomic.Bool
 }
 
@@ -49,14 +46,12 @@ func (r *resolver) child(b *binding, holder *state) *resolver {
 // onPath reports whether this exact binding is still being resolved further
 // up the path, which is a dependency cycle within one branch.
 //
-// The walk stops at the first finished node rather than skipping it. Only a
-// constructor that kept its Scope can put one on a live path, and a
-// resolution made through that Scope afterwards is a new branch: what is
-// above the finished node may still be building, but not for it, so it has
-// only to wait. The one shape this cannot tell apart without goroutine-local
-// state deadlocks instead of being reported: a constructor that blocks on a
-// resolution made through a finished descendant's Scope that leads back to
-// itself.
+// The walk stops at the first finished node rather than skipping it: what is
+// above it may still be building, but not for this branch, so a resolution
+// through a kept Scope has only to wait. The one shape this cannot tell apart
+// without goroutine-local state deadlocks instead of being reported: a
+// constructor that blocks on a resolution made through a finished
+// descendant's Scope that leads back to itself.
 func (r *resolver) onPath(b *binding, holder *state) bool {
 	for n := r; n != nil; n = n.parent {
 		if n.done.Load() {
@@ -91,30 +86,21 @@ func (r *resolver) pathStr() string {
 // instance points at the resolution building it (instance.builder), and a
 // blocked resolution points at the instance it waits for (a waitEdge). Its
 // mutex is the innermost lock: a state's mutex may be held while taking it,
-// never the reverse, so the graph can be read across scopes without ordering
-// state mutexes against each other.
-//
-// New makes one graph per container and every scope under that root shares
-// it. That is as far as a cycle can reach: a resolution follows the parent
-// chain, so a wait can cross scopes, but nothing joins two containers.
+// never the reverse. One graph per container is as far as a cycle can reach.
 type graph struct {
 	mu sync.Mutex
 
 	// under indexes every wait by each node of the blocked resolution's path,
-	// up to and including the first finished one, as that path stood when it
-	// blocked. A node only ever becomes finished, never unfinished, so the set
-	// descends can still match only shrinks and the index is a superset of it:
-	// wait narrows the search to under[builder] and then asks descends, which
-	// is what the verdict rests on. Scanning every blocked resolution for each
-	// instance on the stack made a herd of waiters on one slow build quadratic
-	// under the container's one lock.
+	// up to and including the first finished one, as the path stood when it
+	// blocked. A node only ever becomes finished, so the set descends can
+	// match only shrinks and the index is a superset of it: wait narrows the
+	// search to under[builder] and descends still decides.
 	under map[*resolver]map[*waitEdge]struct{}
 }
 
-// waitEdge is one wait: the resolution that is blocked, the instance it waits
-// for, and the nodes it was indexed under. Each wait has its own, and unwait
-// takes it, so removing one never depends on what another wait by the same
-// resolution recorded.
+// waitEdge is one wait: the blocked resolution, the instance it waits for,
+// and the nodes it was indexed under. Each wait has its own, so removing one
+// never depends on another wait by the same resolution.
 type waitEdge struct {
 	r    *resolver
 	in   *instance
@@ -122,13 +108,9 @@ type waitEdge struct {
 }
 
 // descends reports whether n is anc or was created below it. A branch blocks
-// at a leaf of its path, several nodes below the one that claimed the build it
-// is holding up, so both directions of the graph are matched against whole
-// paths rather than single nodes.
-//
-// The walk stops at a node whose resolution has returned, for the same reason
-// onPath does: nothing above a finished node is waiting for what is opened
-// below it later.
+// at a leaf of its path, below the node that claimed the build it is holding
+// up, so both directions of the graph are matched against whole paths. The
+// walk stops at a finished node for the same reason onPath does.
 func descends(n, anc *resolver) bool {
 	for ; n != nil; n = n.parent {
 		if n == anc {
@@ -141,13 +123,11 @@ func descends(n, anc *resolver) bool {
 	return false
 }
 
-// wait records that r is about to wait for in, unless that would close a
-// wait-for cycle by reaching, through builds that are themselves blocked, a
-// build this branch is responsible for finishing. Called with the holder's
-// mutex held; the check and the new edge are one critical section, so two
-// branches closing a cycle at once cannot both decide to wait.
-// It returns the edge to hand to unwait once the wait is over, or nil when
-// waiting would close a cycle.
+// wait records that r is about to wait for in and returns the edge to hand to
+// unwait, or nil when waiting would close a wait-for cycle: reaching, through
+// builds that are themselves blocked, a build this branch must finish. Called
+// with the holder's mutex held; the check and the new edge are one critical
+// section, so two branches closing a cycle at once cannot both decide to wait.
 func (r *resolver) wait(g *graph, in *instance) *waitEdge {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -186,7 +166,7 @@ func (r *resolver) wait(g *graph, in *instance) *waitEdge {
 	return e
 }
 
-// unwait removes one wait wait recorded.
+// unwait removes the wait e recorded.
 func (g *graph) unwait(e *waitEdge) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -201,8 +181,8 @@ func (g *graph) unwait(e *waitEdge) {
 
 // as unwraps a stored value. A nil interface is a legitimate service, and a
 // nil any cannot be asserted back to the interface type it was stored as, so
-// it becomes T's zero value rather than a panic. Every hand-back of a stored
-// value goes through here.
+// it becomes T's zero value. Every hand-back of a stored value goes through
+// here.
 func as[T any](v any) T {
 	if v == nil {
 		var zero T
@@ -212,8 +192,7 @@ func as[T any](v any) T {
 }
 
 // lookup finds the binding registered for k in this scope or an ancestor,
-// and the scope that owns it. A nil binding means nothing is registered for
-// k anywhere in the chain.
+// and the scope that owns it, or nil.
 func (s *Scope) lookup(k key) (*binding, *state) {
 	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
@@ -226,8 +205,7 @@ func (s *Scope) lookup(k key) (*binding, *state) {
 
 // inFlight reports whether this Scope is a live view of a resolution: it
 // carries a path whose last node has not returned. A Scope kept past that
-// point, by a constructor or by a Child made in one, is not in flight, and
-// calls through it are top-level calls.
+// point makes top-level calls.
 func (s *Scope) inFlight() bool { return s.r != nil && !s.r.done.Load() }
 
 // enter returns a view carrying a resolver, starting a new resolution unless
@@ -239,8 +217,8 @@ func (s *Scope) enter() *Scope {
 	return s.view(&resolver{})
 }
 
-// get resolves k. Outside a constructor the internal abort is converted into
-// a panic carrying the plain error; inside one it unwinds to the enclosing
+// get resolves k. Outside a constructor the internal abort becomes a panic
+// carrying the plain error; inside one it unwinds to the enclosing
 // Resolve/Start call.
 func (s *Scope) get(k key) any {
 	if !s.inFlight() {
@@ -257,9 +235,8 @@ func (s *Scope) get(k key) any {
 }
 
 // markServed records that k was served to this scope from owner, in every
-// scope between the two. binding.used protects the owner; the scopes in
-// between each handed out a value for k as well, and registering k in one of
-// them afterwards would give the key two live values there.
+// scope between the two: each handed out a value for k, and registering k in
+// one of them afterwards would give the key two live values there.
 func (s *Scope) markServed(owner *state, k key) {
 	for st := s.st; st != nil && st != owner; st = st.parent {
 		st.mu.Lock()
@@ -277,9 +254,8 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	if s.st.isStopped() {
 		panic(abort{fmt.Errorf("di: %s: %w%s", b.key, ErrStopped, s.r.path())})
 	}
-	// The holder owns the instance's lifecycle: a singleton lives in the
-	// scope that registered the binding, a scoped one in the scope that
-	// resolves it, so it can see that scope's values.
+	// The holder owns the instance: the registering scope for a singleton,
+	// the resolving scope for a Scoped binding.
 	holder := owner
 	if b.scoped {
 		holder = s.st
@@ -288,10 +264,9 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.pathStr(), b.key)})
 	}
 	if !b.used.Load() {
-		// Hold the key against an override for as long as this resolution
-		// runs, so a constructor cannot replace the registration it is
-		// itself being built from. used is set before this is dropped, so
-		// the two guards never leave a gap between them.
+		// Hold the key against an override while this resolution runs, so a
+		// constructor cannot replace the registration it is built from. used
+		// is set before this is dropped, so the two guards leave no gap.
 		b.resolving.Add(1)
 		defer b.resolving.Add(-1)
 	}
@@ -307,11 +282,10 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	}
 	b.used.Store(true)
 	// The edge belongs to the node that asked, and only a node with a binding
-	// has an instance to record it on: a top-level Get starts a path whose
-	// first node has none, and so does a Scope kept past its resolution. The
-	// test is here rather than in dependOn so that the warm path pays a
-	// pointer comparison instead of a call. A failed resolution records
-	// nothing; the path it failed on is in the error.
+	// has an instance to record it on: a top-level Get, or a Scope kept past
+	// its resolution, has none. The test is here rather than in dependOn so
+	// the warm path pays a pointer comparison instead of a call. A failed
+	// resolution records nothing.
 	if s.r.b != nil {
 		s.r.dependOn(in, holder)
 	}
@@ -319,15 +293,14 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 }
 
 // dependOn records that the resolution at this node needed in, once per
-// distinct dependency: a constructor that asks for the same service twice
-// gets one edge. The scan is over one constructor's own dependencies and runs
-// only while it is building.
+// distinct dependency. The scan is over one constructor's own dependencies
+// and runs only while it is building.
 func (r *resolver) dependOn(in *instance, holder *state) {
 	r.holder.mu.Lock()
 	defer r.holder.mu.Unlock()
-	// resolve made the asking instance before running its constructor, so
-	// the nil check is a guard on the recording only: a mistake here must
-	// not break resolution.
+	// The asking instance exists, since resolve made it before running the
+	// constructor; the nil check guards the recording only, because a mistake
+	// here must not break resolution.
 	asker := r.holder.instanceAt(r.b)
 	if asker == nil || slices.ContainsFunc(asker.deps, func(d dep) bool { return d.in == in }) {
 		return
@@ -337,17 +310,15 @@ func (r *resolver) dependOn(in *instance, holder *state) {
 
 // await returns the instance's value: this branch builds it if it gets there
 // first, and otherwise waits for whoever did. It waits for the start step as
-// well, so a resolution of a running scope never hands out a service whose
-// OnStart is still in flight. A wait that would close a cycle between two
-// concurrent builds is reported as ErrCycle rather than deadlocking.
+// well, so a running scope never hands out a service whose OnStart is in
+// flight. A wait that would close a cycle is reported as ErrCycle.
 func (s *Scope) await(in *instance, holder *state) (any, error) {
 	if in.ready.Load() && !s.st.isStopped() {
 		// The warm path, without the holder's mutex: the build is settled,
-		// no start step is owed or in flight, and the value is final. The
-		// flag is written under that mutex at every change that could make
-		// the answer below differ (see refresh), so a load that sees it set
-		// is ordered before any such change, when the loop below would have
-		// returned the same value.
+		// no start step is owed or in flight, and the value is final. ready
+		// is written under that mutex at every change that could make the
+		// answer differ (see refresh), so a load that sees it set is ordered
+		// before any such change.
 		return in.value, nil
 	}
 	holder.mu.Lock()
@@ -361,8 +332,7 @@ func (s *Scope) await(in *instance, holder *state) (any, error) {
 		}
 		// The phase says which step is outstanding and so which channel to
 		// block on. Both are read in this critical section, and the owner
-		// closes the channel under the same mutex, so it cannot be closed
-		// between the choice and the block.
+		// closes the channel under the same mutex.
 		var ready chan struct{}
 		if in.settled {
 			ready = waitOn(&in.startingCh) // settled, so OnStart is outstanding
@@ -381,11 +351,9 @@ func (s *Scope) await(in *instance, holder *state) (any, error) {
 	}
 	value, err := in.value, in.err
 	if err == nil && s.st.isStopped() {
-		// The scope stopped while this branch was building or waiting;
-		// resolve's check was before the wait. The check is on the resolving
-		// scope, which covers the holder (always that scope or an ancestor):
-		// a stopped scope must refuse the request whether or not the value is
-		// still alive above it.
+		// The scope stopped while this branch was building or waiting. The
+		// check is on the resolving scope, which covers the holder: a stopped
+		// scope must refuse whether or not the value is still alive above it.
 		value, err = nil, fmt.Errorf("di: %s: %w", in.b.key, ErrStopped)
 	}
 	holder.mu.Unlock()
@@ -427,8 +395,7 @@ func (in *instance) fail(holder *state, err error) {
 
 // materialise builds an instance, once. A failure is recorded on the instance
 // rather than unwound, so every later resolution reports it identically, and
-// the instance is settled on the way out so waiters are released whatever
-// happened.
+// the instance is settled on the way out whatever happened.
 func (s *Scope) materialise(in *instance, holder *state) {
 	defer in.settle(holder)
 	if err := s.construct(in, holder); err != nil {
@@ -460,9 +427,9 @@ func (s *Scope) construct(in *instance, holder *state) (err error) {
 	return nil
 }
 
-// publish adds the instance to its owner's stop list so it will be torn
-// down. If Stop ran while the constructor was in flight its snapshot did not
-// include this instance, so undo it here and report ErrStopped instead.
+// publish adds the instance to its owner's stop list. If the scope stopped
+// while the constructor ran, Stop's snapshot did not include the instance,
+// so it is undone here and reported as ErrStopped.
 func (in *instance) publish(owner *state) bool {
 	owner.mu.Lock()
 	stopped := owner.isStopped()
@@ -484,10 +451,8 @@ func (in *instance) publish(owner *state) bool {
 }
 
 // startIfRunning runs the start step when the scope is already running.
-// publish strictly precedes the read below, and Start sets running before it
+// publish precedes the read of running, and Start sets running before it
 // drains, so either this starts the instance or Start's drain finds it.
-// startClaimed records its failure on the instance, so a resolution that
-// waited for the step reports it too.
 func (in *instance) startIfRunning(owner *state) {
 	if sctx, running := owner.runContext(); running && in.claim(owner) && in.gateStart(owner) {
 		_ = in.startClaimed(sctx, owner)
@@ -495,8 +460,7 @@ func (in *instance) startIfRunning(owner *state) {
 	stopped := owner.isStopped()
 	owner.mu.Lock()
 	if in.err == nil && stopped {
-		// Stop ran while we were starting and waited for the step, so the
-		// instance is torn down: do not hand it out.
+		// Stop waited for the start step and tore the instance down.
 		in.err = fmt.Errorf("di: %s: %w", in.b.key, ErrStopped)
 		in.refresh()
 	}
@@ -506,7 +470,7 @@ func (in *instance) startIfRunning(owner *state) {
 // Get resolves T. Inside a constructor, failure unwinds to the enclosing
 // Resolve/Start call and becomes an error; at top level it panics. In a
 // goroutine a constructor started, use Resolve instead: that panic has no
-// enclosing call to unwind to and would take the process down.
+// enclosing call to unwind to.
 func (s *Scope) Get[T any]() T { return as[T](s.get(key{t: reflect.TypeFor[T]()})) }
 
 // Maybe resolves T if it is provided anywhere in the scope chain.
@@ -519,8 +483,7 @@ func (s *Scope) Maybe[T any]() (T, bool) {
 }
 
 // All resolves the multi-binding group for T across the scope chain. Members
-// are singletons (or Scoped if so marked) with the same lifecycle
-// as any other binding.
+// have the same lifetimes and lifecycle as any other binding.
 func (s *Scope) All[T any]() []T {
 	if !s.inFlight() {
 		defer unwrapAbort()
@@ -561,8 +524,7 @@ func (s *Scope) Resolve[T any]() (v T, err error) {
 }
 
 // unwrapAbort turns an abort into a panic carrying the plain error, which is
-// what a top-level Get or All reports. Deferred only by an entry point that
-// is not already inside a resolution.
+// what a top-level Get or All reports.
 func unwrapAbort() {
 	if rec := recover(); rec != nil {
 		if a, ok := rec.(abort); ok {

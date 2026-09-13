@@ -43,9 +43,8 @@ var exitSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 func StopTimeout(d time.Duration) RunOption { return func(c *runConfig) { c.stopTimeout = d } }
 
 // stopContext builds the context Run stops with: detached from the caller's,
-// bounded by StopTimeout, and cancelled by a second signal so a hung hook
-// cannot keep the process alive. A rollback from a failed Start gets the same
-// context.
+// bounded by StopTimeout, and cancelled by a second signal. A rollback from a
+// failed Start gets the same context.
 func (c runConfig) stopContext(ctx context.Context) (context.Context, func()) {
 	stopCtx, cancelStop := context.WithTimeout(context.WithoutCancel(ctx), c.stopTimeout)
 	forceCtx, cancelForce := signal.NotifyContext(stopCtx, exitSignals...)
@@ -53,12 +52,11 @@ func (c runConfig) stopContext(ctx context.Context) (context.Context, func()) {
 }
 
 // Run starts the scope and blocks until ctx is cancelled, a termination
-// signal arrives, or Shutdown is called. It then stops the scope with a
-// bounded context; a second signal during the stop cancels that context so
-// a hung hook cannot keep the process alive. Run returns the Start error, the
-// error passed to Shutdown, and any Stop errors, joined. A worker that died
-// on its own is reported once, whether it reached Run as the cause or as a
-// Stop error.
+// signal arrives, or Shutdown is called. It then stops the scope within
+// StopTimeout; a second signal during the stop cancels that context so a hung
+// hook cannot keep the process alive. Run returns the Start error, the error
+// passed to Shutdown, and any Stop errors, joined; a worker that died on its
+// own is reported once.
 func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 	cfg := runConfig{stopTimeout: 15 * time.Second}
 	for _, o := range opts {
@@ -70,9 +68,8 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 	defer cancelSig()
 
 	if err := s.start(ctx, func() (context.Context, func()) { return cfg.stopContext(ctx) }); err != nil {
-		// A failed Start rolls back through Stop, which runs the drain and
-		// stop hooks, so a worker can die and publish its failure here
-		// exactly as it can during an ordinary shutdown.
+		// The rollback runs the hooks, so a worker can die and publish its
+		// failure here as it can during an ordinary shutdown.
 		return joinCause(err, s.publishedCause())
 	}
 
@@ -88,20 +85,15 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 
 	stopErr := s.Stop(stopCtx)
 	if cause == nil {
-		// A worker that died during the stop published its failure through
-		// Shutdown after the select above had woken for a signal or a
-		// cancelled ctx. Read it again: the Stop that saw the failure may have
-		// been a child's, called from a drain hook that handled the error
-		// itself.
+		// A worker that died during the stop published its failure after the
+		// select above had woken for a signal.
 		cause = s.publishedCause()
 	}
 	return joinCause(stopErr, cause)
 }
 
 // publishedCause reports the failure Shutdown recorded, without waiting for
-// one. Run reads it on both ways out, because a worker dies when it dies:
-// during the stop that follows a signal, or during the rollback of a Start
-// that never finished.
+// one.
 func (s *Scope) publishedCause() error {
 	select {
 	case <-s.st.shutdownCh:
@@ -112,9 +104,8 @@ func (s *Scope) publishedCause() error {
 }
 
 // joinCause adds a published cause to what Run is already returning, unless
-// that failure is in there already: a worker's error reaches Run by two
-// routes, as the cause and through the Stop that cancelled it, and it is one
-// failure either way.
+// it is in there already: a worker's error reaches Run both as the cause and
+// through the Stop that cancelled it.
 func joinCause(err, cause error) error {
 	if cause == nil {
 		return err

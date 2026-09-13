@@ -1,16 +1,13 @@
 // Package dislog logs a di.Scope's lifecycle events through log/slog.
 //
-// [New] turns a *slog.Logger into the function [di.Scope.Observe] takes,
-// so an application says what it is doing as it builds, starts, drains and
-// stops:
+// [New] turns a *slog.Logger into the function [di.Scope.Observe] takes:
 //
 //	app.Observe(dislog.New(slog.Default()))
 //
 // It imports nothing outside the standard library, so any slog handler will
-// do, including one that colours its output. Events arrive on the goroutine
-// that did the work, one per constructor and per hook, so a slow handler slows
-// the application down; a *slog.Logger is safe to share, and events do arrive
-// from several goroutines at once.
+// do. Events arrive on the goroutine that did the work, one per constructor
+// and per hook, so a slow handler slows the application down; a *slog.Logger
+// is safe to share, and events do arrive from several goroutines at once.
 package dislog
 
 import (
@@ -23,21 +20,19 @@ import (
 )
 
 // New returns a function for [di.Scope.Observe] that logs each event
-// through l. The message is the event's kind -- "build", "start", "drain",
-// "stop" or "shutdown" -- and the attributes are the service, its scope, the
+// through l. The message is the event's kind, "build", "start", "drain",
+// "stop" or "shutdown", and the attributes are the service, its scope, the
 // module it was registered from when there is one, and how long the step took.
 //
-// A service is named the way it is written in Go rather than the way an event
-// carries it: "service=*mail.Mailer" with the import path alongside as
-// "pkg=github.com/acme/app/internal/mail", since the path is most of the
-// length and none of the meaning. The two come from [di.Event.Service] and
-// [di.Event.Package], so nothing is parsed; a key whose type is unnamed
-// reports no package and keeps its whole name.
+// A service is named the way it is written in Go, "service=*mail.Mailer",
+// with the import path alongside as "pkg=github.com/acme/app/internal/mail".
+// The two come from [di.Event.Service] and [di.Event.Package], so nothing is
+// parsed; a key whose type is unnamed reports no package and keeps its whole
+// name.
 //
 // An event carrying an error is logged at [slog.LevelError] with an "err"
-// attribute and the registration site, since that is what a failure is read
-// with; anything else is logged at [slog.LevelInfo], or at the level [Level]
-// sets. Pass [Site] to log the site every time.
+// attribute and the registration site; anything else at [slog.LevelInfo], or
+// the level [Level] sets. Pass [Site] to log the site every time.
 func New(l *slog.Logger, opts ...Option) func(di.Event) {
 	cfg := options{level: slog.LevelInfo}
 	for _, o := range opts {
@@ -78,11 +73,11 @@ func New(l *slog.Logger, opts ...Option) func(di.Event) {
 // short is the service name with its import path taken off:
 // "*github.com/acme/app.DB" and "github.com/acme/app" become "*app.DB".
 //
-// The event carries both, so there is nothing to guess. An empty pkg is a
-// type with no path to take off -- an unnamed type, which reflect already
-// writes short, or a shutdown, which names no service -- and its name is
-// returned as it came. A generic instantiation keeps its type arguments,
-// because what is trimmed is the prefix rather than everything after a dot.
+// The event carries both, so nothing is guessed: there is no stdlib splitter
+// for a qualified type name and no correct heuristic, since a dot or a slash
+// can belong to a type argument. An empty pkg is a type with no path to take
+// off, or a shutdown, and its name is returned as it came. A generic
+// instantiation keeps its type arguments, because only the prefix is trimmed.
 func short(service, pkg string) string {
 	if pkg == "" {
 		return service
@@ -106,12 +101,11 @@ type options struct {
 	site  bool
 }
 
-// Level sets the level an event that succeeded is logged at. Building every
-// service is worth a line while an application is being wired and noise once
-// it works, so [slog.LevelDebug] is the usual second choice. A failure is
-// logged at [slog.LevelError] whatever this says.
+// Level sets the level an event that succeeded is logged at; [slog.LevelDebug]
+// is the usual choice once an application is wired. A failure is logged at
+// [slog.LevelError] whatever this says.
 func Level(lv slog.Level) Option { return func(o *options) { o.level = lv } }
 
-// Site includes the registration site -- the file:line the service was
-// registered at -- on every event, rather than only on the ones that failed.
+// Site includes the registration site, the file:line the service was
+// registered at, on every event rather than only on the ones that failed.
 func Site() Option { return func(o *options) { o.site = true } }

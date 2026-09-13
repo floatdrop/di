@@ -1,11 +1,9 @@
 package di
 
-// Rendering the graph. Nothing here participates in resolution or teardown:
-// it reads the edges resolve.go records while constructors run, under the same
-// mutex that guards every other field of an instance, and never holds two of
-// those at once, and it reads the dependency lists Wire declares, which never
-// change after registration. It is also the only part of the package that
-// builds strings for a person rather than for an error.
+// Rendering the graph. Nothing here takes part in resolution or teardown: it
+// reads the edges resolve.go records while constructors run, under the
+// instance's owning mutex and never two of those at once, and the dependency
+// lists Wire declares, which never change after registration.
 
 import (
 	"fmt"
@@ -15,24 +13,21 @@ import (
 )
 
 // Explain renders what T resolves to and what it was built from: the
-// dependency tree, each node with its lifetime, its scope, the state of its
-// lifecycle and where it was registered, followed by what needed it.
+// dependency tree, each node with its lifetime, scope, lifecycle state and
+// registration site, followed by what needed it.
 //
-// What has been built has a recorded tree, because a constructor's
-// dependencies are recorded as it resolves them. A service that has not been
-// built is reported as such, with its registration; if it was registered
-// with Wire, the dependencies it declares are drawn under it with dashed
-// edges, each continuing as a recorded tree where it has been built and as a
-// declared one where it has not, and "declared by" lists the unbuilt
-// services that declare it. A closure that has not run ends its branch,
-// since nothing is known about it yet, and so does a key nothing provides.
-// Explain resolves nothing and builds nothing; it commits pending
-// registrations the way a resolution from this scope would, so a
-// configuration this scope would reject is reported here by the same panic.
+// A built service has a recorded tree. One that has not been built is
+// reported as such; if it was registered with Wire, its declared dependencies
+// are drawn under it with dashed edges, each continuing as a recorded tree
+// where built and a declared one where not, and "declared by" lists the
+// unbuilt services that declare it. A closure that has not run ends its
+// branch, and so does a key nothing provides. A key served by a group is
+// explained member by member, and a dependency reached twice is expanded once
+// and named on later visits.
 //
-// A key served by a group is explained member by member. A dependency reached
-// twice, as in a diamond, is expanded once and named on later visits, so the
-// tree stays finite and the repeat is visibly the same instance.
+// Explain builds nothing. It commits pending registrations as a resolution
+// from this scope would, so a configuration this scope would reject is
+// reported here by the same panic.
 func (s *Scope) Explain[T any]() string {
 	k := key{t: reflect.TypeFor[T]()}
 	b, owner := s.lookup(k)
@@ -55,8 +50,7 @@ func (s *Scope) Explain[T any]() string {
 	return sb.String()
 }
 
-// found is a binding and the scope that registered it, which is what group
-// lookup has to carry and single-key lookup returns as a pair.
+// found is a binding and the scope that registered it.
 type found struct {
 	b     *binding
 	owner *state
@@ -85,8 +79,7 @@ func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen m
 	in := holder.instanceAt(b)
 	holder.mu.Unlock()
 	// A Scoped binding this scope has never resolved has no instance; a
-	// singleton always has one, built or not. Either way an unbuilt service
-	// has no recorded tree, only what Wire declared.
+	// singleton always has one, built or not.
 	phase, deps, fresh := "not built", []dep(nil), true
 	if in != nil {
 		phase, deps, fresh = dep{in: in, holder: holder}.inspect()
@@ -113,12 +106,11 @@ func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen m
 	}
 }
 
-// declaredInto draws the dependencies b declares under a node that has not
-// been built, with dashed edges, looking each up from holder as the build
-// would. One that has been built continues as its recorded tree; one that has
-// not continues as its own declaration, or ends the branch if it is a closure,
-// which declares nothing. drawn keeps a declared binding from being expanded
-// twice, which is what a diamond needs and what a cycle needs more.
+// declaredInto draws the dependencies b declares under an unbuilt node, with
+// dashed edges, looking each up from holder as the build would. A built one
+// continues as its recorded tree; an unbuilt one as its own declaration, or
+// ends the branch if it is a closure. drawn keeps a declared binding from
+// being expanded twice, which a cycle needs.
 func (s *Scope) declaredInto(sb *strings.Builder, b *binding, holder *state, prefix string, seen map[*instance]bool, drawn map[*binding]bool) {
 	edges := declared(b, holder)
 	for i, e := range edges {
@@ -162,12 +154,10 @@ func (s *Scope) declaredInto(sb *strings.Builder, b *binding, holder *state, pre
 }
 
 // declaredBy lists the Wire bindings, in any scope of the container, that
-// declare b's key and would resolve it to b from the scope that registered
-// them, leaving out the instances already named as having needed it. A
-// Scoped one is named by the scope declaring it, since the scopes that will
-// resolve it do not exist yet. It reads what is committed and commits
-// nothing, so a descendant's pending registrations neither appear nor get
-// the chance to be rejected here.
+// declare b's key and would resolve it to b from their own scope, leaving out
+// the instances already named as needing it. It reads only committed
+// registrations and commits nothing: a root Explain must not be the call that
+// rejects a descendant's pending batch.
 func (s *Scope) declaredBy(b *binding, except []dep) []string {
 	var out []string
 	for _, st := range walkScopes(s.st.root()) {
@@ -195,8 +185,7 @@ func peek(st *state, k key) *binding {
 	return nil
 }
 
-// explainInto writes one level of the tree and recurses, drawing the spine
-// with the usual box characters.
+// explainInto writes one level of the tree and recurses.
 func explainInto(sb *strings.Builder, deps []dep, prefix string, seen map[*instance]bool) {
 	for i, d := range deps {
 		branch, pad := "├── ", "│   "
@@ -205,9 +194,8 @@ func explainInto(sb *strings.Builder, deps []dep, prefix string, seen map[*insta
 		}
 		sb.WriteString(prefix + branch)
 		if seen[d.in] {
-			// The same instance by another route. Naming it without its
-			// subtree keeps a diamond from being drawn twice, and says that
-			// it is one value rather than two of a type.
+			// The same instance by another route: named without its subtree,
+			// which says it is one value rather than two of a type.
 			sb.WriteString(d.in.b.key.String() + ": see above\n")
 			continue
 		}
@@ -222,14 +210,11 @@ func explainInto(sb *strings.Builder, deps []dep, prefix string, seen map[*insta
 // Graphviz DOT: one box per instance, one cluster per scope that holds any,
 // and an arrow from each instance to what its constructor resolved.
 //
-// It reads the graph and changes nothing, not even the pending registrations,
-// so it is safe to call from a handler or a hook. Nodes are numbered in the
-// order the scopes were created and the instances were built, so the same run
-// of the same program renders the same document. A scope that has been
-// stopped no longer holds its instances and contributes nothing.
-//
-// The detail is deliberately thin -- a registration site would not fit in a
-// box. Use Explain for one service in full.
+// It changes nothing, not even the pending registrations, so it is safe to
+// call from a handler or a hook. Nodes are numbered in creation and build
+// order, so the same run renders the same document. A stopped scope no longer
+// holds its instances and contributes nothing. Use Explain for one service in
+// full.
 func (s *Scope) Graph() string {
 	scopes := walkScopes(s.st)
 	type node struct {
@@ -270,17 +255,16 @@ func (s *Scope) Graph() string {
 		}
 		sb.WriteString("  }\n")
 	}
-	// Edges last and outside every cluster: one that crosses a cluster
-	// boundary is drawn wrong if it is declared inside one.
+	// Edges last and outside every cluster: one declared inside a cluster is
+	// drawn wrong when it crosses the boundary.
 	for _, n := range all {
 		_, deps, _ := n.d.inspect()
 		for _, d := range deps {
 			if to, ok := ids[d.in]; ok {
 				fmt.Fprintf(&sb, "  n%d -> n%d;\n", n.id, to)
 			}
-			// An edge to something outside this walk is dropped rather than
-			// given a node of its own: it points into a scope that has been
-			// stopped, or one above the scope Graph was called on.
+			// An edge into a stopped scope, or one above the scope Graph was
+			// called on, is dropped rather than given a node.
 		}
 	}
 	sb.WriteString("}\n")
@@ -289,11 +273,10 @@ func (s *Scope) Graph() string {
 
 // ---- rendering helpers -----------------------------------------------------
 
-// inspect reads the one instance's phase and edges together, which is the
-// only critical section a rendering takes, and says whether the instance is
-// still unbuilt, in which case the edges are not there to read and what the
-// binding declares stands in. Nothing is held across the recursion, so two
-// scopes' mutexes are never held at once.
+// inspect reads one instance's phase and edges together, the only critical
+// section a rendering takes, and reports whether the instance is unbuilt, in
+// which case what the binding declares stands in for the edges. Nothing is
+// held across the recursion, so two scopes' mutexes are never held at once.
 func (d dep) inspect() (phase string, deps []dep, fresh bool) {
 	d.holder.mu.Lock()
 	defer d.holder.mu.Unlock()
@@ -301,7 +284,7 @@ func (d dep) inspect() (phase string, deps []dep, fresh bool) {
 }
 
 // phaseWord names where an instance is in its lifecycle. Called with the
-// owning state's mutex held, like every other read of ph and err.
+// owning state's mutex held.
 func phaseWord(in *instance) string {
 	switch in.ph {
 	case phaseNew:
@@ -343,8 +326,8 @@ func lifetime(b *binding) string {
 	return life
 }
 
-// describe is one line of a tree: what the service is, where it lives, how
-// far through its lifecycle it is, and where it was registered.
+// describe is one line of a tree: the service, where it lives, its phase and
+// its registration site.
 func describe(b *binding, holder *state, phase string) string {
 	attrs := []string{lifetime(b) + " in " + holder.name}
 	if b.eager {
@@ -355,8 +338,8 @@ func describe(b *binding, holder *state, phase string) string {
 }
 
 // dependentsOf finds the built instances whose constructors resolved target.
-// It searches from the container root, because a dependent lives in the
-// scope that holds it or below, never above what it depends on.
+// It searches from the container root, since a dependent lives in the scope
+// that holds it or below, never above what it depends on.
 func dependentsOf(from *state, target *instance) []dep {
 	var out []dep
 	for _, st := range walkScopes(from) {
@@ -410,7 +393,7 @@ func scopePath(st, from *state) string {
 var dotEscape = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
 // dotLabel quotes the parts as one DOT label, one per line. Scope names come
-// from the caller, so they are escaped rather than trusted.
+// from the caller, so they are escaped.
 func dotLabel(parts ...string) string {
 	esc := make([]string, len(parts))
 	for i, p := range parts {
@@ -422,14 +405,13 @@ func dotLabel(parts ...string) string {
 // Modules renders the modules registered into this scope and its ancestors:
 // what each provides, what it needs and which module serves it, what it
 // wraps, and which of its constructors are closures whose needs are unknown
-// until they run. A need only a resolving scope can provide, as a request
-// scope provides the request, is reported as owed, the way Validate reports
-// it. A dependency a module serves for itself is not a module dependency and
-// is left out. Registrations made outside any module are grouped as
-// "registered directly".
+// until they run. A need only a resolving scope can provide is reported as
+// owed, as Validate reports it. A dependency a module serves for itself is
+// left out. Registrations made outside any module are grouped as "registered
+// directly".
 //
-// Like Explain, it builds nothing and commits pending registrations the way
-// a resolution would, so a configuration this scope would reject is reported
+// Like Explain, it builds nothing and commits pending registrations as a
+// resolution would, so a configuration this scope would reject is reported
 // by the same panic.
 func (s *Scope) Modules() string {
 	var chain []*state
@@ -453,8 +435,8 @@ func (s *Scope) Modules() string {
 		order = append(order, m)
 		return m
 	}
-	// One set per module, keyed by section as well as line: a key is listed
-	// under provides and then again under unchecked, and both lines stay.
+	// Deduped per section as well as per line: a key is listed under
+	// provides and again under unchecked.
 	add := func(m *module, list *[]string, line string) {
 		id := fmt.Sprintf("%p:%s", list, line)
 		if !m.seen[id] {
@@ -462,8 +444,7 @@ func (s *Scope) Modules() string {
 			*list = append(*list, line)
 		}
 	}
-	// Ancestors first, so the report reads top-down like the scope tree and
-	// a module is listed where it was first used.
+	// Ancestors first, so the report reads top-down like the scope tree.
 	for _, st := range slices.Backward(chain) {
 		for _, b := range st.live() {
 			m := get(moduleLabel(b))
@@ -534,11 +515,10 @@ func moduleLabel(b *binding) string {
 	return b.module
 }
 
-// shortName is a key with its package named the way code names it,
-// storage.Store rather than the import path, to match the module labels
-// beside it. Explain keeps the full path, since an error message must not
-// confuse two packages of one name; a module report is read by a person
-// who knows their packages.
+// shortName is a key with its package named as code names it, storage.Store
+// rather than the import path, to match the module labels beside it. Explain
+// keeps the full path, since an error must not confuse two packages of one
+// name.
 func shortName(t reflect.Type) string {
 	if t.Kind() == reflect.Pointer {
 		return "*" + shortName(t.Elem())

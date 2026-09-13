@@ -23,30 +23,30 @@
 // [Scope.Provide] takes a closure over the scope instead, for the rare
 // constructor that needs the scope itself, such as middleware that opens a
 // child scope per request. Inside it, [Scope.Get] and [Scope.Must] pull
-// dependencies and abort on failure, with the same error. What a closure gives
-// up is the declaration: its dependencies are known only once it runs, so
-// Validate and [Scope.Modules] list it as unchecked, and [Scope.Explain] can
-// show what it needed only after it has been built.
+// dependencies and abort on failure, with the same error. A closure's
+// dependencies are known only once it runs, so Validate and [Scope.Modules]
+// list it as unchecked, and [Scope.Explain] can show what it needed only
+// after it has been built.
 //
 // # Lifetimes
 //
 // A binding is a singleton by default, cached in the scope that registered
-// it. [Binding.Scoped] makes it one instance per resolving scope, built
-// there so it can see that scope's values, which is how request-scoped
-// services are declared once in the root. [Binding.Group] and [Scope.All]
-// handle groups, and [Scope.Maybe] resolves optional dependencies. An
-// interface is served by a constructor that returns the implementation, since
-// Wire accepts any result assignable to the key: s.Wire[Reader](NewRepo).
+// it. [Binding.Scoped] makes it one instance per resolving scope, built there
+// so it can see that scope's values, which is how request-scoped services are
+// declared once in the root. [Binding.Group] and [Scope.All] handle groups,
+// and [Scope.Maybe] resolves optional dependencies. An interface is served by
+// a constructor that returns the implementation, since Wire accepts any
+// result assignable to the key: s.Wire[Reader](NewRepo).
 //
 // # Scopes
 //
-// [Scope.Child] creates a scope that resolves through its parent, reuses
-// the parent's singletons and owns the lifecycle of what it builds. A child
-// may shadow a key its parent provides; within one scope, a second
-// registration of a key must be marked [Binding.Override], or the next
-// resolution rejects it naming both sites. That marker is the test seam: wire
-// the production graph into a fresh scope, then override what you want faked
-// before anything is resolved ([Test] does the bookkeeping). For HTTP,
+// [Scope.Child] creates a scope that resolves through its parent, reuses the
+// parent's singletons and owns the lifecycle of what it builds. A child may
+// shadow a key its parent provides; within one scope, a second registration
+// of a key must be marked [Binding.Override], or the next resolution rejects
+// it naming both sites. That marker is the test seam: wire the production
+// graph into a fresh scope, then override what you want faked before anything
+// is resolved ([Test] does the bookkeeping). For HTTP,
 // [github.com/floatdrop/di/dihttp.Middleware] gives each request a child
 // scope holding the *http.Request, reachable through [FromContext].
 //
@@ -66,19 +66,17 @@
 // while the scope still resolves, then stops child scopes, then services in
 // reverse build order, and afterwards the scope refuses to resolve anything.
 // [Binding.Go] runs a worker, a long-lived function in a goroutine of its
-// own, cancelled on stop.
-// [Scope.Run] ties it together
-// for a main function: start, wait for a signal or [Scope.Shutdown], stop
-// with a deadline. [Scope.Observe] reports every step for logging and
-// metrics.
+// own, cancelled on stop. [Scope.Run] ties it together for a main function:
+// start, wait for a signal or [Scope.Shutdown], stop with a deadline.
+// [Scope.Observe] reports every step for logging and metrics.
 //
 // # Inspecting the graph
 //
-// A constructor's dependencies are recorded as it resolves them, so the
-// graph is known for whatever has been built. [Scope.Explain] renders one
-// service's dependency tree, with the registration site, lifetime and scope
-// of each node, and what needed it. [Scope.Graph] renders everything built
-// in a scope and its descendants as Graphviz DOT.
+// A constructor's dependencies are recorded as it resolves them, so the graph
+// is known for whatever has been built. [Scope.Explain] renders one service's
+// dependency tree, with the registration site, lifetime and scope of each
+// node, and what needed it. [Scope.Graph] renders everything built in a scope
+// and its descendants as Graphviz DOT.
 //
 // # Concurrency
 //
@@ -113,18 +111,16 @@ import (
 )
 
 // key identifies a service: its Go type. Keys compare by reflect.Type
-// identity, so same-named types in different packages never collide (unlike
-// fmt.Sprintf("%T")-derived names). There is no name alongside the type: a
-// second binding of one type is declared as a distinct type instead, which
-// makes a mistaken reference a compile error rather than a missing key.
+// identity, so same-named types in different packages never collide. There
+// is no name alongside the type: a second binding of one type is declared as
+// a distinct type instead, which makes a mistaken reference a compile error.
 type key struct{ t reflect.Type }
 
 func (k key) String() string { return typeName(k.t) }
 
 // pkgPath is the import path of the named type k stands for, walking through
-// pointers as typeName does, since a pointer type is unnamed and carries no
-// path of its own. It is empty for a type that has no path to report, which
-// is exactly the set typeName writes with reflect's own short spelling.
+// pointers as typeName does, since a pointer type is unnamed. It is empty for
+// exactly the types typeName writes with reflect's own short spelling.
 func (k key) pkgPath() string {
 	t := k.t
 	for t.Kind() == reflect.Pointer {
@@ -168,8 +164,7 @@ type Event struct {
 	// Package is the import path of the type Service names, e.g.
 	// "github.com/acme/app", so an observer can shorten or group by it
 	// without parsing Service. It is empty for a shutdown, and for a key
-	// whose type is unnamed -- a []byte, a map[string]int -- since reflect
-	// already writes those with a short package name.
+	// whose type is unnamed, since reflect already writes those short.
 	Package  string
 	Scope    string // name of the scope that owns the instance
 	Site     string // file:line of the registration; empty for shutdown
@@ -230,10 +225,10 @@ func (s *Scope) view(r *resolver) *Scope { return &Scope{st: s.st, r: r, module:
 type Module func(*Scope)
 
 // Use applies each module to this scope. A registration made while a module
-// runs -- directly, or from a child the module opens, or later from a
-// constructor the module registered -- carries that module's name, which is
-// the name of the function: register modules as named functions rather than
-// closures, or the name is the enclosing function's.
+// runs, directly, from a child the module opens, or later from a constructor
+// the module registered, carries that module's name, which is the name of the
+// function: register modules as named functions rather than closures, or the
+// name is the enclosing function's.
 func (s *Scope) Use(mods ...Module) {
 	for _, m := range mods {
 		m(&Scope{st: s.st, r: s.r, module: moduleName(m)})
