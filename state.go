@@ -114,10 +114,6 @@ func (st *state) freeze() {
 			groups[b.key] = append(slices.Clone(groups[b.key]), b)
 		} else {
 			prev, ok := index[b.key]
-			var wrapper *binding
-			if ok && b.inner == nil {
-				wrapper = prev.wrapper()
-			}
 			act := "overridden"
 			if b.inner != nil {
 				act = "wrapped"
@@ -136,23 +132,12 @@ func (st *state) freeze() {
 				// registry, not a replacement.
 				panic(fmt.Sprintf("di: %s (provided at %s) is marked Override() but nothing in scope %s provides it; a child scope shadows its parent without Override",
 					b.key, b.where(), st.name))
-			case ok && prev.used.Load():
-				// Replacing or wrapping a key that has served a value would
-				// leave two live instances of one service.
-				panic(fmt.Sprintf("di: %s (provided at %s) cannot be %s at %s: it has already been resolved",
-					b.key, prev.where(), act, b.where()))
-			case ok && prev.resolving.Load() > 0:
-				// The same defect from the other side: the resolution in
-				// flight would return the old value while the replacement
-				// served everything it goes on to build.
-				panic(fmt.Sprintf("di: %s (provided at %s) cannot be %s at %s: it is being resolved",
-					b.key, prev.where(), act, b.where()))
-			case wrapper != nil:
-				// A wrapper in a live scope, here or in a descendant,
-				// composes over prev; replacing prev would leave it serving a
-				// value built from a registration nothing else can reach.
-				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it is wrapped at %s",
-					b.key, prev.where(), b.where(), wrapper.where()))
+			}
+			if ok {
+				if why := prev.against(b); why != "" {
+					panic(fmt.Sprintf("di: %s (provided at %s) cannot be %s at %s: %s",
+						b.key, prev.where(), act, b.where(), why))
+				}
 			}
 			if st.served[b.key] {
 				// This scope already handed the key down from an outer scope;
