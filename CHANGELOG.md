@@ -17,6 +17,12 @@ below says plainly whether an upgrade can break a caller.
   a whole request scope at eight cores went from 2.3 µs to 1.4 µs.
   No API or behaviour changes; the new `benchmarks/parallel_test.go` records
   the shapes.
+- The cycle check a resolution makes before waiting on another goroutine's
+  build no longer scans every waiting resolution in the container. Many
+  resolutions arriving at one slow constructor made it quadratic under the
+  container's one lock: 8192 of them took over 300 ms to settle and now take
+  about 20 ms on an M3 Max (`BenchmarkDI_Herd_8192` in
+  `benchmarks/parallel_test.go`).
 
 ### Fixed
 

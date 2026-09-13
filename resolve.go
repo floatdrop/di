@@ -89,7 +89,7 @@ func (r *resolver) pathStr() string {
 
 // graph is one container's wait-for graph, with two kinds of edge: an
 // instance points at the resolution building it (instance.builder), and a
-// blocked resolution points at the instance it waits for (blockedFor). Its
+// blocked resolution points at the instance it waits for (a waitEdge). Its
 // mutex is the innermost lock: a state's mutex may be held while taking it,
 // never the reverse, so the graph can be read across scopes without ordering
 // state mutexes against each other.
@@ -98,8 +98,27 @@ func (r *resolver) pathStr() string {
 // it. That is as far as a cycle can reach: a resolution follows the parent
 // chain, so a wait can cross scopes, but nothing joins two containers.
 type graph struct {
-	mu         sync.Mutex
-	blockedFor map[*resolver]*instance
+	mu sync.Mutex
+
+	// under indexes every wait by each node of the blocked resolution's path,
+	// up to and including the first finished one, as that path stood when it
+	// blocked. A node only ever becomes finished, never unfinished, so the set
+	// descends can still match only shrinks and the index is a superset of it:
+	// wait narrows the search to under[builder] and then asks descends, which
+	// is what the verdict rests on. Scanning every blocked resolution for each
+	// instance on the stack made a herd of waiters on one slow build quadratic
+	// under the container's one lock.
+	under map[*resolver]map[*waitEdge]struct{}
+}
+
+// waitEdge is one wait: the resolution that is blocked, the instance it waits
+// for, and the nodes it was indexed under. Each wait has its own, and unwait
+// takes it, so removing one never depends on what another wait by the same
+// resolution recorded.
+type waitEdge struct {
+	r    *resolver
+	in   *instance
+	path []*resolver
 }
 
 // descends reports whether n is anc or was created below it. A branch blocks
@@ -127,7 +146,9 @@ func descends(n, anc *resolver) bool {
 // build this branch is responsible for finishing. Called with the holder's
 // mutex held; the check and the new edge are one critical section, so two
 // branches closing a cycle at once cannot both decide to wait.
-func (r *resolver) wait(g *graph, in *instance) bool {
+// It returns the edge to hand to unwait once the wait is over, or nil when
+// waiting would close a cycle.
+func (r *resolver) wait(g *graph, in *instance) *waitEdge {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -140,23 +161,42 @@ func (r *resolver) wait(g *graph, in *instance) bool {
 			continue // nobody is building it: whoever holds it will settle it
 		}
 		if descends(r, builder) {
-			return false // waiting on our own branch's work
+			return nil // waiting on our own branch's work
 		}
-		for n, j := range g.blockedFor {
-			if descends(n, builder) && !seen[j] {
-				seen[j] = true
-				stack = append(stack, j)
+		for e := range g.under[builder] {
+			if !seen[e.in] && descends(e.r, builder) {
+				seen[e.in] = true
+				stack = append(stack, e.in)
 			}
 		}
 	}
-	g.blockedFor[r] = in
-	return true
+	e := &waitEdge{r: r, in: in}
+	for n := r; n != nil; n = n.parent {
+		e.path = append(e.path, n)
+		set := g.under[n]
+		if set == nil {
+			set = map[*waitEdge]struct{}{}
+			g.under[n] = set
+		}
+		set[e] = struct{}{}
+		if n.done.Load() {
+			break // descends matches a node before asking whether it finished
+		}
+	}
+	return e
 }
 
-func (r *resolver) unwait(g *graph) {
+// unwait removes one wait wait recorded.
+func (g *graph) unwait(e *waitEdge) {
 	g.mu.Lock()
-	delete(g.blockedFor, r)
-	g.mu.Unlock()
+	defer g.mu.Unlock()
+	for _, n := range e.path {
+		set := g.under[n]
+		delete(set, e)
+		if len(set) == 0 {
+			delete(g.under, n)
+		}
+	}
 }
 
 // as unwraps a stored value. A nil interface is a legitimate service, and a
@@ -329,13 +369,14 @@ func (s *Scope) await(in *instance, holder *state) (any, error) {
 		} else {
 			ready = waitOn(&in.settledCh)
 		}
-		if !s.r.wait(holder.graph, in) {
+		e := s.r.wait(holder.graph, in)
+		if e == nil {
 			holder.mu.Unlock()
 			return nil, fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.parent.pathStr(), in.b.key)
 		}
 		holder.mu.Unlock()
 		<-ready
-		s.r.unwait(holder.graph)
+		holder.graph.unwait(e)
 		holder.mu.Lock()
 	}
 	value, err := in.value, in.err

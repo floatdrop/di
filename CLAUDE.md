@@ -130,7 +130,15 @@ branch, `resolver.onPath` walks the immutable path. Across branches,
 `resolver.wait` searches a `*graph` before blocking: instances point at the
 resolution building them, blocked resolutions point at what they wait for, and
 a branch that blocks does so several nodes below the one holding the build, so
-both directions are matched against whole paths (`descends`). The check and the
+both directions are matched against whole paths (`descends`).
+`graph.under` indexes each blocked resolution by the nodes of its path as it
+stood when it blocked, so a search reads only the waits beneath one builder
+rather than every wait in the container; a node only ever becomes finished, so
+the index is a superset and `descends` still decides. Each wait is its own `waitEdge`,
+and `unwait` takes it, so two waits by one resolution cannot overwrite each
+other's record; `TestWaitIndexIncludesTheFinishedNode` pins the one boundary
+the suite and the fuzzers did not, which is that the finished node itself is
+indexed. The check and the
 edge it adds are one critical section, or two branches closing a cycle at once
 would both decide to wait. Lock order is state mutex then `graph.mu`, never the
 reverse.
