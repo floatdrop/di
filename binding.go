@@ -27,8 +27,7 @@ type binding struct {
 	build    func(*Scope) any
 
 	// inner is the registration a Wrap composes over, bound when Wrap is
-	// called, and innerAt the scope that registered it; both nil for any
-	// other binding.
+	// called, and innerAt the scope that registered it; both nil otherwise.
 	inner   *binding
 	innerAt *state
 
@@ -51,16 +50,16 @@ func (b *binding) where() string {
 	return b.module + " (" + b.site + ")"
 }
 
-// validate rejects lifetime and hook combinations that cannot be honoured.
-// It runs at freeze, so the order the builder methods were called in does
-// not matter.
+// validate rejects lifetime and hook combinations that cannot be honoured. It
+// runs at freeze, so the order the builder methods were called in does not
+// matter.
 func (b *binding) validate() {
 	bad := func(what, why string) {
 		panic(fmt.Sprintf("di: %s (provided at %s): %s %s", b.key, b.where(), what, why))
 	}
 	switch {
 	case b.eager && b.scoped:
-		// Rejected even if a later registration overrides it. Whether an
+		// Rejected even if a later registration overrides it; whether an
 		// override inherits eagerness is decided in deriveEager.
 		bad("Eager", "does not apply to a Scoped binding: it is not built once")
 	case b.isValue && b.scoped:
@@ -82,11 +81,9 @@ type Binding[T any] struct {
 	b *binding
 }
 
-// register makes a binding and queues it for the next freeze. init fills in
-// what the registration method knows beyond the key and the build func, and it
-// runs before the binding is queued: once the binding is in pending, freeze and
-// teardown read it under the scope's mutex, and a field written afterwards is a
-// race with both.
+// register makes a binding and queues it for the next freeze. init runs
+// before the binding is queued: once it is in pending, freeze and teardown
+// read it under the scope's mutex, and a field written afterwards races both.
 func (s *Scope) register(k key, build func(*Scope) any, init func(*binding)) *binding {
 	b := &binding{key: k, site: callsite(2), module: s.module, build: build}
 	b.single = &instance{b: b}
@@ -99,9 +96,8 @@ func (s *Scope) register(k key, build func(*Scope) any, init func(*binding)) *bi
 	stopped := s.st.stopped.Load()
 	s.st.mu.Unlock()
 	if stopped && b.inner != nil {
-		// teardown collected this scope's wrappers before this one was
-		// queued, so it will not drop the mark Wrap made. A stopped scope
-		// never serves the key, so the mark guards nothing: drop it here.
+		// teardown collected the scope's wrappers before this one was queued,
+		// and a stopped scope never serves the key, so drop the mark here.
 		b.inner.unwrap(b)
 	}
 	return b
@@ -119,10 +115,9 @@ func (s *Scope) Value[T any](v T) Binding[T] {
 	return Binding[T]{s, b}
 }
 
-// callsite is the file:line skip frames above its caller: register passes 2,
-// for itself and the registration method the user called. Every registration
-// method calls register directly for that reason; one that went through
-// another would record a site inside this package.
+// callsite is the file:line skip frames above its caller. register passes 2,
+// for itself and the registration method the user called, so every
+// registration method must call register directly.
 func callsite(skip int) string {
 	_, file, line, _ := runtime.Caller(skip + 1)
 	return fmt.Sprintf("%s:%d", file, line)
@@ -134,18 +129,14 @@ func callsite(skip int) string {
 //	s.Wire[*Server](NewServer) // func NewServer(cfg Config, repo *Repo) *Server
 //
 // ctor must be a non-variadic function returning T, or T and an error, and is
-// read with reflection once, here. Each parameter type is resolved from the
-// same scope view a Provide closure would see, so lifetimes, cycles, hooks and
-// error paths are unchanged; what Wire adds is that the dependencies are known
-// at registration, before anything is built. A non-nil error from ctor aborts
-// the build exactly as s.Must does.
+// read with reflection once, here. Each parameter is resolved as a Provide
+// closure would resolve it, so lifetimes, cycles, hooks and error paths are
+// the same; what Wire adds is that the dependencies are known at
+// registration. A non-nil error from ctor aborts the build as s.Must does.
 //
-// T cannot be inferred from an untyped argument, so it is spelled out, and a
-// constructor whose result is not assignable to T is rejected here, with the
-// other configuration errors. A concrete constructor may therefore serve an
-// interface key directly: s.Wire[Repository](NewPGRepo). The build calls ctor
-// through reflect, which costs about 150ns and two allocations per build over
-// a Provide closure; a warm Get is the same code for both.
+// T is spelled out because it cannot be inferred from an untyped argument. A
+// result merely assignable to T is accepted, so a concrete constructor may
+// serve an interface key: s.Wire[Repository](NewPGRepo).
 func (s *Scope) Wire[T any](ctor any) Binding[T] {
 	want := reflect.TypeFor[T]()
 	fv, ft, fails := function("Wire["+typeName(want)+"]", "constructor", ctor, want)
@@ -167,17 +158,14 @@ func (s *Scope) Wire[T any](ctor any) Binding[T] {
 //	s.Wrap[Store](func(next Store, c *Cache) Store { return &caching{next, c} })
 //
 // What is wrapped keeps its registration, hooks and lifetime: it is built
-// first, as the wrapper's dependency, and so stopped after it. The wrapper
-// serves T from this scope down. In a child scope it wraps the parent's value
-// for that child and its descendants and leaves the parent and its other
-// children as they were, which is what uber/fx calls Decorate. Wrappers
-// chain in registration order, and a wrapper takes the lifetime of what it
-// wraps; Scoped() on the wrapper makes it one per resolving scope over a
-// shared inner value. An Override registered afterwards replaces the wrapper
-// and everything it wrapped. Nothing to wrap is rejected here, and a group
-// cannot be wrapped: its members are read with All. A key this scope has
-// already resolved is rejected at the next resolution, as an Override is,
-// since callers already hold the unwrapped value.
+// first, as the wrapper's dependency, and stopped after it. The wrapper serves
+// T from this scope down; in a child scope it wraps the parent's value for
+// that child alone. Wrappers chain in registration order and take the
+// lifetime of what they wrap; Scoped() on the wrapper makes it one per
+// resolving scope over a shared inner value. An Override registered afterwards
+// replaces the wrapper and everything it wrapped. Nothing to wrap is rejected
+// here, and a group cannot be wrapped. A key this scope has already resolved
+// is rejected at the next resolution, as an Override is.
 func (s *Scope) Wrap[T any](fn any) Binding[T] {
 	want := reflect.TypeFor[T]()
 	name := "Wrap[" + typeName(want) + "]"
@@ -186,8 +174,8 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 		panic(fmt.Sprintf("di: %s: wrapper %s must take the %s it wraps as its first parameter", name, ft, typeName(want)))
 	}
 	k := key{t: want}
-	// This scope is read as it is, pending batch included, because committing
-	// the batch here would end it for every registration made so far.
+	// This scope is read pending batch included, without committing it:
+	// committing here would end the batch for every registration so far.
 	// Ancestors are looked up as a resolution would look them up.
 	inner, at := s.st.current(k)
 	if inner == nil && s.st.parent != nil {
@@ -199,9 +187,8 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 	wants := params(ft, 1)
 	b := s.register(k, func(s *Scope) any {
 		args := make([]reflect.Value, len(wants)+1)
-		// The wrapped value is resolved as a dependency, which records the
-		// edge, keeps build order and catches a wrapper that reaches back
-		// into itself; served is marked as get would mark it.
+		// Resolved as a dependency, which records the edge, keeps build order
+		// and catches a wrapper that reaches back into itself.
 		args[0] = argument(s.resolve(inner, at), ft.In(0))
 		s.markServed(at, k)
 		s.arguments(wants, args[1:])
@@ -213,74 +200,55 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 	return Binding[T]{s, b}
 }
 
-// guard is what stops a registration being replaced once replacing it would
-// leave two live values for its key, or a wrapper composing over a
-// registration nothing else can reach. freeze closes four ways of getting
-// there. Three belong to the registration and live here: a value it has
-// served, a resolution of it in flight, and a wrapper in a live scope over it.
-// The fourth, a scope that handed the key down from an ancestor, is
-// state.served, because it belongs to the scope that did the handing.
+// guard is what stops a registration being replaced once that would leave two
+// live values for its key, or a wrapper over a registration nothing else can
+// reach: a value served, a resolution in flight, a wrapper in a live scope.
+// The fourth guard, a scope that handed the key down from an ancestor, is
+// state.served, since it belongs to that scope.
 //
-// The three use different idioms for one reason. resolve writes used and
-// resolving from whichever scope is resolving, without the owner's mutex,
-// which is what keeps a warm resolution off that mutex; so they are atomics.
-// wraps is a small set, replaced whole by compare-and-swap.
+// resolve writes used and resolving from whichever scope is resolving, without
+// the owner's mutex, which keeps a warm resolution off that mutex; so they are
+// atomics. wraps is a small set, replaced whole by compare-and-swap.
 type guard struct {
-	// used is set once this binding has served a value. From then on the
-	// registration cannot be overridden, since that would leave two live
-	// instances of one service. A failed resolution built nothing and leaves
-	// the key re-registerable; that is how a key whose constructor failed is
-	// recovered.
+	// used is set once this binding has served a value. A failed resolution
+	// built nothing and leaves the key re-registerable.
 	used atomic.Bool
 
-	// resolving counts the resolutions of this binding that have not served
-	// a value yet, the window used cannot cover: a constructor that registers
+	// resolving counts the resolutions of this binding that have not served a
+	// value yet, the window used cannot cover: a constructor that registers
 	// over its own key and resolves the replacement would otherwise hand the
-	// nested call the new value and the outer call the old one. It is read
-	// only until the first value is served; after that used says the same.
+	// nested call the new value and the outer call the old one.
 	resolving atomic.Int32
 
 	// wraps holds the Wraps bound to this binding whose scopes are still
-	// alive, in registration order, and whether the binding is retired. An
-	// Override that replaced this binding would leave each wrapper composing
-	// over a registration that no longer serves the key, so freeze rejects
-	// one while any remain. Wrap adds itself; the scope that registered a
-	// wrapper removes it as it stops, since a stopped scope never serves the
-	// key again. It is a set rather than one mark because sibling scopes wrap
-	// one parent registration independently, and one of them stopping must
-	// not release the others.
+	// alive, in registration order, and whether the binding is retired. Wrap
+	// adds itself; the scope that registered a wrapper removes it as it stops.
+	// It is a set because sibling scopes wrap one parent registration
+	// independently, and one stopping must not release the others.
 	//
-	// retired is set on a wrapper in a chain an Override replaced. It will
-	// never serve from its own scope again, but a live wrapper in a
-	// descendant may still compose over it, so it keeps its mark on what it
-	// wraps until nothing wraps it; see release.
+	// retired is set on a wrapper in a chain an Override replaced. It never
+	// serves from its own scope again, but a live wrapper in a descendant may
+	// still compose over it, so it keeps its mark on what it wraps until
+	// nothing wraps it; see release.
 	//
-	// Both change rarely, so they are one immutable wrapSet replaced whole by
-	// compare-and-swap, as the registry is, and nil for a binding nobody has
-	// wrapped or retired: every registration pays one pointer for them.
+	// Both change rarely, so they are one immutable wrapSet, nil for a binding
+	// nobody has wrapped or retired.
 	wraps atomic.Pointer[wrapSet]
 }
 
-// against says why replacer may not replace or wrap the registration g guards,
-// or returns "" when nothing stops it. The reasons are checked in the order a
-// caller would want to hear them, and read as the end of a sentence: "cannot
-// be overridden at wire.go:9: it has already been resolved".
+// against says why replacer may not replace or wrap the guarded registration,
+// or returns "" when nothing stops it. The reasons read as the end of a
+// sentence: "cannot be overridden at wire.go:9: it has already been resolved".
 func (g *guard) against(replacer *binding) string {
 	switch {
 	case g.used.Load():
-		// Replacing or wrapping a key that has served a value would leave
-		// two live instances of one service.
 		return "it has already been resolved"
 	case g.resolving.Load() > 0:
-		// The same defect from the other side: the resolution in flight
-		// would return the old value while the replacement served
-		// everything it goes on to build.
 		return "it is being resolved"
 	}
 	if replacer.inner == nil {
-		// An Override, not a Wrap: a wrapper composing over this
-		// registration would go on serving a value built from something
-		// nothing else can reach.
+		// An Override, not a Wrap: a wrapper over this registration would go
+		// on serving a value built from something nothing else can reach.
 		if w := g.wrapper(); w != nil {
 			return "it is wrapped at " + w.where()
 		}
@@ -324,10 +292,8 @@ func (g *guard) addWrapper(w *binding) {
 	})
 }
 
-// dropWrapper forgets a Wrap bound to the guarded registration, once the
-// wrapper can no longer serve: its scope stopped, or an Override replaced it.
-// A wrapper is added before anything can drop it, so one that is not in the
-// set has been dropped already.
+// dropWrapper forgets a Wrap that can no longer serve. A wrapper is added
+// before anything can drop it, so one not in the set was dropped already.
 func (g *guard) dropWrapper(w *binding) {
 	if s := g.wraps.Load(); s == nil || !slices.Contains(s.wrappers, w) {
 		return
@@ -360,10 +326,10 @@ func (b *binding) unwrap(w *binding) {
 	b.release()
 }
 
-// release drops the mark a retired binding holds on what it wraps once
-// nothing live wraps it, and carries on down the chain for as long as each
-// link is retired and unwrapped in turn. A link that is still wrapped keeps
-// its mark: the wrapper over it still composes over everything below.
+// release drops the mark a retired binding holds on what it wraps once nothing
+// live wraps it, and carries on down the chain while each link is retired and
+// unwrapped in turn. A link still wrapped keeps its mark: the wrapper over it
+// composes over everything below.
 func (b *binding) release() {
 	for r := b; r.inner != nil && r.isRetired() && r.wrapper() == nil; r = r.inner {
 		r.inner.dropWrapper(r)
@@ -447,13 +413,11 @@ func argument(v any, t reflect.Type) reflect.Value {
 	return reflect.ValueOf(v)
 }
 
-// call runs a constructor through reflect and turns its error, if it
-// declared one and returned it, into the abort that s.Must would raise. The
-// value is stored as the registered type, not the constructor's result type:
-// registration accepted any result assignable to the key, and a chan int
-// stored for a <-chan int key would pass every check until Get asserted it.
-// An interface key needs no conversion, since the assertion to an interface
-// is what accepts the concrete value.
+// call runs a constructor through reflect and turns a declared, returned
+// error into the abort s.Must would raise. The value is stored as the
+// registered type, not the result type: registration accepted any assignable
+// result, and a chan int stored for a <-chan int key would pass every check
+// until Get asserted it. An interface key needs no conversion.
 func call(fv reflect.Value, args []reflect.Value, fails bool, want reflect.Type) any {
 	out := fv.Call(args)
 	if fails && !out[1].IsNil() {
@@ -488,28 +452,24 @@ func (b Binding[T]) Group() Binding[T] {
 
 // Override declares that this registration replaces an earlier one of the same
 // key in the same scope. Without it a second registration of a key is rejected
-// at the next resolution, naming both sites, because a duplicate that wins
-// silently is how one module reroutes another module's wiring without anyone
-// noticing. With it the later registration serves the key, and inherits its
-// eagerness, which is the test seam:
+// at the next resolution, naming both sites. With it the later registration
+// serves the key and inherits its eagerness, which is the test seam:
 //
 //	s := di.Test(t, app.Production)
 //	s.Value(&DB{DSN: "sqlite://memory"}).Override()
 //
-// There must be something to override in this scope, or that is rejected too:
-// a fake for a service that has since been renamed would otherwise be a
-// registration nobody resolves, and the test would pass against production
-// wiring. A child scope shadows its parent without Override, since that is a
-// different registry rather than a replacement. A key that has already served
-// a value cannot be overridden at all.
+// There must be something to override in this scope, or that is rejected too,
+// since a fake for a renamed service would otherwise be a registration nobody
+// resolves. A child scope shadows its parent without Override. A key that has
+// already served a value cannot be overridden at all.
 func (b Binding[T]) Override() Binding[T] {
 	return b.edit(func(b *binding) { b.override = true })
 }
 
 // Scoped makes the binding one-per-scope: each scope that resolves it gets
-// its own instance, built in that scope (so it can see that scope's
-// values) and stopped with it. Declare request-scoped services once in the
-// root and resolve them through the request scope.
+// its own instance, built in that scope (so it can see that scope's values)
+// and stopped with it. Declare request-scoped services once in the root and
+// resolve them through the request scope.
 func (b Binding[T]) Scoped() Binding[T] {
 	return b.edit(func(b *binding) { b.scoped = true })
 }
@@ -517,53 +477,49 @@ func (b Binding[T]) Scoped() Binding[T] {
 // Eager builds the service during Start rather than on first use.
 //
 // Eagerness belongs to the key, not the registration: it means the service
-// exists by the time Start returns. Overriding an eager binding therefore
-// keeps the key eager and builds the replacement; a replacement with a
-// per-scope lifetime, which cannot be built once at Start, is rejected.
+// exists by the time Start returns. Overriding an eager binding keeps the key
+// eager and builds the replacement; a replacement with a per-scope lifetime
+// is rejected.
 func (b Binding[T]) Eager() Binding[T] { return b.edit(func(b *binding) { b.eager = true }) }
 
-// OnStart runs once the service is built, and only a hook that returns
-// normally starts it: one that panics fails the start step, like a panicking
-// constructor, and the service is never served. The hooks are typed: no
-// interface sniffing, no reflection.
+// OnStart runs once the service is built. Only a hook that returns normally
+// starts it: one that panics fails the start step, like a panicking
+// constructor, and the service is never served.
 func (b Binding[T]) OnStart(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.onStart = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
 }
 
 // OnDrain runs before anything is stopped: Stop drains the whole tree, from
 // the innermost scope outwards and in reverse build order, while every scope
-// still resolves normally. It is where a service stops accepting new work and
-// waits for the work it already has, such as an HTTP server that must finish
-// in-flight requests whose handlers still need their request scope. Anything
-// those handlers build, including a request scope of their own, is drained
-// before the phase ends. Use OnStop for the release that follows.
+// still resolves. It is where a service stops accepting new work and waits
+// for the work it already has, such as an HTTP server finishing in-flight
+// requests whose handlers still need their request scope. Anything those
+// handlers build, including a request scope, is drained before the phase
+// ends. Use OnStop for the release that follows.
 func (b Binding[T]) OnDrain(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.onDrain = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
 }
 
 // OnStop releases the service, in reverse build order, once its drain step
-// and its child scopes are done. It runs when OnStart succeeded, or when
-// there is no OnStart to pair with, in which case it is a plain destructor;
-// a service whose start step failed is not stopped.
+// and its child scopes are done. It runs when OnStart succeeded, or when there
+// is no OnStart to pair with, in which case it is a plain destructor; a
+// service whose start step failed is not stopped.
 func (b Binding[T]) OnStop(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.onStop = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
 }
 
 // Go registers a worker for T: a long-running function, such as a consumer
-// loop, that runs in a goroutine of its own for as long as the service does.
-// It is the contract of errgroup's Go, applied to a service. The worker
-// starts once the service has started; its context is cancelled when the
-// service stops, and Stop waits for it to return, bounded by Stop's own
-// context. A worker that outlasts that deadline is reported by Stop, and
-// OnStop then waits for it rather than releasing the value underneath a
-// worker still reading it.
+// loop, that runs in a goroutine of its own for as long as the service does,
+// as errgroup's Go does for a group. The worker starts once the service has
+// started; its context is cancelled when the service stops, and Stop waits
+// for it to return, bounded by Stop's own context. A worker that outlasts
+// that deadline is reported by Stop, and OnStop then waits for it rather
+// than releasing the value underneath it.
 //
 // Returning a non-nil error calls Shutdown with it, stopping the application,
-// even if the scope was already stopping: a worker may fail, flush while the
-// scope winds down, and only then report. The exception is context.Canceled
-// from a worker that was already cancelled, which is a worker reporting the
-// cancellation and nothing else. A worker that wants to stay quiet during
-// shutdown should return nil.
+// even if the scope was already stopping. The exception is context.Canceled
+// from a worker that was already cancelled. A worker that wants to stay quiet
+// during shutdown should return nil.
 func (b Binding[T]) Go(f func(context.Context, T) error) Binding[T] {
 	return b.edit(func(b *binding) { b.worker = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
 }

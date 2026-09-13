@@ -20,9 +20,8 @@ type state struct {
 	parent *state
 	graph  *graph // the container's wait-for graph, shared with every other scope under the root
 
-	// reg is the committed registry. freeze builds a new one and stores it,
-	// and nothing writes to a registry after that, so a lookup reads it
-	// without the mutex. hasPending says whether freeze has a batch to
+	// reg is the committed registry, immutable once stored, so a lookup reads
+	// it without the mutex. hasPending says whether freeze has a batch to
 	// commit: register sets it and freeze clears it, both under mu, so a
 	// lookup that finds it clear skips the lock as well.
 	reg        atomic.Pointer[registry]
@@ -37,37 +36,33 @@ type state struct {
 	children []*state
 
 	// observers is replaced whole by Observe, under mu, and read without it
-	// by emit, which runs for every step in every scope below this one.
+	// by emit.
 	observers atomic.Pointer[[]func(Event)]
 
 	// startCtx is set once, by Start, and running once Start reaches its
-	// hook phase, which is when a service built later starts itself. Both
-	// are atomic because every build reads them up the whole scope chain.
-	// What makes a late build start exactly once is their order against
-	// publish, not a mutex: see startIfRunning.
+	// hook phase, after which a service built later starts itself. Atomic
+	// because every build reads them up the whole chain; what makes a late
+	// build start exactly once is their order against publish, not a mutex.
 	startCtx atomic.Pointer[context.Context]
 	running  atomic.Bool
 
-	stopped  atomic.Bool     // set by the seal that ends Stop's drain, a failed Start's included; resolution then fails with ErrStopped
+	stopped  atomic.Bool     // set by the seal that ends Stop's drain; resolution then fails with ErrStopped
 	stopCtx  context.Context // the context Stop was called with
 	stopOnce once            // this scope's teardown; later Stop calls wait for it
 
-	// drainOnce is the scope-wide drain phase, once-with-wait like stopOnce:
-	// a second Stop reaching this scope waits for the first drain instead of
-	// running its own or skipping past it.
+	// drainOnce is the scope-wide drain phase, once-with-wait like stopOnce.
 	drainOnce once
 
 	// drainGen counts what could create drain work in this scope's subtree:
 	// a build published into it, a start step claimed in it. sealed and
-	// sealCh are how a teardown ends the drain phase against those without a
-	// lock the two sides share; see seal and announce.
+	// sealCh are how a teardown ends the drain phase against those; see seal
+	// and announce.
 	drainGen atomic.Uint64
 	sealCh   chan struct{} // guarded by mu; made by an announcer that must wait, closed when the seal is decided
 	sealed   atomic.Bool
 
 	// The fields are ordered so the 4-byte atomics and the bool pack
-	// together: a state is allocated per request scope, and scattered they
-	// padded it into the next size class.
+	// together: a state is allocated per request scope.
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{}
 	shutdownErr  error
@@ -82,8 +77,7 @@ type registry struct {
 	eager  []*binding // derived by deriveEager: what Start builds
 }
 
-// emptyRegistry is what a scope starts with. Sharing it is safe because no
-// registry is ever written to.
+// emptyRegistry is what a scope starts with; no registry is ever written to.
 var emptyRegistry = &registry{index: map[key]*binding{}, groups: map[key][]*binding{}}
 
 // freeze commits the pending registrations. The batch is validated against a
@@ -106,8 +100,7 @@ func (st *state) freeze() {
 	groups := maps.Clone(cur.groups)
 	all := slices.Clone(cur.all)
 	for _, b := range st.pending {
-		// A wrapper is built where what it wraps is built, so it takes that
-		// lifetime, read here rather than at registration because the
+		// A wrapper takes the lifetime of what it wraps, read here because the
 		// wrapped binding's own Scoped() may come later in the batch.
 		if b.inner != nil && b.inner.scoped {
 			b.scoped = true
@@ -123,16 +116,13 @@ func (st *state) freeze() {
 			}
 			switch {
 			case ok && !b.override && b.inner == nil:
-				// A replacement is a thing a caller declares; a later
-				// registration winning silently would let one module reroute
-				// another's wiring.
+				// A later registration winning silently would let one module
+				// reroute another's wiring.
 				panic(fmt.Sprintf("di: %s is provided at %s and again at %s: a second registration of a key must be marked Override() to replace the first",
 					b.key, prev.where(), b.where()))
 			case !ok && b.override:
-				// Nearly always a fake for a service that was renamed, which
-				// would otherwise be a registration nobody resolves. A child
-				// shadows its parent without Override: that is a different
-				// registry, not a replacement.
+				// Nearly always a fake for a service that was renamed. A child
+				// shadows its parent without Override.
 				panic(fmt.Sprintf("di: %s (provided at %s) is marked Override() but nothing in scope %s provides it; a child scope shadows its parent without Override",
 					b.key, b.where(), st.name))
 			}
@@ -143,8 +133,8 @@ func (st *state) freeze() {
 				}
 			}
 			if st.served[b.key] {
-				// This scope already handed the key down from an outer scope;
-				// shadowing it now would give the key two live values here.
+				// Shadowing a key this scope handed down from an outer scope
+				// would give it two live values here.
 				panic(fmt.Sprintf("di: %s cannot be registered at %s: this scope has already resolved it from an outer scope",
 					b.key, b.where()))
 			}
@@ -158,14 +148,11 @@ func (st *state) freeze() {
 	eager := deriveEager(all, index)
 
 	st.reg.Store(&registry{index: index, groups: groups, all: all, eager: eager})
-	// The batch stands, so the chains its Overrides replaced will never
-	// serve from this scope: none of them has served, or the guard above
-	// would have refused. Every link registered here is retired, down to the
-	// first that wraps an ancestor's registration, whose own chain is intact.
-	// A retired link releases what it wraps only once nothing live wraps it:
-	// a descendant's wrapper over a middle link still composes over the rest,
-	// and that link lets go when the descendant stops. Not before the commit,
-	// since a rejected batch keeps every mark it made.
+	// The batch stands, so the chains its Overrides replaced never serve from
+	// this scope. Every link registered here is retired, down to the first
+	// that wraps an ancestor's registration, whose chain is intact; a retired
+	// link releases what it wraps only once nothing live wraps it. Not before
+	// the commit: a rejected batch keeps every mark it made.
 	for _, prev := range replaced {
 		for r := prev; r.inner != nil; r = r.inner {
 			r.retire() // only a wrapper's flag is ever read, so a plain registration is not marked
@@ -180,11 +167,11 @@ func (st *state) freeze() {
 }
 
 // deriveEager returns the ordered set of bindings Start builds, and is the
-// one place that decides what Eager means. For every key with an Eager
-// registration, the set holds the binding that serves that key, once, at the
-// position of the first such registration. A group member is its own entry. A
-// binding with a per-scope lifetime cannot honour eagerness and is rejected
-// here, whether declared so directly or arriving through an override.
+// one place that decides what Eager means: for every key with an Eager
+// registration, the binding that serves that key, once, at the position of
+// the first such registration. A group member is its own entry. A binding
+// with a per-scope lifetime cannot honour eagerness and is rejected here,
+// whether declared so directly or arriving through an override.
 func deriveEager(all []*binding, index map[key]*binding) []*binding {
 	var eager []*binding
 	seen := make(map[*binding]bool, len(all))
@@ -230,10 +217,9 @@ func (st *state) isStopped() bool {
 	return false
 }
 
-// runContext walks up the scope chain to the nearest state that Start was
-// called on. running reports whether that Start has passed its hook phase,
-// which is when bindings built later must start themselves; it is never true
-// with a nil ctx, since start records the context before setting the flag.
+// runContext walks up to the nearest state Start was called on. running
+// reports whether that Start has passed its hook phase; it is never true with
+// a nil ctx, since start records the context before setting the flag.
 func (st *state) runContext() (ctx context.Context, running bool) {
 	for ; st != nil; st = st.parent {
 		if p := st.startCtx.Load(); p != nil {
@@ -263,8 +249,8 @@ func (st *state) stopContext() context.Context {
 	return context.Background()
 }
 
-// instanceFor picks the instance a resolution uses. A singleton has one for
-// the whole binding; a Scoped binding has one per scope that holds it.
+// instanceFor picks the instance a resolution uses: a singleton has one for
+// the whole binding, a Scoped binding one per scope that holds it.
 func (st *state) instanceFor(b *binding) *instance {
 	if !b.scoped {
 		return b.single
@@ -280,8 +266,8 @@ func (st *state) instanceFor(b *binding) *instance {
 }
 
 // instanceAt is instanceFor without the making: the instance b already has
-// in st, or nil. Called with st's mutex held, by the callers that must not
-// bring one into being -- a recorded edge, and the inspection API.
+// in st, or nil. Called with st's mutex held, by callers that must not bring
+// one into being.
 func (st *state) instanceAt(b *binding) *instance {
 	if !b.scoped {
 		return b.single
