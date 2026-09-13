@@ -838,6 +838,13 @@ func FuzzMachine(f *testing.F) {
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 1, 0, 1, 4, 2, 1, 0, 0, 0, 2, 0, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 2, 4, 0, 0, 1, 0, 0, 0, 0, 0, 1, 4, 2, 3, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 1, 4})
+	// A wrapper chain an Override replaces while a descendant still wraps its
+	// first link: the child wraps the root's key, the grandchild wraps that
+	// wrapper, the child wraps again and then overrides the key, and the
+	// grandchild stops. Retiring the chain, release stopping at a link that is
+	// still wrapped, and the cascade when that wrapper's scope stops are reached
+	// by nothing else a generator builds.
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 1, 0, 1, 4, 0, 3, 0, 1, 4, 0, 1, 0, 1, 4, 0, 1, 0, 0, 2, 1, 1, 0, 0, 0, 6, 3, 0, 0, 0, 6, 0, 0, 0, 0})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		ops := decode(data)
 		if len(ops) == 0 {
