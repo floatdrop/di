@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"sync"
 	"sync/atomic"
 )
 
@@ -28,16 +29,31 @@ type binding struct {
 
 	// inner is the registration a Wrap composes over, bound when Wrap is
 	// called, and innerAt the scope that registered it; both nil for any
-	// other binding. wrappedBy is set on a binding a Wrap has bound to: an
-	// Override that replaced it would leave the wrapper composing over a
-	// registration that no longer serves the key.
-	inner     *binding
-	innerAt   *state
-	wrappedBy atomic.Pointer[binding]
-	onStart   func(context.Context, any) error
-	onDrain   func(context.Context, any) error
-	onStop    func(context.Context, any) error
-	worker    func(context.Context, any) error
+	// other binding.
+	inner   *binding
+	innerAt *state
+
+	// wrappers are the Wraps bound to this binding whose scopes are still
+	// alive, in registration order. An Override that replaced this binding
+	// would leave each of them composing over a registration that no longer
+	// serves the key, so freeze rejects one while any remain. Wrap adds
+	// itself; the scope that registered a wrapper removes it as it stops,
+	// since a stopped scope never serves the key again. It is a set rather
+	// than one mark because sibling scopes wrap one parent registration
+	// independently, and one of them stopping must not release the others.
+	// wmu is a leaf lock: nothing is taken while it is held.
+	wmu      sync.Mutex
+	wrappers []*binding
+
+	// retired is set on a link of a wrapper chain an Override replaced. It
+	// will never serve from its own scope again, but a live wrapper in a
+	// descendant may still compose over it, so it keeps its mark on what it
+	// wraps until nothing wraps it; see release.
+	retired atomic.Bool
+	onStart func(context.Context, any) error
+	onDrain func(context.Context, any) error
+	onStop  func(context.Context, any) error
+	worker  func(context.Context, any) error
 
 	// used is set once this binding has served a value. From then on the
 	// registration cannot be overridden, since that would leave two live
@@ -96,26 +112,40 @@ type Binding[T any] struct {
 	b *binding
 }
 
-func (s *Scope) register(k key, build func(*Scope) any) *binding {
+// register makes a binding and queues it for the next freeze. init fills in
+// what the registration method knows beyond the key and the build func, and it
+// runs before the binding is queued: once the binding is in pending, freeze and
+// teardown read it under the scope's mutex, and a field written afterwards is a
+// race with both.
+func (s *Scope) register(k key, build func(*Scope) any, init func(*binding)) *binding {
 	b := &binding{key: k, site: callsite(), module: s.module, build: build}
 	b.single = &instance{b: b}
+	if init != nil {
+		init(b)
+	}
 	s.mu.Lock()
 	s.pending = append(s.pending, b)
 	s.hasPending.Store(true)
+	stopped := s.stopped.Load()
 	s.mu.Unlock()
+	if stopped && b.inner != nil {
+		// teardown collected this scope's wrappers before this one was
+		// queued, so it will not drop the mark Wrap made. A stopped scope
+		// never serves the key, so the mark guards nothing: drop it here.
+		b.inner.unwrap(b)
+	}
 	return b
 }
 
 // Provide registers a lazily built singleton. T is inferred from the
 // constructor's return type; dependencies are pulled with s.Get[...]().
 func (s *Scope) Provide[T any](ctor func(*Scope) T) Binding[T] {
-	return Binding[T]{s, s.register(key{t: reflect.TypeFor[T]()}, func(s *Scope) any { return ctor(s) })}
+	return Binding[T]{s, s.register(key{t: reflect.TypeFor[T]()}, func(s *Scope) any { return ctor(s) }, nil)}
 }
 
 // Value registers an already-built instance.
 func (s *Scope) Value[T any](v T) Binding[T] {
-	b := s.register(key{t: reflect.TypeFor[T]()}, func(*Scope) any { return v })
-	b.isValue = true
+	b := s.register(key{t: reflect.TypeFor[T]()}, func(*Scope) any { return v }, func(b *binding) { b.isValue = true })
 	return Binding[T]{s, b}
 }
 
@@ -150,8 +180,7 @@ func (s *Scope) Wire[T any](ctor any) Binding[T] {
 		args := make([]reflect.Value, len(wants))
 		s.arguments(wants, args)
 		return call(fv, args, fails, want)
-	})
-	b.wants = wants
+	}, func(b *binding) { b.wants = wants })
 	return Binding[T]{s, b}
 }
 
@@ -203,10 +232,52 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 		s.markServed(at, k)
 		s.arguments(wants, args[1:])
 		return call(fv, args, fails, want)
+	}, func(b *binding) {
+		b.inner, b.innerAt, b.wants, b.scoped = inner, at, wants, inner.scoped
+		inner.addWrapper(b)
 	})
-	b.inner, b.innerAt, b.wants, b.scoped = inner, at, wants, inner.scoped
-	inner.wrappedBy.Store(b)
 	return Binding[T]{s, b}
+}
+
+// addWrapper records a Wrap bound to b.
+func (b *binding) addWrapper(w *binding) {
+	b.wmu.Lock()
+	b.wrappers = append(b.wrappers, w)
+	b.wmu.Unlock()
+}
+
+// dropWrapper forgets a Wrap bound to b, once its scope has stopped.
+func (b *binding) dropWrapper(w *binding) {
+	b.wmu.Lock()
+	b.wrappers = slices.DeleteFunc(b.wrappers, func(x *binding) bool { return x == w })
+	b.wmu.Unlock()
+}
+
+// unwrap forgets w, a wrapper bound to b that can no longer serve, and lets b
+// go too if b was retired and w was the last thing keeping it.
+func (b *binding) unwrap(w *binding) {
+	b.dropWrapper(w)
+	b.release()
+}
+
+// release drops the mark a retired binding holds on what it wraps once
+// nothing live wraps it, and carries on down the chain for as long as each
+// link is retired and unwrapped in turn. A link that is still wrapped keeps
+// its mark: the wrapper over it still composes over everything below.
+func (b *binding) release() {
+	for r := b; r.inner != nil && r.retired.Load() && r.wrapper() == nil; r = r.inner {
+		r.inner.dropWrapper(r)
+	}
+}
+
+// wrapper returns the first live Wrap bound to b, or nil.
+func (b *binding) wrapper() *binding {
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+	if len(b.wrappers) == 0 {
+		return nil
+	}
+	return b.wrappers[0]
 }
 
 var errorType = reflect.TypeFor[error]()

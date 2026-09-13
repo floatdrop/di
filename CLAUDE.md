@@ -369,10 +369,36 @@ a new mechanism.
 Three guards: `freeze` exempts a wrapper from the collision rule and applies
 the used/resolving/served guards to it as to an override, sets `scoped` from
 the inner there rather than at registration because the inner's own `Scoped()`
-may come later in the batch, and rejects an `Override` of a binding whose
-`wrappedBy` is set -- the cross-scope case, where a parent's later override
-would leave a child's wrapper composing over a registration nothing else can
-reach. `validate.go`'s `live` follows `inner` chains so the wrapped
+may come later in the batch, and rejects an `Override` of a binding that still
+has `wrappers` -- the cross-scope case, where a parent's later override would
+leave a child's wrapper composing over a registration nothing else can reach.
+`wrappers` is a set, not one mark, because sibling scopes wrap one parent
+registration independently: `Wrap` adds itself, and `teardown` removes the
+scope's own wrappers once it has stored `stopped`, since a stopped scope never
+serves the key again. A single pointer overwritten by the latest `Wrap` and
+never cleared used to pin the parent for ever, naming a wrapper in a scope
+that no longer existed. A rejected batch keeps its wrappers on purpose: the
+batch stays pending, and a later `.Override()` on one of its handles can still
+make it commit. A committed `Override` that replaces a wrapper retires every
+link of the chain registered in that scope, down to the first that wraps an
+ancestor's registration, since none of them has served or will serve from
+there. A retired link releases its own mark only once nothing live wraps it
+(`release`), and `unwrap` carries that down the chain when a descendant's
+wrapper over a middle link stops: that wrapper still composes over everything
+below, so dropping every link's mark at the commit, as the first version did,
+let an ancestor be overridden under a live wrapper. The mark is
+made in `register`'s init, before the binding is queued, and `register` drops
+it itself if it finds the scope already stopped: teardown takes its list of
+wrappers under the mutex after storing `stopped`, so a wrapper queued later is
+not on it. Setting the wrapped registration after queueing, as `Wrap` once
+did, let teardown read it unset and skip the prune. `binding.wmu` is a leaf
+lock, taken under a state mutex in `freeze` and under none elsewhere. One window stays open, and it is the one
+the single mark had too: `Wrap` reads what it wraps and makes its mark later,
+so a descendant's `Wrap` racing an ancestor's `Override` can mark a link the
+`Override` has already checked and is about to replace or retire. Closing it
+would mean ordering two scopes' commits against each other, which no two state
+mutexes ever are, and it takes registrations racing each other across scopes,
+which is configuration racing itself rather than a program using a container. `validate.go`'s `live` follows `inner` chains so the wrapped
 registration gets its own turn though it is no longer in `index`; `declared`
 puts the inner edge first, bound rather than looked up, for both `Validate` and
 `Explain`.

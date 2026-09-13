@@ -18,6 +18,15 @@ below says plainly whether an upgrade can break a caller.
   No API or behaviour changes; the new `benchmarks/parallel_test.go` records
   the shapes.
 
+### Fixed
+
+- A `Wrap` in a child scope no longer keeps the parent's registration from
+  being overridden after the child has stopped. The parent's `Override()` was
+  rejected as "wrapped at" a site in a scope that no longer existed. The same
+  held after the child overrode its own wrapper. A wrapper in a live scope
+  still guards what it wraps, including when a sibling scope that wrapped the
+  same registration has stopped.
+
 ## [0.16.1] - 2026-09-12
 
 One fix. `go doc -all` against 0.16.0 is unchanged in `di`, `dihttp` and

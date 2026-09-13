@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/floatdrop/di"
@@ -276,5 +277,122 @@ func TestValidateChecksAWrappedChain(t *testing.T) {
 	s2.Wrap[wStore](newWCaching) // *wCache missing for the wrapper itself
 	if v := s2.Validate(); len(v.Errors) != 1 || !strings.Contains(v.Err().Error(), "wCache") {
 		t.Fatalf("the wrapper's missing dependency should be reported, got %v", v.Errors)
+	}
+}
+
+// A child's wrapper guards the parent registration it composes over only
+// while the child is alive: a stopped scope never serves the key again, so
+// the parent may replace the registration. The mark used to be written when
+// Wrap was called and never cleared, so the parent's Override was rejected
+// naming a wrapper in a scope that no longer existed. (review 6, 2)
+func TestWrapInAStoppedChildNoLongerPinsTheParent(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	child := root.Child("request")
+	child.Wrap[wStore](newWTracing)
+	if err := child.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	root.Wire[wStore](func() wStore { return &wPG{} }).Override()
+	if got := root.Get[wStore]().Kind(); got != "pg" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// The guard belongs to each wrapper, not to the registration: one child
+// stopping must not release a registration a live sibling still wraps. A
+// single mark cleared on stop would pass the test above and fail this one.
+// (review 6, 2)
+func TestWrapInALiveSiblingStillPinsTheParent(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	a := root.Child("a")
+	a.Wrap[wStore](newWTracing)
+	b := root.Child("b")
+	b.Wrap[wStore](newWTracing)
+	if err := b.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	root.Wire[wStore](func() wStore { return &wPG{} }).Override()
+	rejected(t, "it is wrapped at", func() { _, _ = root.Resolve[wStore]() })
+}
+
+// Wrap and Stop on one scope at once: whichever goes first, the stopped
+// scope's wrapper must not go on guarding the parent. Wrap used to set what it
+// wraps on the binding after queueing it, so teardown could read that unset,
+// skip the prune, and leave the mark for good; -race reports the write.
+// (review 6, 2)
+func TestWrapRacingStopLeavesNoMark(t *testing.T) {
+	for i := range 200 {
+		root := di.New()
+		root.Wire[wStore](newWPG)
+		child := root.Child("child")
+		var wg sync.WaitGroup
+		wg.Go(func() { child.Wrap[wStore](newWTracing) })
+		wg.Go(func() { _ = child.Stop(context.Background()) })
+		wg.Wait()
+		root.Wire[wStore](func() wStore { return &wPG{} }).Override()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("iteration %d: %v", i, r)
+				}
+			}()
+			if _, err := root.Resolve[wStore](); err != nil {
+				t.Fatalf("iteration %d: %v", i, err)
+			}
+		}()
+	}
+}
+
+// An Override that replaces a wrapper in its own scope replaces the chain, so
+// the replaced wrapper will never serve and stops guarding what it wrapped. A
+// child that wrapped its parent's registration and then overrode its own
+// wrapper used to leave the parent unable to override the registration.
+// (review 6, 2)
+func TestOverriddenWrapperNoLongerPinsTheParent(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	child := root.Child("child")
+	child.Wrap[wStore](newWTracing)
+	child.Wire[wStore](func() wStore { return &wPG{} }).Override()
+	if got := child.Get[wStore]().Kind(); got != "pg" {
+		t.Fatalf("child got %s", got)
+	}
+	root.Wire[wStore](func() wStore { return &wPG{} }).Override()
+	if got := root.Get[wStore]().Kind(); got != "pg" {
+		t.Fatalf("root got %s", got)
+	}
+}
+
+// A chain an Override replaces lets go of what it wraps only as far as
+// nothing live still composes over it. Here a grandchild wraps the first of
+// two wrappers in its parent, and the parent overrides the chain: the second
+// wrapper is dead, but the first still serves the grandchild, so the root's
+// registration stays guarded until the grandchild stops. Dropping every
+// link's mark as the Override committed let the root be overridden under a
+// live wrapper, which left the root with two live values for one key.
+// (review 6, 2)
+func TestOverriddenChainStillPinnedByADescendant(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	mid := root.Child("mid")
+	mid.Wrap[wStore](newWTracing)
+	leaf := mid.Child("leaf")
+	leaf.Wrap[wStore](newWTracing)
+	mid.Wrap[wStore](newWTracing)
+	mid.Wire[wStore](func() wStore { return &wPG{} }).Override()
+	if got := mid.Get[wStore]().Kind(); got != "pg" {
+		t.Fatalf("mid got %s", got)
+	}
+
+	root.Wire[wStore](func() wStore { return &wPG{} }).Override()
+	rejected(t, "it is wrapped at", func() { _, _ = root.Resolve[wStore]() })
+
+	if err := leaf.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := root.Get[wStore]().Kind(); got != "pg" {
+		t.Fatalf("root got %s once the last wrapper over the chain stopped", got)
 	}
 }
