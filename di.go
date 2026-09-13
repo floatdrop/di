@@ -1,21 +1,32 @@
 // Package di is a dependency-injection container for Go 1.27+ built on
 // generic methods.
 //
-// Services are registered on a [Scope] and resolved from it by type:
+// Services are registered on a [Scope] and resolved from it by type. A
+// constructor is a plain function, and its parameters are its dependencies:
 //
 //	app := di.New()
 //	app.Value(Config{DSN: "postgres://localhost/app"})
-//	app.Provide(func(s *di.Scope) *DB { return s.Must(sql.Open("postgres", s.Get[Config]().DSN)) }).
+//	app.Wire[*DB](NewDB). // func NewDB(Config) (*DB, error)
 //		OnStop(func(ctx context.Context, db *DB) error { return db.Close() })
-//	app.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} })
+//	app.Wire[*Repo](NewRepo) // func NewRepo(*DB) *Repo
 //
 //	repo, err := app.Resolve[*Repo]()
 //
 // Keys are Go types, so there is no naming scheme and no collisions between
-// packages. Constructors return T rather than (T, error): inside a
-// constructor, [Scope.Get] and [Scope.Must] abort on failure and the error
-// surfaces from the enclosing [Scope.Resolve], [Scope.Start] or [Scope.Run]
-// with the dependency path and the registration site.
+// packages. [Scope.Wire] reads a constructor's signature once, at
+// registration, so the graph is declared before anything is built:
+// [Scope.Validate] checks every declared dependency without running a
+// constructor, and a constructor that returns an error fails the enclosing
+// [Scope.Resolve], [Scope.Start] or [Scope.Run] with the dependency path and
+// the registration site.
+//
+// [Scope.Provide] takes a closure over the scope instead, for the rare
+// constructor that needs the scope itself, such as middleware that opens a
+// child scope per request. Inside it, [Scope.Get] and [Scope.Must] pull
+// dependencies and abort on failure, with the same error. What a closure gives
+// up is the declaration: its dependencies are known only once it runs, so
+// Validate and [Scope.Modules] list it as unchecked, and [Scope.Explain] can
+// show what it needed only after it has been built.
 //
 // # Lifetimes
 //
@@ -24,8 +35,8 @@
 // there so it can see that scope's values, which is how request-scoped
 // services are declared once in the root. [Binding.Group] and [Scope.All]
 // handle groups, and [Scope.Maybe] resolves optional dependencies. An
-// interface is served by a constructor that returns the implementation:
-// s.Provide(func(s *Scope) Reader { return s.Get[*Repo]() }).
+// interface is served by a constructor that returns the implementation, since
+// Wire accepts any result assignable to the key: s.Wire[Reader](NewRepo).
 //
 // # Scopes
 //
