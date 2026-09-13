@@ -309,9 +309,15 @@ registration nobody resolves; a child shadows its parent without the marker,
 since that is a different registry. Then `used` (the key has served),
 `resolving` (a resolution is in flight) and `served` (this scope handed the key
 down from an ancestor) each reject a replacement the marker cannot excuse. The
-"nothing to override" check is deliberately same-scope only: checking ancestors
-from inside `freeze` would mean taking a parent's mutex while holding the
-child's, and no two state mutexes are ever ordered against each other.
+three that belong to the registration -- `used`, `resolving` and the live
+`wrappers` -- are one embedded `guard` with one `against` check, which returns
+the end of the rejection sentence, so another registration-side guard has one
+place to go and one message shape to fit. `served` stays on the scope, because
+it is a fact about the scope that handed the key down, not about the
+registration. The "nothing to override" check is deliberately same-scope only:
+checking ancestors from inside `freeze` would mean taking a parent's mutex
+while holding the child's, and no two state mutexes are ever ordered against
+each other.
 
 **Two levels of registration semantics.** Lifetime and hooks belong to one
 registration, because they are typed on that value. Eagerness belongs to the

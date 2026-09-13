@@ -33,18 +33,6 @@ type binding struct {
 	inner   *binding
 	innerAt *state
 
-	// wrappers are the Wraps bound to this binding whose scopes are still
-	// alive, in registration order. An Override that replaced this binding
-	// would leave each of them composing over a registration that no longer
-	// serves the key, so freeze rejects one while any remain. Wrap adds
-	// itself; the scope that registered a wrapper removes it as it stops,
-	// since a stopped scope never serves the key again. It is a set rather
-	// than one mark because sibling scopes wrap one parent registration
-	// independently, and one of them stopping must not release the others.
-	// wmu is a leaf lock: nothing is taken while it is held.
-	wmu      sync.Mutex
-	wrappers []*binding
-
 	// retired is set on a link of a wrapper chain an Override replaced. It
 	// will never serve from its own scope again, but a live wrapper in a
 	// descendant may still compose over it, so it keeps its mark on what it
@@ -55,19 +43,7 @@ type binding struct {
 	onStop  func(context.Context, any) error
 	worker  func(context.Context, any) error
 
-	// used is set once this binding has served a value. From then on the
-	// registration cannot be overridden, since that would leave two live
-	// instances of one service. A failed resolution built nothing and leaves
-	// the key re-registerable; that is how a key whose constructor failed is
-	// recovered.
-	used atomic.Bool
-
-	// resolving counts the resolutions of this binding that have not served
-	// a value yet, the window used cannot cover: a constructor that registers
-	// over its own key and resolves the replacement would otherwise hand the
-	// nested call the new value and the outer call the old one. It is read
-	// only until the first value is served; after that used says the same.
-	resolving atomic.Int32
+	guard // what stops this registration being replaced; see guard
 
 	single *instance // the singleton; scoped bindings keep one instance per state
 }
@@ -239,18 +215,86 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 	return Binding[T]{s, b}
 }
 
-// addWrapper records a Wrap bound to b.
-func (b *binding) addWrapper(w *binding) {
-	b.wmu.Lock()
-	b.wrappers = append(b.wrappers, w)
-	b.wmu.Unlock()
+// guard is what stops a registration being replaced once replacing it would
+// leave two live values for its key, or a wrapper composing over a
+// registration nothing else can reach. freeze closes four ways of getting
+// there. Three belong to the registration and live here: a value it has
+// served, a resolution of it in flight, and a wrapper in a live scope over it.
+// The fourth, a scope that handed the key down from an ancestor, is
+// state.served, because it belongs to the scope that did the handing.
+//
+// The three use different idioms for one reason. resolve writes used and
+// resolving from whichever scope is resolving, without the owner's mutex,
+// which is what keeps a warm resolution off that mutex; so they are atomics.
+// wrappers is a list, so it has a leaf mutex of its own instead.
+type guard struct {
+	// used is set once this binding has served a value. From then on the
+	// registration cannot be overridden, since that would leave two live
+	// instances of one service. A failed resolution built nothing and leaves
+	// the key re-registerable; that is how a key whose constructor failed is
+	// recovered.
+	used atomic.Bool
+
+	// resolving counts the resolutions of this binding that have not served
+	// a value yet, the window used cannot cover: a constructor that registers
+	// over its own key and resolves the replacement would otherwise hand the
+	// nested call the new value and the outer call the old one. It is read
+	// only until the first value is served; after that used says the same.
+	resolving atomic.Int32
+
+	// wrappers are the Wraps bound to this binding whose scopes are still
+	// alive, in registration order. An Override that replaced this binding
+	// would leave each of them composing over a registration that no longer
+	// serves the key, so freeze rejects one while any remain. Wrap adds
+	// itself; the scope that registered a wrapper removes it as it stops,
+	// since a stopped scope never serves the key again. It is a set rather
+	// than one mark because sibling scopes wrap one parent registration
+	// independently, and one of them stopping must not release the others.
+	// wmu is a leaf lock: nothing is taken while it is held.
+	wmu      sync.Mutex
+	wrappers []*binding
 }
 
-// dropWrapper forgets a Wrap bound to b, once its scope has stopped.
-func (b *binding) dropWrapper(w *binding) {
-	b.wmu.Lock()
-	b.wrappers = slices.DeleteFunc(b.wrappers, func(x *binding) bool { return x == w })
-	b.wmu.Unlock()
+// against says why replacer may not replace or wrap the registration g guards,
+// or returns "" when nothing stops it. The reasons are checked in the order a
+// caller would want to hear them, and read as the end of a sentence: "cannot
+// be overridden at wire.go:9: it has already been resolved".
+func (g *guard) against(replacer *binding) string {
+	switch {
+	case g.used.Load():
+		// Replacing or wrapping a key that has served a value would leave
+		// two live instances of one service.
+		return "it has already been resolved"
+	case g.resolving.Load() > 0:
+		// The same defect from the other side: the resolution in flight
+		// would return the old value while the replacement served
+		// everything it goes on to build.
+		return "it is being resolved"
+	}
+	if replacer.inner == nil {
+		// An Override, not a Wrap: a wrapper composing over this
+		// registration would go on serving a value built from something
+		// nothing else can reach.
+		if w := g.wrapper(); w != nil {
+			return "it is wrapped at " + w.where()
+		}
+	}
+	return ""
+}
+
+// addWrapper records a Wrap bound to the guarded registration.
+func (g *guard) addWrapper(w *binding) {
+	g.wmu.Lock()
+	g.wrappers = append(g.wrappers, w)
+	g.wmu.Unlock()
+}
+
+// dropWrapper forgets a Wrap bound to the guarded registration, once the
+// wrapper can no longer serve: its scope stopped, or an Override replaced it.
+func (g *guard) dropWrapper(w *binding) {
+	g.wmu.Lock()
+	g.wrappers = slices.DeleteFunc(g.wrappers, func(x *binding) bool { return x == w })
+	g.wmu.Unlock()
 }
 
 // unwrap forgets w, a wrapper bound to b that can no longer serve, and lets b
@@ -270,14 +314,15 @@ func (b *binding) release() {
 	}
 }
 
-// wrapper returns the first live Wrap bound to b, or nil.
-func (b *binding) wrapper() *binding {
-	b.wmu.Lock()
-	defer b.wmu.Unlock()
-	if len(b.wrappers) == 0 {
+// wrapper returns the first live Wrap bound to the guarded registration, or
+// nil.
+func (g *guard) wrapper() *binding {
+	g.wmu.Lock()
+	defer g.wmu.Unlock()
+	if len(g.wrappers) == 0 {
 		return nil
 	}
-	return b.wrappers[0]
+	return g.wrappers[0]
 }
 
 var errorType = reflect.TypeFor[error]()
