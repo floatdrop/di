@@ -90,6 +90,7 @@ func (st *state) freeze() {
 	}
 
 	cur := st.reg.Load()
+	var replaced []*binding // chains an Override replaces, whose marks go on commit
 	index := maps.Clone(cur.index)
 	groups := maps.Clone(cur.groups)
 	all := slices.Clone(cur.all)
@@ -105,6 +106,10 @@ func (st *state) freeze() {
 			groups[b.key] = append(slices.Clone(groups[b.key]), b)
 		} else {
 			prev, ok := index[b.key]
+			var wrapper *binding
+			if ok && b.inner == nil {
+				wrapper = prev.wrapper()
+			}
 			act := "overridden"
 			if b.inner != nil {
 				act = "wrapped"
@@ -134,18 +139,21 @@ func (st *state) freeze() {
 				// served everything it goes on to build.
 				panic(fmt.Sprintf("di: %s (provided at %s) cannot be %s at %s: it is being resolved",
 					b.key, prev.where(), act, b.where()))
-			case ok && b.inner == nil && prev.wrappedBy.Load() != nil:
-				// A wrapper, here or in a descendant, composes over prev;
-				// replacing prev would leave it serving a value built from a
-				// registration nothing else can reach.
+			case wrapper != nil:
+				// A wrapper in a live scope, here or in a descendant,
+				// composes over prev; replacing prev would leave it serving a
+				// value built from a registration nothing else can reach.
 				panic(fmt.Sprintf("di: %s (provided at %s) cannot be overridden at %s: it is wrapped at %s",
-					b.key, prev.where(), b.where(), prev.wrappedBy.Load().where()))
+					b.key, prev.where(), b.where(), wrapper.where()))
 			}
 			if st.served[b.key] {
 				// This scope already handed the key down from an outer scope;
 				// shadowing it now would give the key two live values here.
 				panic(fmt.Sprintf("di: %s cannot be registered at %s: this scope has already resolved it from an outer scope",
 					b.key, b.where()))
+			}
+			if ok && b.inner == nil {
+				replaced = append(replaced, prev)
 			}
 			index[b.key] = b
 		}
@@ -154,6 +162,23 @@ func (st *state) freeze() {
 	eager := deriveEager(all, index)
 
 	st.reg.Store(&registry{index: index, groups: groups, all: all, eager: eager})
+	// The batch stands, so the chains its Overrides replaced will never
+	// serve from this scope: none of them has served, or the guard above
+	// would have refused. Every link registered here is retired, down to the
+	// first that wraps an ancestor's registration, whose own chain is intact.
+	// A retired link releases what it wraps only once nothing live wraps it:
+	// a descendant's wrapper over a middle link still composes over the rest,
+	// and that link lets go when the descendant stops. Not before the commit,
+	// since a rejected batch keeps every mark it made.
+	for _, prev := range replaced {
+		for r := prev; ; r = r.inner {
+			r.retired.Store(true)
+			if r.inner == nil || r.innerAt != st {
+				break
+			}
+		}
+		prev.release()
+	}
 	st.pending, st.frozen = nil, true
 	st.hasPending.Store(false)
 }

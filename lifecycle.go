@@ -701,7 +701,24 @@ func (s *Scope) teardown(ctx context.Context) error {
 	started := s.started
 	s.started = nil
 	s.stopped.Store(true)
+	var wrappers []*binding
+	for _, b := range s.reg.Load().all {
+		if b.inner != nil {
+			wrappers = append(wrappers, b)
+		}
+	}
+	for _, b := range s.pending {
+		if b.inner != nil {
+			wrappers = append(wrappers, b)
+		}
+	}
 	s.mu.Unlock()
+	// This scope serves nothing from here on, so its wrappers no longer hold
+	// what they wrap against an Override. Released outside the mutex: wmu is
+	// a leaf, and the binding may belong to an ancestor.
+	for _, w := range wrappers {
+		w.inner.unwrap(w)
+	}
 
 	for _, c := range children {
 		errs = append(errs, (&Scope{state: c}).Stop(ctx))

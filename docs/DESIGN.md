@@ -143,7 +143,7 @@ getting two:
 | `used` | replacing or wrapping a key that has served a value | callers already hold the old value |
 | `resolving` | replacing a key while a resolution of it is in flight | the nested build would get the new value, the caller the old |
 | `served` | registering a key this scope already handed down from an ancestor | the scope would have given out two values for one key |
-| `wrappedBy` | overriding a registration some wrapper composes over | the wrapper would serve a value built from a registration nothing else can reach |
+| `wrappers` | overriding a registration a wrapper in a live scope composes over | the wrapper would serve a value built from a registration nothing else can reach; a stopped scope's wrappers no longer count |
 
 Two things are deliberately not guarded. A child scope shadows its parent's
 key without `Override()`, because that is a different registry, not a
