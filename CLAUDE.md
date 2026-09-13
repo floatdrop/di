@@ -109,7 +109,8 @@ at eight cores is where to look if that changes.
 
 **A waiter blocks on one step, not on the scope.** Each step another goroutine
 can be responsible for finishing has a channel closed when it is done:
-`settledCh`, `startingCh`, `drainedCh`. One rule covers all three -- the first
+`settledCh`, `startingCh`, `drainedCh`. A scope's `sealCh` follows the same rule, for
+the seal that ends a drain. One rule covers all three -- the first
 goroutine that actually has to wait makes the channel (`waitOn`), and the owner
 of the step closes it only if it is there (`wake`). The phase says *which* step
 is outstanding, and phase and channel are read in one critical section, so a
@@ -251,7 +252,13 @@ last sweep began. Both cannot miss the other, so either the sweep goes round
 again and finds the work, or the announcer waits for the decision -- two atomic
 reads away, never a hook -- and learns the scope stopped: `publish` undoes the
 build as before, and `gateStart` undoes the claim, leaving the instance built
-and owing nothing. `claimNext` returns nil for a stopped scope, or Start's loop
+and owing nothing. Undoing the claim calls
+`refresh`, which sets `ready` on a built instance that never started, in a
+scope that may otherwise look running. That is safe for the same kind of
+reason the one-start guarantee is: `gateStart` undoes the claim only after
+`announce` has read `stopped` as set, so a reader that later sees `ready` sees
+`stopped` too, and both `resolve` and the warm path in `await` check it.
+`TestSealDecidesAClaimedStart` resolves after a refused claim to hold that. `claimNext` returns nil for a stopped scope, or Start's loop
 would find a refused instance again for ever.
 
 `drainGen` is per subtree rather than per container on purpose: a request
