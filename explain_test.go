@@ -221,10 +221,8 @@ func TestNoEdgeForATopLevelGet(t *testing.T) {
 	}
 }
 
-// A constructor may keep the Scope it was handed and resolve through it once
-// its own service is built. That resolution is a new path, so it is not
-// recorded as a dependency -- the same rule that stops it being called a
-// cycle.
+// A resolution through a Scope a constructor kept is a new path, so it is not
+// recorded as a dependency, by the same rule that stops it being a cycle.
 func TestNoEdgeThroughAScopeKeptPastItsConstructor(t *testing.T) {
 	s := di.New()
 	var kept *di.Scope
@@ -236,10 +234,9 @@ func TestNoEdgeThroughAScopeKeptPastItsConstructor(t *testing.T) {
 	wantExplain(t, s.Explain[*xA](), "*xA: singleton in root, built\n")
 }
 
-// A constructor may resolve from several goroutines at once, and they share
-// the Scope it was handed, so the edges land on one instance concurrently.
-// Run with -race; the order they arrive in is not fixed, so only the set is
-// checked.
+// A constructor resolving from several goroutines lands its edges on one
+// instance concurrently. Run with -race; the order is not fixed, so only the
+// set is checked.
 func TestEdgesFromGoroutinesInsideAConstructor(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *xB { return &xB{} })
@@ -320,10 +317,9 @@ func TestGraphOfAnEmptyScope(t *testing.T) {
 	}
 }
 
-// Graph reads and changes nothing, so an unresolvable configuration is not
-// its business. Explain has to look a key up, and a lookup commits the
-// pending registrations, so it reports the rejection the same way a
-// resolution would.
+// Graph reads and changes nothing, so a rejected configuration is not its
+// business. Explain looks a key up, which commits the pending registrations,
+// so it reports the rejection as a resolution would.
 func TestGraphDoesNotCommitRegistrationsButExplainDoes(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *xA { return &xA{} }).Scoped().Eager() // cannot be honoured

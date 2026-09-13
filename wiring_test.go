@@ -2,17 +2,7 @@ package di_test
 
 // Regressions in registration and lookup: groups, shadowing, the eager set,
 // and the rejections freeze is responsible for.
-//
-// One test per defect, named for the rule it pins. The tag at the end of a
-// comment says where the defect came from. (review 1, 3) is the third defect
-// of the first September 2026 review, checked against 12dba3c; review 2 was
-// checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
-// fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor. An untagged
-// test
-// comes from the first of those passes, or from the generators, which its own
-// comment says. Several fail by hanging rather than by reporting, which is why
-// each bounds its own wait instead of relying on the package timeout.
+// Tags are explained in fixtures_test.go.
 
 import (
 	"context"
@@ -96,8 +86,7 @@ func TestRegressionOverrideAfterResolveRejected(t *testing.T) {
 	s.Value(&DB{dsn: "b"}).Override()
 	mustPanic(t, "cannot be overridden", func() { s.Get[*DB]() })
 
-	// Overriding before the key is resolved stays legal: that is how a test
-	// substitutes a fake.
+	// Overriding before the key is resolved stays legal: the test seam.
 	ok := di.New()
 	ok.Value(&DB{dsn: "a"})
 	ok.Value(&DB{dsn: "b"}).Override()
@@ -126,8 +115,8 @@ func TestRegressionShadowedEagerNotBuilt(t *testing.T) {
 	}
 }
 
-// Overriding an Eager binding keeps the key eager: the replacement is
-// built at Start, which is what the test seam relies on.
+// Overriding an Eager binding keeps the key eager: the replacement is built
+// at Start.
 // (pass 3)
 func TestRegressionOverrideKeepsKeyEager(t *testing.T) {
 	var log []string
@@ -170,10 +159,8 @@ func TestRegressionEagerCannotTransferToPerScopeLifetime(t *testing.T) {
 	}
 }
 
-// A rejected registration must be rejected every time. freeze used to
-// clear pending before deriving the eager set, so a panic there left the
-// batch consumed and a retried Start silently succeeded with the invalid
-// configuration dropped.
+// A rejected registration is rejected every time: a retried Start must not
+// succeed with the invalid configuration dropped.
 // (pass 6)
 func TestRegressionRejectionIsRepeatable(t *testing.T) {
 	s := di.New()
@@ -193,8 +180,8 @@ func TestRegressionRejectionIsRepeatable(t *testing.T) {
 	}
 }
 
-// A rejected batch must leave the scope as it was, so the rejection is
-// the same on every subsequent operation rather than a half-applied registry.
+// A rejected batch leaves the scope as it was, so every later operation is
+// rejected identically.
 // (pass 6)
 func TestRegressionRejectedBatchIsNotHalfApplied(t *testing.T) {
 	s := di.New()
@@ -245,10 +232,9 @@ func TestRegressionFailedResolveLeavesKeyReRegisterable(t *testing.T) {
 	}
 }
 
-// Found by the model-based test: a scope that has already served a key
-// from an outer scope must not then shadow it, which would give one key two
-// live values within that scope. Shadowing before resolving stays legal,
-// since that is how child scopes and tests substitute dependencies.
+// A scope that has served a key from an outer scope must not then shadow it:
+// the key would have two live values there. Shadowing before resolving stays
+// legal. Found by the model-based test.
 func TestRegressionCannotShadowAKeyAlreadyServed(t *testing.T) {
 	root := di.New()
 	root.Provide(func(*di.Scope) *DB { return &DB{dsn: "root"} })
@@ -289,8 +275,7 @@ func TestReviewIntermediateScopeShadow(t *testing.T) {
 	gc.Get[*vT]()
 }
 
-// A nil interface is a service like any other. Every hand-back path has
-// to survive it, not just the one that stores it.
+// A nil interface is a service like any other, on every hand-back path.
 // (review 1, 7)
 func TestReviewNilInterfaceValue(t *testing.T) {
 	s := di.New()
@@ -371,9 +356,9 @@ func TestReviewMiddlewareInjectedRequestRouting(t *testing.T) {
 	}
 }
 
-// A pre-built member joins a group like a constructed one, which Add could
-// not express, and the plain registration of the same type is neither
-// shadowed by the members nor counted among them.
+// A pre-built member joins a group like a constructed one, and the plain
+// registration of the same type is neither shadowed by the members nor
+// counted among them.
 func TestGroupAcceptsValues(t *testing.T) {
 	s := di.New()
 	s.Value(Handler{"users"}).Group()
@@ -388,11 +373,9 @@ func TestGroupAcceptsValues(t *testing.T) {
 	}
 }
 
-// A key cannot be overridden while a resolution of it is in flight. used is
-// only set once a value has been served, so a constructor could register over
-// its own key and resolve the replacement: the nested call was served the new
-// value and the outer call returned the old one, which is two live values for
-// one key from a single goroutine.
+// A key cannot be overridden while a resolution of it is in flight: a
+// constructor that registers over its own key and resolves the replacement
+// would be served the new value in the nested call and return the old one.
 // (review 4, 3)
 func TestReview4CannotOverrideAKeyBeingResolved(t *testing.T) {
 	s := di.New()
@@ -410,8 +393,7 @@ func TestReview4CannotOverrideAKeyBeingResolved(t *testing.T) {
 		t.Fatalf("want the rejection to say the key is being resolved, got %v", err)
 	}
 
-	// The key is free again once that resolution has failed, which is what
-	// keeps a key whose constructor failed recoverable.
+	// The key is free again once that resolution has failed.
 	s.Provide(func(*di.Scope) *DB { return &DB{dsn: "recovered"} }).Override()
 	got, err := s.Resolve[*DB]()
 	if err != nil {
@@ -422,11 +404,9 @@ func TestReview4CannotOverrideAKeyBeingResolved(t *testing.T) {
 	}
 }
 
-// Every registration records the line that made it, and every message and
-// rendering names that line. callsite finds it by counting frames, so each
-// registration method is called directly here and its site compared with that
-// exact line: a count one frame short names a line in this package, and one
-// frame long names the testing package, and both fail.
+// callsite finds a registration's site by counting frames, so each
+// registration method is called directly here and its site compared with the
+// exact line: a count one frame short or long fails.
 func TestRegistrationSiteNamesTheCaller(t *testing.T) {
 	// at returns the line it is called from, so at(s.Provide(...)) is the
 	// line of that Provide call.

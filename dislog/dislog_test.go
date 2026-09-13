@@ -182,11 +182,10 @@ func TestNewSeesChildScopes(t *testing.T) {
 	}
 }
 
-// short is what keeps a service name short. It composes from the pair the
-// event carries rather than parsing one of them, so the cases that used to
-// need guessing fall out: an unnamed type reports no package, and a generic
-// instantiation keeps its type arguments because a prefix is trimmed rather
-// than everything after a dot.
+// short composes the name from the pair the event carries rather than parsing
+// one of them: an unnamed type reports no package, and a generic instantiation
+// keeps its type arguments because a prefix is trimmed rather than everything
+// after a dot.
 func TestShort(t *testing.T) {
 	for _, tc := range []struct {
 		service, pkg, want string

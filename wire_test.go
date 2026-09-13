@@ -169,11 +169,10 @@ func TestWireServesAnInterfaceFromAConcreteConstructor(t *testing.T) {
 
 type wBytes []byte
 
-// A result that is assignable to the key but not identical to it, a chan for
-// a receive-only key or a []byte for a named slice, passed registration and
-// then failed the assertion in Get, because the stored value kept the
-// constructor's type. It is stored as the key's type now, for Wire and for
-// Wrap, and it can then be handed to a parameter of that type. (issue 35)
+// A result assignable to the key but not identical to it, a chan for a
+// receive-only key or a []byte for a named slice, is stored as the key's
+// type, for Wire and for Wrap, so Get's assertion and a parameter of that
+// type both accept it. (issue 35)
 func TestWireStoresAnAssignableResultAsTheKey(t *testing.T) {
 	s := di.New()
 	s.Wire[<-chan int](func() chan int { return make(chan int, 1) })

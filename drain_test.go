@@ -2,17 +2,7 @@ package di_test
 
 // Regressions in the drain phase: the one teardown phase during which a scope
 // still resolves, and the only one two Stop calls can be inside at once.
-//
-// One test per defect, named for the rule it pins. The tag at the end of a
-// comment says where the defect came from. (review 1, 3) is the third defect
-// of the first September 2026 review, checked against 12dba3c; review 2 was
-// checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
-// fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor. An untagged
-// test
-// comes from the first of those passes, or from the generators, which its own
-// comment says. Several fail by hanging rather than by reporting, which is why
-// each bounds its own wait instead of relying on the package timeout.
+// Tags are explained in fixtures_test.go.
 
 import (
 	"context"
@@ -147,8 +137,7 @@ func TestReviewDrainFailureIsReported(t *testing.T) {
 }
 
 // A Stop that reaches a scope whose drain another Stop is running must wait
-// for that drain, not see the flag, skip it and start releasing underneath the
-// hook still using the value.
+// for it rather than release underneath the hook still using the value.
 // (review 2, 1)
 func TestReview2ConcurrentStopWaitsForAncestorDrain(t *testing.T) {
 	inDrain := make(chan struct{})
@@ -252,8 +241,8 @@ func TestReview2AncestorStopWaitsForIndependentChildDrain(t *testing.T) {
 	}
 }
 
-// Draining is the phase during which the scope still resolves, so a service
-// first built by a drain hook has to be drained too, not stopped undrained.
+// The scope still resolves while draining, so a service first built by a
+// drain hook is drained too.
 // (review 2, 3)
 func TestReview2LateBuildDuringDrainIsDrained(t *testing.T) {
 	var mu sync.Mutex
@@ -292,8 +281,8 @@ func TestReview2LateBuildDuringDrainIsDrained(t *testing.T) {
 	}
 }
 
-// A child scope opened by a drain hook -- an in-flight request taking its
-// request scope -- is drained before the parent goes stopped, so its own hooks
+// A child scope opened by a drain hook, as an in-flight request opens its
+// request scope, is drained before the parent goes stopped, so its own hooks
 // can still resolve.
 // (review 2, 4)
 func TestReview2LateChildDrainCanResolve(t *testing.T) {
@@ -328,11 +317,9 @@ func TestReview2LateChildDrainCanResolve(t *testing.T) {
 	}
 }
 
-// Not from the review: found by the drain oracle added to the concurrent
-// driver afterwards. A drain hook may build into a scope the sweep has
-// already visited, and that instance owes a drain like any other. Sweeping
-// each descendant once was enough for a late build in the draining scope and
-// not for one a level along.
+// A drain hook may build into a scope the sweep has already visited, and
+// that instance owes a drain like any other. Found by the concurrent driver's
+// drain oracle rather than the review.
 // (review 2, 10)
 func TestReview2LateBuildIntoSweptChildIsDrained(t *testing.T) {
 	var mu sync.Mutex
@@ -370,12 +357,9 @@ func TestReview2LateBuildIntoSweptChildIsDrained(t *testing.T) {
 	}
 }
 
-// The companion to 10, and a hazard 10's fix creates rather than one that
-// was there before: once a sweep revisits a scope whose own phase has ended,
-// it can be draining a late instance there exactly as that scope's Stop
-// reaches it. The scope-wide phase cannot keep those apart -- it has already
-// ended, and it has to, or the drain in 4 would deadlock -- so Stop waits for
-// the hook per instance.
+// A sweep revisiting a scope whose own phase has ended can be draining a late
+// instance there as that scope's Stop reaches it. The scope-wide phase has
+// ended, and must have, so Stop waits for the hook per instance.
 // (review 2, 11)
 func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
 	bDraining := make(chan struct{})
@@ -405,8 +389,7 @@ func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
 
 	root.Value(&oRoot{}).Eager().
 		OnDrain(func(context.Context, *oRoot) error {
-			// kid was swept already: it had nothing in it. This puts an
-			// instance there afterwards.
+			// kid was swept already, empty; this puts an instance there.
 			if _, err := kid.Resolve[*oLate](); err != nil {
 				t.Errorf("resolve into the child during drain: %v", err)
 			}
@@ -447,10 +430,8 @@ func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
 	}
 }
 
-// A drain hook may stop a scope that is neither its own nor an ancestor of
-// it. The sweep used to claim every descendant's drain phase before running a
-// single hook, so a hook that stopped a sibling waited for a phase only its
-// own blocked walk could end.
+// A drain hook may stop a scope that is neither its own nor an ancestor: the
+// sweep must not hold a sibling's phase while the hook runs.
 // (review 3, 1)
 func TestReview3DrainHookCanStopASiblingScope(t *testing.T) {
 	root := di.New()
@@ -484,8 +465,7 @@ func TestReview3DrainHookCanStopASiblingScope(t *testing.T) {
 
 // A Stop whose context runs out while another Stop's drain hook holds the
 // instance still owes the release: it took the instance off the scope's list,
-// so nothing else will reach it. The release is finished off the hook's own
-// return, as it is for a Go hook that outlasts the same deadline.
+// so nothing else will reach it.
 // (review 3, 2)
 func TestReview3LostDrainWaitStillReleases(t *testing.T) {
 	root := di.New()
@@ -499,9 +479,8 @@ func TestReview3LostDrainWaitStillReleases(t *testing.T) {
 		OnDrain(func(context.Context, *r3Late) error { close(inDrain); <-release; return nil }).
 		OnStop(func(context.Context, *r3Late) error { close(stopped); return nil })
 
-	// Built into the child by a hook of the root's own drain, so it appears
-	// after the child's drain phase has already ended and is drained by a
-	// later sweep of the run above it.
+	// Built into the child by the root's drain hook, after the child's own
+	// phase has ended.
 	root.Value(&r3Drainer{}).
 		OnDrain(func(context.Context, *r3Drainer) error {
 			_, err := child.Resolve[*r3Late]()
@@ -538,11 +517,8 @@ func TestReview3LostDrainWaitStillReleases(t *testing.T) {
 }
 
 // A Stop reports the failure of a drain hook of its own scope even when an
-// ancestor's Stop owned the phase and ran the hook. The waiter used to drop
-// the owner's error on the grounds that it reached the caller through the
-// Stop that owned the drain -- true when that is this Stop, and false for a
-// request scope ending while the application shuts down, which is where the
-// failure needed reporting.
+// ancestor's Stop owned the phase and ran the hook: a request scope ending
+// while the application shuts down is where that matters.
 // (review 4, 2)
 func TestReview4ChildStopReportsItsOwnDrainFailure(t *testing.T) {
 	drainFailed := errors.New("drain failed")
@@ -573,17 +549,11 @@ func TestReview4ChildStopReportsItsOwnDrainFailure(t *testing.T) {
 		if err := <-childErr; !errors.Is(err, drainFailed) {
 			t.Fatalf("child.Stop hid its own drain failure: %v", err)
 		}
-		// Whether the root reports it as well is not fixed by this shape,
-		// and asserting that it does made this test fail about one run in
-		// eight. Settling the hook's failure into the child's phase releases
-		// the child's own Stop, which then runs to completion and detaches
-		// the child; if that happens before the root reads its child list,
-		// the root has nobody to inherit from. Both orders are correct: a
-		// teardown's failures are owed to the caller that owned it and to
-		// whoever waits for it, and the caller above waits only when it is
-		// the one stopping the child. What the root must never do is report
-		// something else, and the test below pins the case where the root
-		// does own that teardown.
+		// Whether the root reports it too depends on whether the child's
+		// Stop, released by the settled failure, detaches the child before
+		// the root reads its child list. Both orders are correct, and
+		// asserting the root hears it failed about one run in eight. The
+		// test below pins the case where the root owns the teardown.
 		if err := <-rootErr; err != nil && !errors.Is(err, drainFailed) {
 			t.Fatalf("root.Stop: %v", err)
 		}
@@ -591,10 +561,8 @@ func TestReview4ChildStopReportsItsOwnDrainFailure(t *testing.T) {
 }
 
 // A Stop that owns a child scope's teardown reports the failure of a drain
-// hook that ran in that child, with no concurrent Stop to hand it to. This is
-// the half of the rule above that does not depend on an interleaving: the
-// root drains the child's instance, settles the failure into the child's
-// phase, and then stops the child itself and inherits it from there.
+// hook that ran in that child. This is the half of the rule above that does
+// not depend on an interleaving.
 // (review 5, 1)
 func TestReview5RootStopReportsAChildsDrainFailure(t *testing.T) {
 	drainFailed := errors.New("drain failed")
@@ -611,12 +579,10 @@ func TestReview5RootStopReportsAChildsDrainFailure(t *testing.T) {
 	}
 }
 
-// A service that is built and waiting for Start to claim its start step owes
-// a drain as soon as it starts. The sweep used to decide that it owed nothing,
-// since it had not started, and mark the decision final: when Start's loop
-// then started it, Stop released it with OnStop and no OnDrain. Here Start's
-// loop is held on an earlier OnStart while a concurrent Stop drains, and a
-// drain hook further down the sweep lets it go.
+// A service built and waiting for Start to claim its start step owes a drain
+// as soon as it starts, and the sweep must not decide otherwise for good.
+// Start's loop is held on an earlier OnStart while a concurrent Stop drains,
+// and a drain hook further down the sweep lets it go.
 // (review 6)
 func TestReview6ServiceStartedDuringDrainIsDrained(t *testing.T) {
 	releaseA := make(chan struct{})

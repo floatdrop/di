@@ -109,11 +109,8 @@ func TestWorkerHookStartsForLateBuiltService(t *testing.T) {
 
 // A worker may fail on its own, keep flushing until it is told to stop, and
 // only then report what went wrong. That error owes nothing to the
-// cancellation it arrived after, so Run must still learn the cause -- which
-// no reading of the run context can establish, since by then it is cancelled
-// either way. The flaky sibling of this test,
-// TestReviewDetachedChildWorkerFailureReachesRun, only ever failed because
-// the answer was read from the context twice.
+// cancellation it arrived after, so Run must still learn the cause; the run
+// context cannot tell, since by then it is cancelled either way.
 func TestWorkerHookFailureDecidedBeforeCancelReachesRun(t *testing.T) {
 	boom := errors.New("queue disconnected")
 	failed := make(chan struct{})
@@ -146,9 +143,7 @@ func TestWorkerHookFailureDecidedBeforeCancelReachesRun(t *testing.T) {
 }
 
 // A worker cancelled by an orderly Stop, reporting only that, is not a
-// failure: nothing calls Shutdown and Stop returns cleanly. This is the case
-// the surviving guard is for, and the one an unconditional Shutdown would get
-// wrong.
+// failure: nothing calls Shutdown and Stop returns cleanly.
 func TestWorkerHookCancellationIsNotAFailure(t *testing.T) {
 	root := di.New()
 	root.Value(&Worker{}).Eager().
