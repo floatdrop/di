@@ -566,8 +566,13 @@ func reg[T any](m *cmachine, s *di.Scope, o op, stop func(context.Context, any) 
 	case 4:
 		// The one shape with an OnStart, so its stop step is owed only when
 		// the start step succeeded. Its Go hook is what puts a worker under
-		// a Stop that has to cancel it and wait.
-		b = s.Provide(build).
+		// a Stop that has to cancel it and wait. It drains as well: an
+		// instance that is built and waiting for its start step owes a drain
+		// only once it starts, and without a shape that both starts and
+		// drains, no lane could put one under a sweep. A drain hook here
+		// that builds into a child reaches the start claim racing the seal.
+		b = s.Provide(func(sc *di.Scope) T { return owe(sc, build(sc)) }).
+			OnDrain(drainHook).
 			OnStart(func(_ context.Context, v T) error {
 				// The one shape whose release is owed only once the start
 				// step has succeeded, so the hook itself is what tells C9.

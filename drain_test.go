@@ -610,3 +610,63 @@ func TestReview5RootStopReportsAChildsDrainFailure(t *testing.T) {
 		t.Fatalf("root.Stop: want the child's drain failure, got %v", err)
 	}
 }
+
+// A service that is built and waiting for Start to claim its start step owes
+// a drain as soon as it starts. The sweep used to decide that it owed nothing,
+// since it had not started, and mark the decision final: when Start's loop
+// then started it, Stop released it with OnStop and no OnDrain. Here Start's
+// loop is held on an earlier OnStart while a concurrent Stop drains, and a
+// drain hook further down the sweep lets it go.
+// (review 6)
+func TestReview6ServiceStartedDuringDrainIsDrained(t *testing.T) {
+	releaseA := make(chan struct{})
+	aEntered := make(chan struct{})
+	bStarted := make(chan struct{})
+	var bDrained, bStopped atomic.Int32
+
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB { return &DB{} }).Eager().
+		OnDrain(func(context.Context, *DB) error {
+			close(releaseA)
+			select {
+			case <-bStarted:
+			case <-time.After(5 * time.Second):
+				return errors.New("the waiting service never started")
+			}
+			return nil
+		})
+	s.Provide(func(*di.Scope) *Repo { return &Repo{} }).Eager().
+		OnStart(func(context.Context, *Repo) error { close(aEntered); <-releaseA; return nil })
+	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).Eager().
+		OnStart(func(context.Context, *Worker) error { close(bStarted); return nil }).
+		OnDrain(func(context.Context, *Worker) error { bDrained.Add(1); return nil }).
+		OnStop(func(context.Context, *Worker) error {
+			if bDrained.Load() == 0 {
+				return errors.New("OnStop ran before OnDrain")
+			}
+			bStopped.Add(1)
+			return nil
+		})
+
+	startErr := make(chan error, 1)
+	go func() { startErr <- s.Start(context.Background()) }()
+	select {
+	case <-aEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start never reached the blocking OnStart")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-startErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start never returned")
+	}
+	if bDrained.Load() != 1 || bStopped.Load() != 1 {
+		t.Fatalf("drained=%d stopped=%d, want 1 and 1", bDrained.Load(), bStopped.Load())
+	}
+}

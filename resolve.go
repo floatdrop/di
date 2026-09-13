@@ -431,7 +431,7 @@ func (in *instance) publish(owner *state) bool {
 		owner.started = append(owner.started, in)
 	}
 	owner.mu.Unlock()
-	if !stopped {
+	if !stopped && !owner.announce() {
 		return true
 	}
 	err := errors.Join(fmt.Errorf("di: %s: %w", in.b.key, ErrStopped), in.stopIfNeeded(owner.stopContext(), owner))
@@ -448,7 +448,7 @@ func (in *instance) publish(owner *state) bool {
 // startClaimed records its failure on the instance, so a resolution that
 // waited for the step reports it too.
 func (in *instance) startIfRunning(owner *state) {
-	if sctx, running := owner.runContext(); running && in.claim(owner) {
+	if sctx, running := owner.runContext(); running && in.claim(owner) && in.gateStart(owner) {
 		_ = in.startClaimed(sctx, owner)
 	}
 	stopped := owner.isStopped()

@@ -57,6 +57,14 @@ type state struct {
 	// running its own or skipping past it.
 	drainOnce once
 
+	// drainGen counts what could create drain work in this scope's subtree:
+	// a build published into it, a start step claimed in it. sealed and
+	// sealCh are how a teardown ends the drain phase against those without a
+	// lock the two sides share; see seal and announce.
+	drainGen atomic.Uint64
+	sealed   atomic.Bool
+	sealCh   chan struct{} // guarded by mu; closed when the seal is decided
+
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{}
 	shutdownErr  error

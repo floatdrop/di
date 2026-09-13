@@ -26,6 +26,16 @@ below says plainly whether an upgrade can break a caller.
   held after the child overrode its own wrapper. A wrapper in a live scope
   still guards what it wraps, including when a sibling scope that wrapped the
   same registration has stopped.
+- A service that was built and waiting for its start step when a drain swept
+  past it now gets its `OnDrain` once it starts. The sweep decided it owed
+  nothing, since it had not started, and made that final, so a `Stop` issued
+  while `Start` was still starting earlier services released it with `OnStop`
+  and no `OnDrain`. The drain phase also no longer misses a service built
+  between its last sweep and the scope being marked stopped: the phase ends
+  only when nothing in the scope's subtree has been built or started since
+  that sweep began. So a `Stop` goes round again while anything below
+  it is still being built or started, and under work that never quiets it
+  returns when its context expires.
 
 ## [0.16.1] - 2026-09-12
 

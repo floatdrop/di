@@ -227,13 +227,39 @@ running above it exactly as its own `Stop` arrives. `drainIfNeeded` skips an
 instance whose scope is already stopped, because winding something down for
 work it can no longer take on is the opposite of what the hook is for.
 
-Three windows stay open, and each is cheaper to accept than to close: an
-instance published between the last sweep and `stopped.Store(true)` is not
-drained, and closing that would mean holding the state mutex across user hooks;
-the same for one built into a scope whose phase another `Stop` already ended;
-and a hook running on such a late instance can find its scope stopped mid-hook.
-That last one is why the concurrent driver exercises resolution inside drain
-hooks but does not assert that it succeeds.
+**The end of the drain phase is sealed, not guessed.** Two things can create
+drain work after a sweep has decided about an instance: a build published into
+the subtree, and a start step claimed there. The second is the one that bit: an
+instance built and waiting for its start step is `phaseBuilt` and `paired`, so
+it owes nothing *yet*, and the sweep used to mark that `drained` for good --
+Start's loop then started it and `Stop` released it with `OnStop` and no
+`OnDrain` (`TestReview6ServiceStartedDuringDrainIsDrained`). Now such an
+instance is left undecided, and the phase ends with a Dekker pair rather than a
+lock the two sides share. `announce` adds to `drainGen` on the scope and every
+ancestor and then reads `sealed` up the chain; `seal` stores `sealed` and then
+reads its own `drainGen`, storing `stopped` only if it did not move since the
+last sweep began. Both cannot miss the other, so either the sweep goes round
+again and finds the work, or the announcer waits for the decision -- two atomic
+reads away, never a hook -- and learns the scope stopped: `publish` undoes the
+build as before, and `gateStart` undoes the claim, leaving the instance built
+and owing nothing. `claimNext` returns nil for a stopped scope, or Start's loop
+would find a refused instance again for ever.
+
+`drainGen` is per subtree rather than per container on purpose: a request
+scope's `Stop` must not re-sweep because an unrelated request built something. The
+price is on the other side: a `Stop` goes round again for as long as something
+below it keeps building or starting, so a subtree that never quiets holds the
+phase open until `ctx` expires. That is the drain doing its job -- a server's
+`OnDrain` is what stops new work arriving -- but a `Stop` with no deadline over
+a subtree that nothing drains quiet does not return.
+Whoever owns the stop phase seals, whether or not it ran the sweep, since an
+ancestor's run may have settled this scope's drain phase and moved on.
+
+Two windows stay open, and each is cheaper to accept than to close: an instance
+built into a scope whose drain phase another `Stop` already ended is not
+drained by that `Stop`; and a hook running on such a late instance can find its
+scope stopped mid-hook. That last one is why the concurrent driver exercises
+resolution inside drain hooks but does not assert that it succeeds.
 
 **Who hears a drain failure is decided by who owns the teardown, not by who
 ran the hook.** A sweep settles a descendant's failures into that descendant's
