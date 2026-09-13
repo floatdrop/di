@@ -272,7 +272,7 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 func (in *instance) claim(owner *state) bool {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
-	if in.ph != phaseBuilt {
+	if in.ph != phaseBuilt || owner.isStopped() {
 		return false
 	}
 	in.ph = phaseStarting
@@ -408,6 +408,16 @@ func (in *instance) drainIfNeeded(ctx context.Context, owner *state) (bool, erro
 			case <-ctx.Done():
 				return false, fmt.Errorf("di: draining %s: OnStart did not return: %w", b.key, ctx.Err())
 			}
+		}
+		if !owner.isStopped() && in.ph == phaseBuilt && paired {
+			// Built, and owing a start step before it owes anything else.
+			// Whether it will ever start is not decided: Start's loop or its
+			// own build may still claim it. So it is left undecided rather
+			// than marked drained. A claim announces itself, which sends the
+			// sweep round again to find it starting; a seal that nothing
+			// announced to means it never will, and then it owes nothing.
+			owner.mu.Unlock()
+			return false, nil
 		}
 		if owner.isStopped() || !in.owes(paired) {
 			// Not owed, or the scope's own Stop has moved past draining and a
@@ -572,6 +582,9 @@ func (s *Scope) start(ctx context.Context, rollbackCtx func() (context.Context, 
 			}
 			return nil
 		}
+		if !in.gateStart(owner) {
+			continue // the scope sealed and stopped first; claimNext now says so
+		}
 		if err := in.startClaimed(ctx, owner); err != nil {
 			err = fmt.Errorf("di: starting %s: %w", in.b.key, err)
 			return errors.Join(err, s.rollback(rollbackCtx))
@@ -606,6 +619,12 @@ func (s *Scope) buildEager(eager []*binding) (err error) {
 // in this scope or a descendant, in build order.
 func (st *state) claimNext() (*instance, *state) {
 	st.mu.Lock()
+	if st.isStopped() {
+		// A claim gateStart refused leaves its instance built; without this
+		// the loop in start would find it again for ever.
+		st.mu.Unlock()
+		return nil, nil
+	}
 	for _, in := range st.started {
 		if in.ph == phaseBuilt {
 			in.ph = phaseStarting
@@ -699,8 +718,7 @@ func (s *Scope) teardown(ctx context.Context) error {
 	s.mu.Lock()
 	children := slices.Clone(s.children)
 	started := s.started
-	s.started = nil
-	s.stopped.Store(true)
+	s.started = nil // stopped was stored by drain's seal, before this snapshot
 	var wrappers []*binding
 	for _, b := range s.reg.Load().all {
 		if b.inner != nil {
@@ -742,21 +760,117 @@ func (s *Scope) teardown(ctx context.Context) error {
 // are stopped at once, the second Stop would walk past a drain still in
 // flight and start releasing what its hooks are using.
 func (s *Scope) drain(ctx context.Context) error {
-	if !s.drainOnce.claim(s.state, nil) {
+	g0 := s.drainGen.Load()
+	var r *drainRun
+	newRun := func() *drainRun {
+		root := &drainScope{st: s.state, ours: true}
+		return &drainRun{root: root, seen: map[*state]*drainScope{s.state: root}}
+	}
+	claimed := s.drainOnce.claim(s.state, nil)
+	var err error
+	if claimed {
+		r = newRun()
+		err = r.sweepAll(ctx)
+	} else {
 		// The owner settles the phase with what this scope's own hooks
 		// reported, and a Stop reports that whether it ran the hooks or
 		// waited for someone else to.
-		finished, err := s.drainOnce.wait(s.state, ctx)
+		finished, werr := s.drainOnce.wait(s.state, ctx)
 		if !finished {
-			return fmt.Errorf("di: waiting for scope %s to drain: %w", s.name, ctx.Err())
+			werr = fmt.Errorf("di: waiting for scope %s to drain: %w", s.name, ctx.Err())
 		}
-		return err
+		err = werr
 	}
-	root := &drainScope{st: s.state, ours: true}
-	r := drainRun{root: root, seen: map[*state]*drainScope{s.state: root}}
-	err := r.sweepAll(ctx)
-	s.drainOnce.settle(s.state, err) // this scope's phase is the last to end
+	// Whoever ran the sweep, this Stop owns marking the scope stopped, and
+	// that is sealed against anything announced since the sweep began: a
+	// build published, a start step claimed. Either the seal sees it and
+	// the sweep goes round again, or it sees the seal and waits for the
+	// decision.
+	for !s.seal(ctx, g0) {
+		g0 = s.drainGen.Load()
+		if r == nil {
+			r = newRun()
+		}
+		err = errors.Join(err, r.sweepAll(ctx))
+	}
+	if claimed {
+		s.drainOnce.settle(s.state, err) // this scope's phase is the last to end
+	}
 	return err
+}
+
+// seal ends the drain phase for good, marking the scope stopped, unless
+// something announced drain work in the subtree since g0; then it reports
+// false and the caller sweeps again. An expired ctx seals regardless, as a
+// sweep bounded by it would have ended anyway.
+//
+// It is one half of a Dekker pair with announce, and the order of each half
+// is the whole argument. seal stores sealed and then reads drainGen; announce
+// adds to drainGen and then reads sealed. Both cannot miss the other: if
+// seal read drainGen before announce added to it, then announce read sealed
+// after seal stored it. So either the sweep goes round again and finds the
+// work, or the announcer waits for this decision and learns the scope has
+// stopped. No lock is shared, so no two state mutexes are ordered, and the
+// decision between the two stores is two atomic reads: nothing waits on a
+// hook while a scope is sealed.
+func (st *state) seal(ctx context.Context, g0 uint64) bool {
+	ch := make(chan struct{})
+	st.mu.Lock()
+	st.sealCh = ch
+	st.sealed.Store(true)
+	st.mu.Unlock()
+
+	ok := st.drainGen.Load() == g0 || ctx.Err() != nil
+	if ok {
+		st.stopped.Store(true)
+	}
+
+	st.mu.Lock()
+	st.sealed.Store(false)
+	st.sealCh = nil
+	st.mu.Unlock()
+	close(ch)
+	return ok
+}
+
+// announce records drain work in st's subtree -- an instance published into
+// st, or a start step claimed there -- and reports whether a teardown has
+// sealed an enclosing scope and stopped it, in which case the work must be
+// undone rather than drained. Called with no state mutex held, after the
+// work is visible to a sweep.
+func (st *state) announce() (stopped bool) {
+	for a := st; a != nil; a = a.parent {
+		a.drainGen.Add(1)
+	}
+	for a := st; a != nil; a = a.parent {
+		if !a.sealed.Load() {
+			continue
+		}
+		a.mu.Lock()
+		ch := a.sealCh
+		a.mu.Unlock()
+		if ch != nil {
+			<-ch // a decision two atomic reads away
+		}
+	}
+	return st.isStopped()
+}
+
+// gateStart announces a start step just claimed, and undoes the claim if an
+// enclosing scope sealed and stopped first: the instance stays built, owes
+// nothing, and is never started. A waiter on the start step is released to
+// find it so.
+func (in *instance) gateStart(owner *state) bool {
+	if !owner.announce() {
+		return true
+	}
+	owner.mu.Lock()
+	in.ph = phaseBuilt
+	in.refresh()
+	wake(in.startingCh)
+	in.startingCh = nil
+	owner.mu.Unlock()
+	return false
 }
 
 // drainRun is the bookkeeping of one drain phase: the scopes it has reached,
