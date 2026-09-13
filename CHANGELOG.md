@@ -7,8 +7,11 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
-`go doc -all` against 0.16.1 is unchanged in `di`, `dihttp` and `dislog`
-apart from the package doc's own text; an upgrade cannot break a caller.
+## [0.16.2] - 2026-09-13
+
+A faster warm path and four lifecycle fixes. `go doc -all` against 0.16.1 is
+unchanged in `di`, `dihttp` and `dislog` apart from the package doc's own
+text; an upgrade cannot break a caller.
 
 ### Changed
 
@@ -1009,7 +1012,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.16.2...HEAD
+[0.16.2]: https://github.com/floatdrop/di/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/floatdrop/di/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/floatdrop/di/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/floatdrop/di/compare/v0.15.0...v0.15.1
