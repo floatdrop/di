@@ -2,17 +2,7 @@ package di_test
 
 // Regressions in Go hooks and Shutdown: how a worker's own failure reaches
 // the caller, and what may still be holding the value when OnStop wants it.
-//
-// One test per defect, named for the rule it pins. The tag at the end of a
-// comment says where the defect came from. (review 1, 3) is the third defect
-// of the first September 2026 review, checked against 12dba3c; review 2 was
-// checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
-// fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor. An untagged
-// test
-// comes from the first of those passes, or from the generators, which its own
-// comment says. Several fail by hanging rather than by reporting, which is why
-// each bounds its own wait instead of relying on the package timeout.
+// Tags are explained in fixtures_test.go.
 
 import (
 	"context"
@@ -87,10 +77,9 @@ func TestReviewDetachedChildWorkerFailureReachesRun(t *testing.T) {
 	}
 }
 
-// The same failure reported by both routes is still reported once. This
-// one passes before the fix as well: a dying worker did not record a cause
-// there, so there was nothing to duplicate. It guards the fix for 9, which
-// makes it record one, rather than covering a defect of its own.
+// The same failure reported by both routes is reported once. This passes
+// before the fix as well: a dying worker recorded no cause then, so there was
+// nothing to duplicate; it guards the fix for 9 rather than a defect.
 // (review 1, 9b)
 func TestReviewWorkerFailureIsNotDuplicated(t *testing.T) {
 	boom := errors.New("queue disconnected")
@@ -105,9 +94,9 @@ func TestReviewWorkerFailureIsNotDuplicated(t *testing.T) {
 	}
 }
 
-// Reported alongside the six: OnStop must not run while a Go hook that
-// outlasted Stop's context is still using the value. Stop reports the missed
-// deadline and the release follows the worker's own return.
+// OnStop must not run while a Go hook that outlasted Stop's context is still
+// using the value: Stop reports the missed deadline and the release follows
+// the worker's return.
 // (review 2, 9)
 func TestReview2OnStopWaitsForALiveWorkerHook(t *testing.T) {
 	runLive := make(chan struct{})
@@ -155,10 +144,8 @@ func TestReview2OnStopWaitsForALiveWorkerHook(t *testing.T) {
 	}
 }
 
-// Shutdown records the cause Run should return. A worker that dies during
-// the stop publishes it after Run has already woken for a cancelled context,
-// so Run reads it once more on the way out rather than leaving it to whichever
-// Stop observed the failure.
+// A worker that dies during the stop publishes its cause after Run has woken
+// for a cancelled context, so Run reads it once more on the way out.
 // (review 3, 3)
 func TestReview3RunReportsAShutdownPublishedDuringStop(t *testing.T) {
 	fail := errors.New("worker died")
@@ -174,8 +161,8 @@ func TestReview3RunReportsAShutdownPublishedDuringStop(t *testing.T) {
 	if _, err := child.Resolve[*r3Worker](); err != nil {
 		t.Fatal(err)
 	}
-	// A hook that stops the child itself and handles its error: the failure
-	// then reaches nothing Run looks at except the shutdown cause.
+	// The hook handles the child's error itself, so the failure reaches Run
+	// only as the shutdown cause.
 	root.Value(&r3Drainer{}).Eager().
 		OnDrain(func(ctx context.Context, _ *r3Drainer) error {
 			_ = child.Stop(ctx)
@@ -190,9 +177,7 @@ func TestReview3RunReportsAShutdownPublishedDuringStop(t *testing.T) {
 }
 
 // Run joins a cause published through Shutdown on the way out of a failed
-// Start, not only on the way out of an ordinary stop. A rollback runs the
-// drain and stop hooks, so a worker can die there exactly as it can during a
-// shutdown, and the error branch used to return before the cause was read.
+// Start too: a rollback runs the hooks, so a worker can die there.
 // (review 4, 1)
 func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
 	fail := errors.New("worker died")
@@ -211,8 +196,8 @@ func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
 	if err := child.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// A drain hook that stops the child and handles its error itself, so the
-	// failure reaches Run only as the published cause.
+	// The hook handles the child's error itself, so the failure reaches Run
+	// only as the published cause.
 	root.Value(&DB{}).Eager().
 		OnDrain(func(ctx context.Context, _ *DB) error { _ = child.Stop(ctx); return nil })
 	root.Value(&Repo{}).Eager().
@@ -227,11 +212,9 @@ func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
 	}
 }
 
-// A worker cancelled by Stop may report a failure alongside the
-// cancellation, as errors.Join(ctx.Err(), failure). The filter that drops a
-// bare cancellation used errors.Is, which matched the joined error and
-// dropped the failure with it; Stop returned nil. Only an error that says
-// nothing beyond the cancellation is dropped now. (issue 35)
+// A worker cancelled by Stop may report a failure joined with the
+// cancellation; only an error that says nothing beyond the cancellation is
+// dropped. (issue 35)
 func TestWorkerFailureJoinedWithCancellationIsReported(t *testing.T) {
 	failure := errors.New("flush failed")
 	s := di.New()
@@ -248,8 +231,7 @@ func TestWorkerFailureJoinedWithCancellationIsReported(t *testing.T) {
 		t.Fatalf("Stop dropped the worker's own failure: %v", err)
 	}
 
-	// A wrapped cancellation, with nothing else in it, is still nothing to
-	// report.
+	// A wrapped cancellation with nothing else in it is nothing to report.
 	quiet := di.New()
 	quiet.Value(&Worker{}).Eager().Go(func(ctx context.Context, _ *Worker) error {
 		<-ctx.Done()
@@ -264,10 +246,8 @@ func TestWorkerFailureJoinedWithCancellationIsReported(t *testing.T) {
 }
 
 // A worker that panics is a worker that failed: the panic becomes its error,
-// Shutdown receives it, Run returns it, and OnStop still runs. Called directly
-// rather than through callHook, the panic took the process down with no
-// OnStop and no event. Found by the supervision-tree question of 2026-09-12
-// and checked against c44198f.
+// Shutdown receives it, Run returns it, and OnStop still runs. Checked against
+// c44198f.
 func TestPanickingWorkerIsAFailure(t *testing.T) {
 	var stops atomic.Int32
 	var events []di.Event

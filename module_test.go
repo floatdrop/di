@@ -28,8 +28,7 @@ func cachingModule(s *di.Scope) {
 }
 
 // Two modules providing the same key is a collision, reported with both
-// modules named. It used to be a silent recapture: storage's *modRepo was wired
-// to storage's *modDB and quietly rewired to caching's.
+// modules named.
 func TestModulesCollideLoudly(t *testing.T) {
 	s := di.New()
 	s.Use(storageModule, cachingModule)

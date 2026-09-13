@@ -1,26 +1,18 @@
 package di_test
 
-// A scheduler for the concurrent driver's hooks.
+// A scheduler for the concurrent driver's hooks. -race and the Go scheduler
+// sample interleavings, so an ordering that takes several specific steps is
+// not something more iterations reach; here the ordering is an input. Every
+// hook the driver registers, and every operation it issues, parks at a
+// scheduling point, and this releases the parked goroutines one at a time in
+// an order a seed decides.
 //
-// -race and the Go scheduler *sample* interleavings. That is why the third
-// review's second defect needed a five-step ordering ending in a deadline
-// expiry, and why no amount of running the driver produced it: the odds of
-// the sample landing there are not something more iterations fix. What the
-// package needs instead is for the ordering to be an input.
-//
-// So every hook the driver registers, and every operation it issues, parks at
-// a scheduling point, and this releases the parked goroutines one at a time
-// in an order a seed decides. Replaying a seed replays the choices.
-//
-// What it does not do is control what happens *between* those points. A
-// goroutine released here may block inside the container -- on a mutex, on a
-// step channel -- where nothing in a test can see it, and the next release
-// then happens on a timer rather than in lockstep. So this is systematic
-// exploration, not verification: it reaches orderings that sampling does not,
-// and a seed makes one reproducible enough to shrink, but two runs of a seed
-// can still differ. Every oracle in concurrent_test.go stays sound under it,
-// which is what makes running the same driver under a schedule worth doing at
-// all.
+// It does not control what happens between those points. A released
+// goroutine may block inside the container, on a mutex or a step channel,
+// where nothing in a test can see it, and the next release then happens on a
+// timer. So this is exploration, not verification: a seed makes an ordering
+// reproducible enough to shrink, but two runs of one seed can still differ.
+// Every oracle in concurrent_test.go stays sound under it.
 
 import (
 	"fmt"
@@ -47,14 +39,12 @@ type scheduler struct {
 
 	// grace is how long the loop waits for the system to settle before
 	// releasing the next goroutine anyway. Without it a released goroutine
-	// that blocks inside the container would hold up every other one for
-	// ever, and the deadlock would be the harness's, not the library's.
+	// that blocks inside the container would hold up every other one, and
+	// the deadlock would be the harness's.
 	grace time.Duration
 	// settle is how long the loop lets goroutines gather at scheduling
-	// points before it chooses between them. Releasing each one the moment
-	// it arrives is deterministic and pointless: with one goroutine parked
-	// there is nothing to decide, and the seed decides nothing. Waiting
-	// first is what gives the choice a branching factor.
+	// points before it chooses between them. Releasing each one as it
+	// arrives leaves the seed nothing to decide.
 	settle time.Duration
 }
 
@@ -106,7 +96,7 @@ func (s *scheduler) loop() {
 		case <-s.done:
 			return
 		case <-s.arrived:
-			// Let whoever else is on their way arrive too, so that there is
+			// Let whoever else is on their way arrive too, so there is
 			// something for the seed to choose between.
 			select {
 			case <-s.done:
@@ -159,8 +149,8 @@ func (s *scheduler) close() {
 	})
 }
 
-// history is the order the scheduler released things in, which is what a
-// failure has to be read against.
+// history is the order the scheduler released things in, which a failure
+// has to be read against.
 func (s *scheduler) history() string {
 	if s == nil {
 		return ""

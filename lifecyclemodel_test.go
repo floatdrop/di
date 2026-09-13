@@ -2,23 +2,14 @@ package di_test
 
 // A model of the instance lifecycle, checked against the sequential machine.
 //
-// machine_test.go deliberately predicts nothing: a predictive model of the
-// whole container is itself likely to be wrong, and a wrong model that agrees
-// with a wrong implementation hides defects rather than finding them. That
-// argument holds for registration, where what serves a key depends on
-// overrides and the eager rules, and property_test.go models exactly
-// that much and no more.
-//
-// It does not hold for what happens to an instance once it exists. Given that
-// a constructor ran, in a scope, for a binding with a known set of hooks, the
-// rest is a small state machine that the package documents completely: which
-// hooks are owed, in what order, and exactly once. That is also the half of
-// the library every review found defects in, and the half no generator was
-// checking -- the drivers counted hooks and compared them against each other,
-// which cannot see a hook that should have run and did not.
-//
-// So the model takes builds as given, from the constructors themselves, and
-// predicts everything downstream:
+// machine_test.go predicts nothing, because a model of the whole container
+// could be wrong in the same way as the code, and property_test.go models
+// registration alone. What happens to an instance once it exists is
+// different: given that a constructor ran, in a scope, for a binding with a
+// known set of hooks, the rest is a small state machine the package documents
+// completely, and counting hooks against each other cannot see one that
+// should have run and did not. So the model takes builds as given, from the
+// constructors themselves, and predicts everything downstream:
 //
 //	M1  No hook of an instance runs twice.
 //	M2  For one instance the order is OnStart, then OnDrain, then OnStop.
@@ -27,10 +18,9 @@ package di_test
 //	    declares none, or the scope was never started. Every instance that
 //	    owes one gets one; one that does not, does not.
 //	M4  An instance that owes a drain gets one, under the same predicate.
-//	    The concurrent driver cannot check this and says so: an instance
-//	    built during the phase may legitimately miss it. Sequentially the
-//	    phase has a boundary, and drain hooks here build nothing, so the
-//	    question has an exact answer.
+//	    The concurrent driver cannot check this: an instance built during
+//	    the phase may legitimately miss it. Sequentially the phase has a
+//	    boundary, and drain hooks here build nothing.
 //	M5  Instances stop innermost scope first, and in reverse build order
 //	    within a scope.
 //	M6  An instance built into a running scope runs its start step as part
@@ -38,8 +28,8 @@ package di_test
 //
 // Whether the start step ran is observed rather than predicted, because a
 // rollback stops what had started at the moment it failed and predicting that
-// would mean predicting the failure. Everything the observation then feeds is
-// still a prediction: M3 and M4 are the package's own rule for what is owed.
+// would mean predicting the failure. What the observation feeds is still a
+// prediction: M3 and M4 are the package's own rule for what is owed.
 
 import (
 	"context"
@@ -48,13 +38,12 @@ import (
 	"strings"
 )
 
-// The machine starts each scope with a context naming that scope, so both
-// halves of "which Start governs this scope" can be read back off
-// Scope.Context: that it was started at all, and which scope's Start it was.
-// The model observes this rather than predicting it, because whether a
-// rejected Start had already recorded its context depends on which panic came
-// first, which the package does not promise -- and because the answer changes
-// while a Start is running, which is the window an eager build happens in.
+// The machine starts each scope with a context naming that scope, so which
+// Start governs a scope can be read back off Scope.Context. The model
+// observes this rather than predicting it: whether a rejected Start had
+// already recorded its context depends on which panic came first, which the
+// package does not promise, and the answer changes while a Start is running,
+// which is the window an eager build happens in.
 type machineStartKey struct{}
 
 func machineStartCtx(scope int) context.Context {
@@ -72,8 +61,7 @@ func (l *lifecycle) governedBy(scope int) (int, bool) {
 }
 
 // refusedAsSecondStart reports the one Start failure that changes nothing:
-// the scope had already been started, so the call was refused before it
-// looked at a single binding.
+// the scope had already been started.
 func refusedAsSecondStart(err error) bool {
 	if err == nil {
 		return false
@@ -84,8 +72,7 @@ func refusedAsSecondStart(err error) bool {
 type hookSet struct{ start, drain, stop bool }
 
 // hooksOfShape says which hooks each registration shape of the sequential
-// machine declares. It is the one place the model has to agree with
-// regShape, so they are read together.
+// machine declares. It is the one place the model has to agree with regShape.
 func hooksOfShape(reg uint8) hookSet {
 	switch reg {
 	case 0, 3:
@@ -140,7 +127,7 @@ func (l *lifecycle) failf(format string, args ...any) {
 	l.fails = append(l.fails, fmt.Sprintf(format, args...))
 }
 
-// ancestors reports whether scope a is at or below b.
+// under reports whether scope a is at or below b.
 func under(a, b int) bool {
 	for s := a; s >= 0; s = parentOf[s] {
 		if s == b {
@@ -158,28 +145,21 @@ func (l *lifecycle) everStarted(scope int) bool {
 	return ok
 }
 
-// running reports whether the scope's Start has passed its hook phase, which
-// is when an instance built later starts as part of being built. A Start that
-// returned nil is past it by definition, and that is the only case the model
-// claims anything about.
 // running reports whether the Start that governs this scope has passed its
 // hook phase, which is when an instance built later starts as part of being
-// built. The scope that governs is the nearest one Start was called on, and
-// that becomes the scope itself the moment its own Start records its context
-// -- before it builds its eager bindings. An eager build during that window
-// does not start, because that Start has not reached its hook phase yet; it
-// starts in the phase that follows, if the call gets there. Walking to the
-// nearest *finished* Start instead answered for an ancestor that was already
-// running, and predicted a start step for an instance whose own scope's Start
-// went on to fail.
+// built. The governing scope becomes the scope itself the moment its own
+// Start records its context, before it builds its eager bindings, so an
+// eager build during that window does not start; it starts in the phase that
+// follows, if the call gets there. Walking to the nearest finished Start
+// instead answered for a running ancestor and predicted a start step for an
+// instance whose own scope's Start went on to fail.
 func (l *lifecycle) running(scope int) bool {
 	s, ok := l.governedBy(scope)
 	return ok && l.phase[s] == scopeStarted
 }
 
 // built is called by every constructor the machine registers, with the scope
-// the constructor ran in -- which for every lifetime is the scope that holds
-// the instance and will stop it.
+// the constructor ran in, which is the scope that holds the instance.
 func (l *lifecycle) built(scope int, reg uint8, v any) {
 	if _, seen := l.byValue[v]; seen {
 		l.failf("the same value was built twice")
@@ -191,9 +171,8 @@ func (l *lifecycle) built(scope int, reg uint8, v any) {
 		ran: map[string]int{}, at: map[string]int{}, expect: map[string]bool{},
 		live: l.phase[scope] != scopeStopped,
 	}
-	// M6: a scope that is already running starts what it builds, as part of
-	// building it. A constructor that runs while its own scope is stopping is
-	// undone instead, which the machine cannot reach sequentially.
+	// M6. A constructor that runs while its own scope is stopping is undone
+	// instead, which the machine cannot reach sequentially.
 	if in.live && in.hooks.start && l.running(scope) {
 		in.expect["OnStart"] = true
 	}
@@ -219,12 +198,9 @@ func (l *lifecycle) hookRan(v any, hook string) {
 }
 
 // started records the outcome of a Start. A failed one rolls back, which the
-// model hears about as a stop.
+// model hears about as a stop; a refused second Start changes nothing.
 func (l *lifecycle) started(scope int, err error) {
 	if err != nil {
-		// A failed Start rolls back through Stop, with one exception: a
-		// second Start is refused before anything happens, so it changes
-		// nothing at all.
 		if !refusedAsSecondStart(err) {
 			l.stopping(scope)
 		}
@@ -233,8 +209,8 @@ func (l *lifecycle) started(scope int, err error) {
 	if l.phase[scope] == scopeNew {
 		l.phase[scope] = scopeStarted
 	}
-	// Everything alive in the subtree has now had its start step run, in
-	// build order, whether it was built before or during the call.
+	// Everything alive in the subtree has now had its start step run,
+	// whether it was built before or during the call.
 	for _, in := range l.instances {
 		if in.live && in.hooks.start && under(in.scope, scope) {
 			in.expect["OnStart"] = true
@@ -244,11 +220,9 @@ func (l *lifecycle) started(scope int, err error) {
 
 // ranAndStopped records a Scope.Run: the scope was started and then stopped,
 // and the model cannot tell from outside whether the hook phase was reached
-// before the start failed. Both answers change what OnStart was owed and
-// neither is observable, so the prediction is dropped for that subtree and
-// only that. What M3, M4 and M5 rest on is observed rather than predicted --
-// whether the start step ran, not whether it should have -- so they stay
-// exact through a Run.
+// before the start failed. So the OnStart prediction is dropped for that
+// subtree and only that; M3, M4 and M5 rest on whether the start step ran,
+// which is observed, so they stay exact through a Run.
 func (l *lifecycle) ranAndStopped(scope int, err error) {
 	if refusedAsSecondStart(err) {
 		return // refused before anything happened
@@ -276,10 +250,8 @@ func (l *lifecycle) stopping(scope int) {
 			continue
 		}
 		in.live = false
-		// The package's own rule: a stop step is owed when the start step
-		// succeeded, and when the instance was merely built but its OnStop
-		// has nothing to pair with -- no OnStart, or a scope that was never
-		// started, in which case OnStop is a plain destructor.
+		// M3 and M4: owed when the start step succeeded, or when OnStop has
+		// nothing to pair with and is a plain destructor.
 		paired := in.hooks.start && l.everStarted(in.scope)
 		owed := in.ran["OnStart"] > 0 || !paired
 		in.expect["OnStop"] = in.hooks.stop && owed
@@ -304,7 +276,7 @@ func (l *lifecycle) check() []string {
 				l.failf("an instance in %s ran %s when none was owed", where, hook)
 			}
 		}
-		// M2: one instance's hooks run in lifecycle order.
+		// M2
 		for _, pair := range [][2]string{{"OnStart", "OnDrain"}, {"OnDrain", "OnStop"}, {"OnStart", "OnStop"}} {
 			a, b := in.at[pair[0]], in.at[pair[1]]
 			if a > 0 && b > 0 && a > b {
@@ -312,7 +284,7 @@ func (l *lifecycle) check() []string {
 			}
 		}
 	}
-	// M5: innermost scope first, and reverse build order within a scope.
+	// M5
 	stopped := make([]*modelInstance, 0, len(l.instances))
 	for _, in := range l.instances {
 		if in.at["OnStop"] > 0 {

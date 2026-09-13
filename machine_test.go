@@ -1,13 +1,11 @@
 package di_test
 
-// A model-based test over sequences of container OPERATIONS, not just
-// registrations, driven either by a seeded generator or by the fuzzer.
+// A model-based test over sequences of container operations, driven by a
+// seeded generator or by the fuzzer.
 //
-// It deliberately does not predict outcomes. A predictive model of a
-// container this size is itself likely to be wrong, and a wrong model that
-// happens to agree with a wrong implementation hides bugs rather than
-// finding them. Instead each sequence is checked against invariants taken
-// from the documented guarantees, which hold whatever the sequence is:
+// It predicts nothing. A predictive model of the whole container could be
+// wrong in the same way as the code, so each sequence is checked against
+// invariants taken from the documented guarantees:
 //
 //	I1  Resolve never panics, with an error or anything else. Wiring
 //	    problems are errors; only a rejected configuration panics, and only
@@ -28,13 +26,9 @@ package di_test
 //	I8  Validate builds nothing and is repeatable: two calls from one scope
 //	    say the same thing, and the build count is what it was before.
 //
-// What happens to an instance once it exists is predicted rather than
-// checked against invariants, by the model in lifecyclemodel_test.go. That
-// half is a small state machine the package documents completely, and it is
-// the half every review found defects in.
-//
-// Recovering a key whose resolution failed is pinned by a regression test
-// instead: it needs a specific shape rather than a random one.
+// What happens to an instance once it exists is predicted by the model in
+// lifecyclemodel_test.go. Recovering a key whose resolution failed needs a
+// specific shape and is pinned by a regression test instead.
 
 import (
 	"context"
@@ -61,8 +55,8 @@ func (*mk1) marker() {}
 const (
 	numKeys = 4 // mk1, mk2, mk3, mkI
 	// root, two children and a grandchild. The grandchild is what lets a
-	// scope between a resolver and the owner of a binding shadow a key that
-	// has already been served through it.
+	// scope between a resolver and a binding's owner shadow a key already
+	// served through it.
 	numScopes = 4
 )
 
@@ -93,20 +87,17 @@ type op struct {
 	scope uint8
 	key   uint8
 	reg   uint8 // which registration shape
-	// eager is the registration's Eager flag. On every other kind it is a
-	// spare bit the concurrent driver reads as a variant: a Stop whose
-	// context is far too short for the hooks it will run, which is how the
-	// deadline paths are reached at all.
+	// eager is the registration's Eager flag. On every other kind the
+	// concurrent driver reads it as a variant: a Stop whose context is far
+	// too short for its hooks, which is how the deadline paths are reached.
 	eager bool
 	// override marks a registration Override(). Without it a repeated key in
-	// one scope is a rejection, which is a legitimate outcome and a shallow
-	// one; with it the sequence goes on to exercise what a replacement does
-	// to eagerness, resolution and teardown.
+	// one scope is a rejection, which is a shallow outcome; with it the
+	// sequence goes on to exercise what a replacement does.
 	override bool
-	// wire registers the shape through Wire instead of Provide, for the shapes
-	// that have a constructor to hand over. It is how the reflective build
-	// path and its declared dependencies meet every oracle. The bit was spare
-	// until now, so every corpus entry keeps the meaning it had.
+	// wire registers the shape through Wire instead of Provide, where the
+	// shape has a constructor to hand over. The bit was spare, so every
+	// corpus entry keeps its meaning.
 	wire bool
 }
 
@@ -157,8 +148,7 @@ type machine struct {
 	seen map[string]any
 
 	// registeredFrom remembers the scopes a constructor has already
-	// registered into, so the shape that registers does it once and never
-	// overrides what it registered before.
+	// registered into, so the registering shape never overrides itself.
 	registeredFrom map[int]bool
 
 	lc *lifecycle
@@ -219,9 +209,8 @@ func (m *machine) indexOf(name string) int {
 	return 0
 }
 
-// reported is the build report of a Wire constructor: it has no scope handle,
-// so the scope's name arrives as a dependency, which for a Scoped binding is
-// the scope that resolved it and will hold the instance.
+// reported is the build report of a Wire constructor, which has no scope
+// handle: the scope's name arrives as a dependency.
 func reported[T any](m *machine, o op, sn scopeName, v T) T {
 	m.lc.built(m.indexOf(sn.name), o.reg, any(v))
 	return v
@@ -236,8 +225,8 @@ type outcome struct {
 }
 
 // call runs f, classifying panics. A panic carrying a string is a rejected
-// configuration. A panic carrying an error is how Get reports failure at top
-// level. Anything else is a defect.
+// configuration; one carrying an error is how Get reports failure at top
+// level; anything else is a defect.
 func (m *machine) call(what string, f func() (any, error)) outcome {
 	var out outcome
 	func() {
@@ -269,12 +258,10 @@ func (m *machine) run() {
 	m.finish()
 }
 
-// render enforces I7 against the state the sequence ended in, which is
-// the richest one it reaches: every scope's graph, and every key explained
-// from every scope. Once per sequence rather than once per operation,
-// because the fuzzer runs this millions of times and the shapes a
-// rendering can meet are decided by the registrations, not by where in the
-// sequence it is asked.
+// render enforces I7 against the state the sequence ended in: every scope's
+// graph, and every key explained from every scope. Once per sequence, since
+// the shapes a rendering can meet are decided by the registrations, not by
+// where in the sequence it is asked.
 func (m *machine) render() {
 	for i, s := range m.scopes {
 		g := s.Graph()
@@ -289,10 +276,8 @@ func (m *machine) render() {
 	}
 }
 
-// modules renders the module report, which walks the same registry as
-// Validate does. A configuration rejection is legitimate for the reason
-// explain gives; anything else, or a report that does not end in a newline,
-// is a defect.
+// modules renders the module report. A configuration rejection is legitimate
+// for the reason explain gives; anything else is a defect.
 func (m *machine) modules(s *di.Scope, scope int) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -306,10 +291,8 @@ func (m *machine) modules(s *di.Scope, scope int) {
 	}
 }
 
-// validate enforces I8: Validate builds nothing and says the same thing
-// twice. A configuration rejection is legitimate for the reason explain
-// gives; whether what it says is right is pinned by validate_test.go, since
-// predicting it here would model the lookup rules a second time.
+// validate enforces I8. What Validate says is pinned by validate_test.go,
+// since predicting it here would model the lookup rules a second time.
 func (m *machine) validate(s *di.Scope, scope int) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -343,10 +326,9 @@ func (m *machine) totalBuilds() int {
 	return n
 }
 
-// explain renders one key from one scope. A configuration rejection is a
-// legitimate outcome, because Explain looks the key up and a lookup commits
-// the pending batch, exactly as a resolution from this scope would; any
-// other panic is a defect.
+// explain renders one key from one scope. A configuration rejection is
+// legitimate, because Explain commits the pending batch as a resolution from
+// this scope would; any other panic is a defect.
 func (m *machine) explain(s *di.Scope, scope, k int) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -377,9 +359,8 @@ func (m *machine) step(i int, o op) {
 
 	switch o.kind {
 	case opRegister:
-		// Registered through Use, so the generators exercise attribution too:
-		// every binding the machine makes carries a module name, and the
-		// collision rejections it provokes name it.
+		// Through Use, so every binding carries a module name and the
+		// collision rejections name it.
 		m.call(label, func() (any, error) { s.Use(func(sc *di.Scope) { m.register(sc, o) }); return nil, nil })
 
 	case opResolve:
@@ -433,8 +414,7 @@ func (m *machine) step(i int, o op) {
 
 	case opRun:
 		// Run with a context that is already cancelled: it starts the scope,
-		// finds nothing to wait for, and stops again. That is the only way
-		// the generators reach Run at all, and Run is where a worker's
+		// finds nothing to wait for, and stops again. Run is where a worker's
 		// failure and a Stop's errors are joined.
 		ctx, cancel := context.WithCancel(machineStartCtx(int(o.scope)))
 		cancel()
@@ -450,17 +430,16 @@ func (m *machine) step(i int, o op) {
 
 	case opShutdown:
 		// Sequentially this only records a cause; it is here so the operation
-		// exists in the shared encoding, and because Shutdown is what a hook
-		// must call now that it may not call Stop.
+		// exists in the shared encoding.
 		m.call(label, func() (any, error) { s.Shutdown(errShutdown); return nil, nil })
 	}
 }
 
 var errShutdown = errors.New("shutdown from the machine")
 
-// marker is what the registering shape registers. It is its own type so that
-// registering it can never override anything else, and registerFrom does it
-// once per scope so it can never override itself either.
+// marker is what the registering shape registers: its own type, so it can
+// never override anything else, and registered once per scope so it never
+// overrides itself.
 type marker struct{}
 
 func (m *machine) registerFrom(sc *di.Scope, scope int) {
@@ -471,9 +450,8 @@ func (m *machine) registerFrom(sc *di.Scope, scope int) {
 	sc.Value(marker{})
 }
 
-// checkRepeatable enforces I2. It re-runs the identical operation and
-// requires the same rejection. Only read-only operations are re-run:
-// Register and Start mutate, so repeating them is not the same operation.
+// checkRepeatable enforces I2 by re-running the identical operation. Only
+// read-only operations are re-run: Register and Start mutate.
 func (m *machine) checkRepeatable(label string, out outcome, again func() (any, error)) {
 	if out.rejected == "" {
 		return
@@ -485,9 +463,9 @@ func (m *machine) checkRepeatable(label string, out outcome, again func() (any, 
 	}
 }
 
-// checkStopped enforces I3. A resolve from a stopped tree must not succeed:
-// reporting only on the errors it did return would accept the very case the
-// invariant exists to rule out.
+// checkStopped enforces I3. A resolve from a stopped tree must not succeed;
+// checking only the errors it returned would accept the very case the
+// invariant rules out.
 func (m *machine) checkStopped(label string, o op, out outcome) {
 	if !m.stoppedTree(int(o.scope)) || out.rejected != "" {
 		return
@@ -500,7 +478,7 @@ func (m *machine) checkStopped(label string, o op, out outcome) {
 	}
 }
 
-// checkStable enforces I4: a key resolves to the same value each time.
+// checkStable enforces I4.
 func (m *machine) checkStable(label string, o op, v any) {
 	if v == nil {
 		return
@@ -566,15 +544,14 @@ func (m *machine) finish() {
 
 // ---- registration shapes ---------------------------------------------------
 
-// regShape registers one of ten shapes for T, chosen by op.reg, so a random
+// regShape registers one of the shapes for T, chosen by op.reg, so a random
 // sequence exercises lifetimes, hooks, groups, failures and dependencies.
 func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T, wire, wireScoped any) {
 	var b di.Binding[T]
 	// Every modelled shape reports its own build and its own hooks, so the
-	// model knows which instance is which without having to predict what
-	// serves a key. A Value binding has no constructor to report from, so it
-	// stays outside the model: hook returns what the model knows about each
-	// shape.
+	// model knows which instance is which without predicting what serves a
+	// key. A Value binding has no constructor to report from and stays
+	// outside the model.
 	builtIn := func(scope int, v T) T {
 		m.lc.built(scope, o.reg, any(v))
 		return v
@@ -590,8 +567,8 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	switch o.reg {
 	case 0:
 		if o.wire {
-			// A Wire constructor has no scope handle; a singleton is built
-			// in the scope that registered it, which is this one.
+			// A Wire constructor has no scope handle; a singleton is built in
+			// the scope that registered it.
 			b = s.Wire[T](func() T { return builtIn(int(o.scope), plain()) }).
 				OnStart(hook("OnStart")).OnStop(hook("OnStop"))
 		} else {
@@ -601,10 +578,9 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	case 1:
 		if o.wire {
 			// A wrapper over whatever serves the key, or a registration-time
-			// rejection when nothing does. The wrapped registration reports
-			// its own build; this reports the wrapper's, in the scope that
-			// resolves it, which for a scoped chain is not the registering
-			// one.
+			// rejection when nothing does. It reports its build in the scope
+			// that resolves it, which for a scoped chain is not the
+			// registering one.
 			b = s.Wrap[T](func(_ T, sn scopeName) T { return reported(m, o, sn, plain()) }).
 				OnStop(hook("OnStop"))
 		} else {
@@ -612,10 +588,8 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 		}
 	case 2:
 		if o.wire {
-			// Scoped through Wire, with a dependency on another key: built
-			// through reflect in whichever scope resolves it, and the one
-			// shape whose declared dependency Validate has to leave to a
-			// descendant when the resolving scope is not there yet.
+			// Scoped through Wire, with a declared dependency: the one shape
+			// whose dependency Validate has to leave to a descendant.
 			b = s.Wire[T](wireScoped).Scoped().
 				OnStop(hook("OnStop"))
 		} else {
@@ -635,9 +609,8 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 			}).OnStop(hook("OnStop"))
 	case 5:
 		if o.wire {
-			// A constructor of the wrong shape, one per key: Wire rejects it
-			// at registration, with a configuration panic the harness
-			// classifies like any other rejection.
+			// A constructor of the wrong shape, one per key, rejected at
+			// registration.
 			switch o.key {
 			case 0:
 				b = s.Wire[T](42)
@@ -650,40 +623,35 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 			}
 			break
 		}
-		// A constructor that fails. resolve turns this into an error, so it
-		// exercises the failure paths rather than escaping as a panic.
+		// A constructor that fails, which resolve turns into an error.
 		b = s.Provide(func(*di.Scope) T { panic("injected constructor failure") })
 	case 6:
-		// Depends on another key, so chains and cycles arise; through Wire the
-		// dependency is declared, so Validate has something to walk.
+		// Depends on another key, so chains and cycles arise; through Wire
+		// the dependency is declared, so Validate has something to walk.
 		if o.wire {
 			b = s.Wire[T](wire)
 		} else {
 			b = s.Provide(dep)
 		}
 	case 7:
-		// Draining, which the sequential machine had no shape for at all: the
-		// phase was exercised only where two calls overlap, and never where
-		// its boundary is known.
+		// Draining, where the phase's boundary is known.
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
 			OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
 	case 8:
 		b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
 			OnStart(hook("OnStart")).OnDrain(hook("OnDrain")).OnStop(hook("OnStop"))
 	case 9:
-		// A constructor that registers, and resolves what it registered. The
-		// registry is mutable during a resolution, and nothing here was
-		// exercising that: freeze runs inside the nested lookup, on a scope
-		// with a resolution already in flight.
+		// A constructor that registers, and resolves what it registered, so
+		// freeze runs inside a nested lookup with a resolution in flight.
 		b = s.Provide(func(sc *di.Scope) T {
 			m.registerFrom(sc, int(o.scope))
 			_, _ = sc.Resolve[marker]()
 			return built(sc, plain())
 		}).OnStop(hook("OnStop"))
 	case 10:
-		// The same, over its own key. That has to be rejected: the nested
-		// resolve would be served the replacement while this one goes on to
-		// return the old value, which is two live values for one key.
+		// The same, over its own key, which has to be rejected: the nested
+		// resolve would be served the replacement while this one returns the
+		// old value.
 		b = s.Provide(func(sc *di.Scope) T {
 			sc.Provide(func(*di.Scope) T { return plain() })
 			_, _ = sc.Resolve[T]()
@@ -820,30 +788,25 @@ func FuzzMachine(f *testing.F) {
 	f.Add([]byte{0, 0, 0, 6, 0, 1, 0, 0, 0, 0, 6, 0, 0, 0, 0})                // a dependency on an unprovided key, then stop
 	f.Add([]byte{0, 0, 0, 6, 0, 0, 0, 1, 6, 0, 0, 0, 2, 6, 0, 1, 0, 0, 0, 0}) // a dependency cycle
 	f.Add([]byte{0, 0, 0, 5, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0})                // failing constructor, eager
-	// The wired shapes, which a random sequence rarely combines: a cycle of
-	// three Wire singletons, which Validate reports once; a Scoped Wire
-	// binding whose dependency the root cannot provide, owed from the root
-	// and missing from the child that resolves it; a singleton that would
-	// build such a binding in its own scope, the one capture Validate calls
-	// an error; and the four rejected constructor shapes.
+	// The wired shapes a random sequence rarely combines: a cycle of three
+	// Wire singletons; a Scoped Wire binding whose dependency the root cannot
+	// provide; a singleton that would build such a binding in its own scope;
+	// and the four rejected constructor shapes.
 	f.Add([]byte{0, 0, 0, 6, 4, 0, 0, 1, 6, 4, 0, 0, 2, 6, 4, 2, 1, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 2, 4, 2, 1, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 2, 4, 0, 1, 1, 0, 4, 2, 1, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 6, 4, 0, 0, 1, 2, 4, 1, 0, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 5, 4, 0, 0, 1, 5, 4, 0, 0, 2, 5, 4, 0, 0, 3, 5, 4})
-	// Wrappers: over a singleton, started eagerly so both halves build and
-	// stop in order; over the parent's value from a child, resolved there;
-	// over a scoped chain; and over nothing, which is rejected.
+	// Wrappers: over a singleton, started eagerly; over the parent's value
+	// from a child; over a scoped chain; and over nothing, which is rejected.
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0, 1, 5, 5, 0, 0, 0, 0, 6, 0, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 1, 0, 1, 4, 2, 1, 0, 0, 0, 2, 0, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 2, 4, 0, 0, 1, 0, 0, 0, 0, 0, 1, 4, 2, 3, 0, 0, 0})
 	f.Add([]byte{0, 0, 0, 1, 4})
-	// A wrapper chain an Override replaces while a descendant still wraps its
-	// first link: the child wraps the root's key, the grandchild wraps that
-	// wrapper, the child wraps again and then overrides the key, and the
-	// grandchild stops. Retiring the chain, release stopping at a link that is
-	// still wrapped, and the cascade when that wrapper's scope stops are reached
-	// by nothing else a generator builds.
+	// A wrapper chain an Override replaces while a grandchild still wraps its
+	// first link, then the grandchild stops: retiring the chain, release
+	// stopping at a wrapped link, and the cascade when that scope stops are
+	// reached by nothing else a generator builds.
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 1, 0, 1, 4, 0, 3, 0, 1, 4, 0, 1, 0, 1, 4, 0, 1, 0, 0, 2, 1, 1, 0, 0, 0, 6, 3, 0, 0, 0, 6, 0, 0, 0, 0})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		ops := decode(data)

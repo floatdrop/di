@@ -282,9 +282,7 @@ func TestValidateChecksAWrappedChain(t *testing.T) {
 
 // A child's wrapper guards the parent registration it composes over only
 // while the child is alive: a stopped scope never serves the key again, so
-// the parent may replace the registration. The mark used to be written when
-// Wrap was called and never cleared, so the parent's Override was rejected
-// naming a wrapper in a scope that no longer existed. (review 6, 2)
+// the parent may replace the registration. (review 6, 2)
 func TestWrapInAStoppedChildNoLongerPinsTheParent(t *testing.T) {
 	root := di.New()
 	root.Wire[wStore](newWPG)
@@ -300,8 +298,7 @@ func TestWrapInAStoppedChildNoLongerPinsTheParent(t *testing.T) {
 }
 
 // The guard belongs to each wrapper, not to the registration: one child
-// stopping must not release a registration a live sibling still wraps. A
-// single mark cleared on stop would pass the test above and fail this one.
+// stopping must not release a registration a live sibling still wraps.
 // (review 6, 2)
 func TestWrapInALiveSiblingStillPinsTheParent(t *testing.T) {
 	root := di.New()
@@ -318,9 +315,7 @@ func TestWrapInALiveSiblingStillPinsTheParent(t *testing.T) {
 }
 
 // Wrap and Stop on one scope at once: whichever goes first, the stopped
-// scope's wrapper must not go on guarding the parent. Wrap used to set what it
-// wraps on the binding after queueing it, so teardown could read that unset,
-// skip the prune, and leave the mark for good; -race reports the write.
+// scope's wrapper must not go on guarding the parent. Run with -race.
 // (review 6, 2)
 func TestWrapRacingStopLeavesNoMark(t *testing.T) {
 	for i := range 200 {
@@ -346,9 +341,7 @@ func TestWrapRacingStopLeavesNoMark(t *testing.T) {
 }
 
 // An Override that replaces a wrapper in its own scope replaces the chain, so
-// the replaced wrapper will never serve and stops guarding what it wrapped. A
-// child that wrapped its parent's registration and then overrode its own
-// wrapper used to leave the parent unable to override the registration.
+// the replaced wrapper will never serve and stops guarding what it wrapped.
 // (review 6, 2)
 func TestOverriddenWrapperNoLongerPinsTheParent(t *testing.T) {
 	root := di.New()
@@ -366,13 +359,10 @@ func TestOverriddenWrapperNoLongerPinsTheParent(t *testing.T) {
 }
 
 // A chain an Override replaces lets go of what it wraps only as far as
-// nothing live still composes over it. Here a grandchild wraps the first of
-// two wrappers in its parent, and the parent overrides the chain: the second
-// wrapper is dead, but the first still serves the grandchild, so the root's
-// registration stays guarded until the grandchild stops. Dropping every
-// link's mark as the Override committed let the root be overridden under a
-// live wrapper, which left the root with two live values for one key.
-// (review 6, 2)
+// nothing live still composes over it. A grandchild wraps the first of two
+// wrappers in its parent, and the parent overrides the chain: the first
+// wrapper still serves the grandchild, so the root's registration stays
+// guarded until the grandchild stops. (review 6, 2)
 func TestOverriddenChainStillPinnedByADescendant(t *testing.T) {
 	root := di.New()
 	root.Wire[wStore](newWPG)

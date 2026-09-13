@@ -2,17 +2,7 @@ package di_test
 
 // Regressions in the resolution path: what counts as a cycle, what only looks
 // like one, and what two branches racing for the same build must agree on.
-//
-// One test per defect, named for the rule it pins. The tag at the end of a
-// comment says where the defect came from. (review 1, 3) is the third defect
-// of the first September 2026 review, checked against 12dba3c; review 2 was
-// checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
-// fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor. An untagged
-// test
-// comes from the first of those passes, or from the generators, which its own
-// comment says. Several fail by hanging rather than by reporting, which is why
-// each bounds its own wait instead of relying on the package timeout.
+// Tags are explained in fixtures_test.go.
 
 import (
 	"errors"
@@ -54,8 +44,8 @@ func TestReviewParallelDependenciesInsideConstructor(t *testing.T) {
 	}
 }
 
-// Two goroutines asking for the same singleton from inside one
-// constructor is not a cycle. It reported one deterministically.
+// Two goroutines asking for the same singleton from inside one constructor
+// is not a cycle.
 // (review 1, 3b)
 func TestReviewParallelSameDependencyIsNotACycle(t *testing.T) {
 	s := di.New()
@@ -131,10 +121,9 @@ func TestReviewGroupAndDirectSameType(t *testing.T) {
 	}
 }
 
-// A constructor may keep the Scope it was handed, which is how a goroutine
-// it starts resolves later. A resolution made through that Scope after the
-// constructor returned is not a cycle, and must not poison the instance it
-// builds for every later resolution either.
+// A constructor may keep the Scope it was handed. A resolution made through
+// it after the constructor returned is not a cycle, and must not poison the
+// instance it builds for later resolutions.
 // (review 2, 5)
 func TestReview2RetainedScopeIsNotACycle(t *testing.T) {
 	root := di.New()
@@ -155,10 +144,8 @@ func TestReview2RetainedScopeIsNotACycle(t *testing.T) {
 }
 
 // A resolution made through the Scope a finished constructor kept is a new
-// branch: the ancestors above that constructor are still building, but not for
-// it, so it has only to wait for them. Reporting a cycle also cached the
-// verdict on whatever it was building, which outlived the timing that caused
-// it.
+// branch: the ancestors above it are still building, but not for it, so it
+// has only to wait. A false verdict was also cached on whatever it built.
 // (review 3, 4)
 func TestReview3LateResolutionThroughAFinishedConstructorIsNotACycle(t *testing.T) {
 	root := di.New()
@@ -207,8 +194,7 @@ func TestReview3LateResolutionThroughAFinishedConstructorIsNotACycle(t *testing.
 
 // A child scope made inside a constructor carries that constructor's
 // resolution, so a request through it that leads back to the service being
-// built is a cycle. Starting a fresh path there left the two halves waiting
-// for each other with nothing to report it.
+// built is reported as a cycle rather than deadlocking.
 // (review 3, 6)
 func TestReview3ChildMadeInAConstructorKeepsTheCyclePath(t *testing.T) {
 	root := di.New()
@@ -231,11 +217,9 @@ func TestReview3ChildMadeInAConstructorKeepsTheCyclePath(t *testing.T) {
 	}
 }
 
-// The other half of that: a child kept past the constructor resolves as an
-// independent branch, and reports failure the way a top-level call does rather
-// than unwinding to a call that has long returned. This one passes before the
-// fix as well: it guards the other half of the Child change rather than a
-// defect.
+// A child kept past the constructor resolves as an independent branch and
+// reports failure as a top-level call does. This passes before the fix as
+// well: it guards the other half of the Child change rather than a defect.
 // (review 3)
 func TestReview3ChildKeptPastTheConstructorIsIndependent(t *testing.T) {
 	root := di.New()

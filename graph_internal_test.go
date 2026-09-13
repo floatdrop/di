@@ -6,9 +6,9 @@ import "testing"
 // and including the first finished one, because descends matches a node before
 // it asks whether that node has finished. So a finished frame that is itself a
 // builder still connects two waits: n is blocked beneath the finished frame d
-// on what r is building, and r now waits on what d was building, which closes a
-// cycle. An index that stopped one node short would miss n under d and let r
-// wait for ever; nothing else in the suite or the fuzzers noticed that.
+// on what r is building, and r now waits on what d was building, which closes
+// a cycle. An index that stopped one node short would let r wait for ever, and
+// no test through the exported API reaches that shape.
 func TestWaitIndexIncludesTheFinishedNode(t *testing.T) {
 	g := &graph{under: map[*resolver]map[*waitEdge]struct{}{}}
 	b := &binding{}
@@ -34,8 +34,7 @@ func TestWaitIndexIncludesTheFinishedNode(t *testing.T) {
 
 // Each wait carries the nodes it was indexed under, so two waits by one
 // resolution, indexed along different lengths of its path because a frame
-// finished in between, are each removed exactly. Keyed by resolution, the
-// second record overwrote the first and its extra nodes were never removed.
+// finished in between, are each removed exactly.
 func TestWaitEdgesAreRemovedPerWait(t *testing.T) {
 	g := &graph{under: map[*resolver]map[*waitEdge]struct{}{}}
 	b := &binding{}

@@ -2,17 +2,7 @@ package di_test
 
 // Regressions in starting and stopping: rollback, the mid-start handoff, and
 // the rule that a stopped scope serves nothing.
-//
-// One test per defect, named for the rule it pins. The tag at the end of a
-// comment says where the defect came from. (review 1, 3) is the third defect
-// of the first September 2026 review, checked against 12dba3c; review 2 was
-// checked against 2b8915d and review 3 against 9ace680. (pass 4) is the
-// fourth of the seven narrower passes that preceded those reviews, each
-// checked against the code before the instance-phase refactor. An untagged
-// test
-// comes from the first of those passes, or from the generators, which its own
-// comment says. Several fail by hanging rather than by reporting, which is why
-// each bounds its own wait instead of relying on the package timeout.
+// Tags are explained in fixtures_test.go.
 
 import (
 	"context"
@@ -154,8 +144,7 @@ func TestRegressionLateUndoHonoursDeadline(t *testing.T) {
 }
 
 // An instance whose start step is in flight when Stop runs is torn down
-// before Stop returns. Stop waits for the step; it used to hand the teardown
-// to the goroutine running it, which finished after Stop had returned.
+// before Stop returns: Stop waits for the step.
 // (pass 2)
 func TestStopWaitsForAnInFlightStartStep(t *testing.T) {
 	entered := make(chan struct{})
@@ -209,10 +198,9 @@ func TestRegressionEagerConstructorFailureRollsBack(t *testing.T) {
 	}
 }
 
-// A hook may not call Stop on its own scope: it would be waiting for the step
-// it is itself running. A hook that passes on the context it was given is
-// told so rather than left to wait, and Shutdown is the call that does work
-// from inside a hook.
+// A hook may not Stop its own scope: it would wait for the step it is
+// running. A hook that passes on the context it was given is told so rather
+// than left to wait.
 // (pass 3)
 func TestStopFromAHookIsReported(t *testing.T) {
 	for _, tc := range []struct {
@@ -262,9 +250,8 @@ func TestStopFromAHookIsReported(t *testing.T) {
 	}
 }
 
-// A hook that passes a context of its own is not recognised, and then the
-// wait is the caller's to bound: with a deadline it is reported, and only a
-// hook that waits for ever on a background context can hang.
+// A hook that passes a context of its own is not recognised, so the wait is
+// the caller's to bound: with a deadline it is reported.
 // (pass 3)
 func TestStopFromAHookWithItsOwnContextIsBounded(t *testing.T) {
 	got := make(chan error, 1)
@@ -276,9 +263,8 @@ func TestStopFromAHookWithItsOwnContextIsBounded(t *testing.T) {
 			got <- s.Stop(ctx)
 			return nil
 		})
-	// The Stop is a real one: it claims the scope, so Start reports that the
-	// scope stopped under it. What is being checked is that the hook's own
-	// call came back at all.
+	// The Stop is real, so Start reports the scope stopped under it; what is
+	// checked is that the hook's own call came back.
 	if err := s.Start(context.Background()); !errors.Is(err, di.ErrStopped) {
 		t.Fatalf("Start: %v", err)
 	}
@@ -293,9 +279,7 @@ func TestStopFromAHookWithItsOwnContextIsBounded(t *testing.T) {
 }
 
 // A Stop whose deadline expires while a start step is in flight must not
-// orphan the instance: its Go hook is cancelled and its OnStop runs. Stop
-// waits for the step, so this is the deadline ending the caller's wait rather
-// than the teardown, which finishes on a goroutine of its own.
+// orphan the instance: its Go hook is cancelled and its OnStop runs.
 // (pass 3)
 func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
 	entered := make(chan struct{})
@@ -346,10 +330,8 @@ func TestRegressionAncestorStoppedRejectsChild(t *testing.T) {
 	}
 }
 
-// Start must not report success for a scope that was stopped while its hook
-// phase was running. The stop used to come from the hook itself; a hook may
-// no longer do that, so it comes from another goroutine, which is the shape
-// that remains.
+// Start must not report success for a scope that was stopped from another
+// goroutine while its hook phase was running.
 // (pass 4)
 func TestStartReportsAScopeStoppedUnderIt(t *testing.T) {
 	entered := make(chan struct{})
@@ -363,8 +345,7 @@ func TestStartReportsAScopeStoppedUnderIt(t *testing.T) {
 }
 
 // The teardown of an instance whose start step was in flight is reported to
-// the caller of Stop, not only to observers: Stop waits for the step, so the
-// failure is its own to report.
+// the caller of Stop, not only to observers.
 // (pass 4)
 func TestStopReportsTheTeardownItWaitedFor(t *testing.T) {
 	entered := make(chan struct{})
@@ -401,9 +382,8 @@ func TestStopReportsTheTeardownItWaitedFor(t *testing.T) {
 }
 
 // The first Stop owns the context of every teardown its scope still owes,
-// including the one that undoes a build finishing after the scope stopped. A
-// later Stop, which has nothing left to tear down, must not substitute its
-// own, possibly cancelled, context.
+// including the undo of a build finishing after the scope stopped; a later
+// Stop must not substitute its own, possibly cancelled, context.
 // (pass 5)
 func TestFirstStopOwnsALateTeardownsContext(t *testing.T) {
 	entered := make(chan struct{})
@@ -505,8 +485,8 @@ func TestReviewRunRollbackHonoursStopTimeout(t *testing.T) {
 	}
 }
 
-// The gap the review noted without counting: after Start, a resolution must
-// not hand out a service whose OnStart is still running.
+// After Start, a resolution must not hand out a service whose OnStart is
+// still running.
 // (review 1)
 func TestReviewResolveWaitsForInFlightStart(t *testing.T) {
 	entered := make(chan struct{})
@@ -617,12 +597,9 @@ func TestReview2PanickingStartHookIsAFailure(t *testing.T) {
 	}
 }
 
-// A panicking start hook is observed like a failing one: its EventStart is
-// emitted with the panic as Err, as a panicking drain or stop hook's already
-// was. It was not, because start called the hook directly rather than through
-// callHook, so the panic skipped the emit and observers saw a service that
-// was built and then never heard of again. Found by the September 2026
-// code-organisation review and checked against 80895d2.
+// A panicking start hook is observed like a failing one: its EventStart
+// carries the panic as Err. Found by the September 2026 code-organisation
+// review and checked against 80895d2.
 func TestPanickingStartHookIsObserved(t *testing.T) {
 	var events []di.Event
 	root := di.New()
@@ -645,14 +622,11 @@ func TestPanickingStartHookIsObserved(t *testing.T) {
 	}
 }
 
-// A hook that panics must not take the teardown down with it. The start step
-// was always recovered this way; the drain and stop steps were not, so a panic
-// in either propagated out of Stop halfway through -- stopOnce claimed and
-// never settled, so every later Stop waited for it until its context ran out,
-// and every instance behind it was never released. Found by the concurrent
-// driver the moment it gained a shape that leaves a child scope with a
-// permanently rejected registration: a drain hook resolving through that scope
-// meets the rejection as a panic.
+// A hook that panics must not take the teardown down with it: a panic out of
+// Stop halfway through leaves stopOnce claimed and never settled, every later
+// Stop waiting, and every instance behind it unreleased. Found by the
+// concurrent driver, through a drain hook resolving through a child scope with
+// a permanently rejected registration, which reaches it as a panic.
 func TestPanickingTeardownHooksAreReported(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -676,8 +650,8 @@ func TestPanickingTeardownHooksAreReported(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			released := false
 			s := di.New()
-			// Registered first, so it is released last: it is what a teardown
-			// abandoned halfway would leave behind.
+			// Registered first, so released last: what an abandoned teardown
+			// would leave behind.
 			s.Value(&Worker{}).OnStop(func(context.Context, *Worker) error { released = true; return nil })
 			s.Get[*Worker]()
 			tc.wire(s, &released)
@@ -697,8 +671,7 @@ func TestPanickingTeardownHooksAreReported(t *testing.T) {
 			if !released {
 				t.Fatal("the teardown was abandoned: an earlier instance was never released")
 			}
-			// A second Stop reports the same result at once rather than
-			// waiting on a teardown that never settled.
+			// A second Stop reports the same result at once.
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			if again := s.Stop(ctx); again == nil || errors.Is(again, context.DeadlineExceeded) {

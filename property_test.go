@@ -1,8 +1,7 @@
 package di_test
 
-// A property test for the eager set, the part of the container that has
-// broken most often. Rather than checking specific cases it generates random
-// registration sequences and asserts the documented invariant:
+// A property test for the eager set: random registration sequences checked
+// against the documented invariant:
 //
 //	Lifetime and lifecycle hooks belong to a registration. Eagerness belongs
 //	to the key: for every key, Start builds whatever serves that key exactly
@@ -18,10 +17,10 @@ package di_test
 //	Override with nothing to override. Group members accumulate instead and
 //	never override anything. A wrapper composes over what serves the key,
 //	takes its lifetime, and builds it first; nothing to wrap is rejected.
-
+//
 // The generator starts from a fresh scope each iteration and never touches
-// one again after a rejection, so it cannot see defects in freeze's error
-// paths; those are covered by regression tests instead.
+// one again after a rejection, so freeze's error paths are left to the
+// regression tests.
 
 import (
 	"context"
@@ -127,9 +126,9 @@ func wantEager(steps []propStep) propWant {
 		}
 	}
 
-	// A registration may not combine Eager with a per-scope lifetime,
-	// override or not; a wrapper's lifetime is the one it inherited at the
-	// point it was registered, so it is replayed.
+	// A registration may not combine Eager with a per-scope lifetime; a
+	// wrapper's lifetime is the one it inherited when registered, so it is
+	// replayed.
 	inherited := map[int]bool{}
 	for _, st := range steps {
 		switch st.kind {
