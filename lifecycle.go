@@ -261,7 +261,7 @@ func (in *instance) start(ctx context.Context, owner *state) error {
 			// reports it, and Run, which receives it, recognise one failure
 			// rather than listing it twice.
 			in.runErr = fmt.Errorf("di: %s: %w", b.key, err)
-			(&Scope{state: owner}).Shutdown(in.runErr)
+			(&Scope{st: owner}).Shutdown(in.runErr)
 		}()
 	}
 	return nil
@@ -558,25 +558,25 @@ func (s *Scope) Start(ctx context.Context) error {
 // handling.
 func (s *Scope) start(ctx context.Context, rollbackCtx func() (context.Context, func())) (err error) {
 	defer recoverAbort(&err)
-	s.freeze()
-	if !s.startCtx.CompareAndSwap(nil, &ctx) {
+	s.st.freeze()
+	if !s.st.startCtx.CompareAndSwap(nil, &ctx) {
 		return errors.New("di: Start called twice")
 	}
-	eager := s.reg.Load().eager // a registry is never written to; a later freeze stores a new one
+	eager := s.st.reg.Load().eager // a registry is never written to; a later freeze stores a new one
 
 	// A failing eager constructor must roll back like a failing hook.
 	if err := s.buildEager(eager); err != nil {
 		return errors.Join(err, s.rollback(rollbackCtx))
 	}
 
-	s.running.Store(true)
+	s.st.running.Store(true)
 
 	// Drain: anything built before the flag was set is still waiting here,
 	// and starting one service may build more.
 	for {
-		in, owner := s.claimNext()
+		in, owner := s.st.claimNext()
 		if in == nil {
-			if s.isStopped() {
+			if s.st.isStopped() {
 				// A start hook stopped the scope; nothing is running.
 				return fmt.Errorf("di: Start: %w", ErrStopped)
 			}
@@ -605,7 +605,7 @@ func (s *Scope) buildEager(eager []*binding) (err error) {
 	for _, b := range eager {
 		if b.group {
 			// A group member is not reachable by key: resolve it directly.
-			s.enter().resolve(b, s.state)
+			s.enter().resolve(b, s.st)
 			continue
 		}
 		// By key, so whichever registration owns the key is what gets built;
@@ -647,7 +647,7 @@ func (st *state) claimNext() (*instance, *state) {
 // nearest started ancestor, so constructors can dial with a deadline. Before
 // Start it returns context.Background().
 func (s *Scope) Context() context.Context {
-	if ctx, _ := s.runContext(); ctx != nil {
+	if ctx, _ := s.st.runContext(); ctx != nil {
 		return ctx
 	}
 	return context.Background()
@@ -692,22 +692,22 @@ func (s *Scope) Context() context.Context {
 // of its own is not recognised, and waits until that context expires. Call
 // Shutdown, which never blocks.
 func (s *Scope) Stop(ctx context.Context) error {
-	if h := hookOwner(ctx); h != nil && h.descendsFrom(s.state) {
-		return fmt.Errorf("di: a lifecycle hook of scope %s called Stop on scope %s, which it is inside: call Shutdown instead", h.name, s.name)
+	if h := hookOwner(ctx); h != nil && h.descendsFrom(s.st) {
+		return fmt.Errorf("di: a lifecycle hook of scope %s called Stop on scope %s, which it is inside: call Shutdown instead", h.name, s.st.name)
 	}
-	if !s.stopOnce.claim(s.state, func() {
-		if s.stopCtx == nil {
-			s.stopCtx = ctx // the first Stop owns it; a later call must not clobber it
+	if !s.st.stopOnce.claim(s.st, func() {
+		if s.st.stopCtx == nil {
+			s.st.stopCtx = ctx // the first Stop owns it; a later call must not clobber it
 		}
 	}) {
-		finished, err := s.stopOnce.wait(s.state, ctx)
+		finished, err := s.st.stopOnce.wait(s.st, ctx)
 		if !finished {
-			return fmt.Errorf("di: waiting for scope %s to stop: %w", s.name, ctx.Err())
+			return fmt.Errorf("di: waiting for scope %s to stop: %w", s.st.name, ctx.Err())
 		}
 		return err
 	}
 	err := s.teardown(ctx)
-	s.stopOnce.settle(s.state, err)
+	s.st.stopOnce.settle(s.st, err)
 	return err
 }
 
@@ -715,22 +715,22 @@ func (s *Scope) Stop(ctx context.Context) error {
 func (s *Scope) teardown(ctx context.Context) error {
 	errs := []error{s.drain(ctx)}
 
-	s.mu.Lock()
-	children := slices.Clone(s.children)
-	started := s.started
-	s.started = nil // stopped was stored by drain's seal, before this snapshot
+	s.st.mu.Lock()
+	children := slices.Clone(s.st.children)
+	started := s.st.started
+	s.st.started = nil // stopped was stored by drain's seal, before this snapshot
 	var wrappers []*binding
-	for _, b := range s.reg.Load().all {
+	for _, b := range s.st.reg.Load().all {
 		if b.inner != nil {
 			wrappers = append(wrappers, b)
 		}
 	}
-	for _, b := range s.pending {
+	for _, b := range s.st.pending {
 		if b.inner != nil {
 			wrappers = append(wrappers, b)
 		}
 	}
-	s.mu.Unlock()
+	s.st.mu.Unlock()
 	// This scope serves nothing from here on, so its wrappers no longer hold
 	// what they wrap against an Override. Released outside the mutex: wmu is
 	// a leaf, and the binding may belong to an ancestor.
@@ -739,13 +739,13 @@ func (s *Scope) teardown(ctx context.Context) error {
 	}
 
 	for _, c := range children {
-		errs = append(errs, (&Scope{state: c}).Stop(ctx))
+		errs = append(errs, (&Scope{st: c}).Stop(ctx))
 	}
-	errs = append(errs, stopAll(ctx, s.state, started))
+	errs = append(errs, stopAll(ctx, s.st, started))
 
-	if p := s.parent; p != nil {
+	if p := s.st.parent; p != nil {
 		p.mu.Lock()
-		p.children = slices.DeleteFunc(p.children, func(c *state) bool { return c == s.state })
+		p.children = slices.DeleteFunc(p.children, func(c *state) bool { return c == s.st })
 		p.mu.Unlock()
 	}
 	return errors.Join(errs...)
@@ -760,13 +760,13 @@ func (s *Scope) teardown(ctx context.Context) error {
 // are stopped at once, the second Stop would walk past a drain still in
 // flight and start releasing what its hooks are using.
 func (s *Scope) drain(ctx context.Context) error {
-	g0 := s.drainGen.Load()
+	g0 := s.st.drainGen.Load()
 	var r *drainRun
 	newRun := func() *drainRun {
-		root := &drainScope{st: s.state, ours: true}
-		return &drainRun{root: root, seen: map[*state]*drainScope{s.state: root}}
+		root := &drainScope{st: s.st, ours: true}
+		return &drainRun{root: root, seen: map[*state]*drainScope{s.st: root}}
 	}
-	claimed := s.drainOnce.claim(s.state, nil)
+	claimed := s.st.drainOnce.claim(s.st, nil)
 	var err error
 	if claimed {
 		r = newRun()
@@ -775,9 +775,9 @@ func (s *Scope) drain(ctx context.Context) error {
 		// The owner settles the phase with what this scope's own hooks
 		// reported, and a Stop reports that whether it ran the hooks or
 		// waited for someone else to.
-		finished, werr := s.drainOnce.wait(s.state, ctx)
+		finished, werr := s.st.drainOnce.wait(s.st, ctx)
 		if !finished {
-			werr = fmt.Errorf("di: waiting for scope %s to drain: %w", s.name, ctx.Err())
+			werr = fmt.Errorf("di: waiting for scope %s to drain: %w", s.st.name, ctx.Err())
 		}
 		err = werr
 	}
@@ -786,15 +786,15 @@ func (s *Scope) drain(ctx context.Context) error {
 	// build published, a start step claimed. Either the seal sees it and
 	// the sweep goes round again, or it sees the seal and waits for the
 	// decision.
-	for !s.seal(ctx, g0) {
-		g0 = s.drainGen.Load()
+	for !s.st.seal(ctx, g0) {
+		g0 = s.st.drainGen.Load()
 		if r == nil {
 			r = newRun()
 		}
 		err = errors.Join(err, r.sweepAll(ctx))
 	}
 	if claimed {
-		s.drainOnce.settle(s.state, err) // this scope's phase is the last to end
+		s.st.drainOnce.settle(s.st, err) // this scope's phase is the last to end
 	}
 	return err
 }
