@@ -78,6 +78,34 @@ waits for whoever did, and it waits out `phaseStarting`, which is what stops a
 resolution handing back a service whose `OnStart` is still running. `settled`
 says the build step is over and `value`/`err` are final.
 
+**The warm path takes no lock in the scope that owns the service.** A
+top-level resolution of a built singleton reads three atomics and no mutex:
+`hasPending` and `reg` on each scope it looks through, and `instance.ready`.
+Two locks remain on a warm resolution, and both belong to the resolving side:
+`instanceFor` takes the resolving scope's mutex for a `Scoped` binding, since
+that scope's map is where the instance lives, and `dependOn` takes the asking
+instance's holder mutex when the resolution is made inside a constructor,
+which is only while that constructor is building. Before this, every warm
+`Get` of a root singleton took the root's mutex three times, and on eight
+cores it cost nine times what it did on one (`benchmarks/parallel_test.go` is
+the record).
+`ready` is a summary of `ph`, `err` and `settled`, recomputed by `refresh` in
+the same critical section as every change to them, and it is set exactly when
+`await`'s locked loop would return the value at once: settled, no error, and
+`phaseBuilt` or `phaseStarted`. A load that sees it set is ordered before
+whatever clears it, which is when the locked loop would have answered the same.
+Clearing it on `phaseStopped` is not needed for correctness, since the
+stopped check follows either way, but it keeps the flag a plain restatement
+of the loop's exit condition. `startCtx` and `running` are atomics for the
+same reason, since every build reads them up the whole chain; the one-start
+guarantee never rested on a mutex there, only on `publish` preceding the read
+of `running` and `Start` setting it before its drain.
+
+What still takes a shared lock per request is `Child` and the detach at the
+end of `teardown`, both on the parent's mutex, and `claimBuild`/`settle` on
+`graph.mu`. They are one acquisition each and short, and the request benchmark
+at eight cores is where to look if that changes.
+
 **A waiter blocks on one step, not on the scope.** Each step another goroutine
 can be responsible for finishing has a channel closed when it is done:
 `settledCh`, `startingCh`, `drainedCh`. One rule covers all three -- the first
@@ -239,7 +267,11 @@ for a later pass meant a start step that outlasted the phase was never drained.
 one batch. The batch is validated against *prospective copies* of
 `index`/`groups`/`all`, so a rejected registration leaves the scope untouched
 and keeps being rejected identically. Do not move a mutation of the real maps
-before validation.
+before validation. The copies are committed as a new `registry` behind an
+atomic pointer and never written to again, which is what lets `lookup`, `All`
+and the renderers read one without the mutex: a registry that is mutated in
+place, even by an append that happens to fit its capacity, is a data race with
+every lookup.
 
 **A key names one live value per scope, and four guards each close one way of
 getting two.** In `freeze`: a second registration of a key in the same scope
@@ -407,8 +439,12 @@ binding and cannot protect the inner scope.
 
 ## Invariants that are easy to break
 
-- Never set a phase or read `running`/`stopped` for a decision outside the
-  owning state's mutex.
+- Never set a phase outside the owning state's mutex, and never change `ph`,
+  `err` or `settled` without calling `refresh` in the same critical section:
+  the warm path trusts `ready` without the lock, so a stale true hands out a
+  value the locked loop would have refused. `running` and `stopped` are
+  atomics; a decision on them is sound because of its order against
+  `publish`, not because of a lock.
 - **`Stop` is synchronous, and that rests on one rule: no hook may call `Stop`
   on its own scope or an ancestor.** `stopIfNeeded` waits out every step
   another goroutine owns for the instance -- `phaseStarting`, then `draining`

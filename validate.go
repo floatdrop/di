@@ -82,8 +82,7 @@ func (s *Scope) Validate(stubs ...Stub) Validation {
 // registration order: what index and groups hold, without the registrations
 // an Override replaced.
 func (st *state) live() []*binding {
-	st.mu.Lock()
-	defer st.mu.Unlock()
+	reg := st.reg.Load()
 	serving := map[*binding]bool{}
 	// A wrapper serves the key and what it wraps is built underneath it,
 	// so the whole chain is live; a chain an Override replaced is not.
@@ -92,16 +91,16 @@ func (st *state) live() []*binding {
 			serving[b] = true
 		}
 	}
-	for _, b := range st.index {
+	for _, b := range reg.index {
 		chain(b)
 	}
-	for _, bs := range st.groups {
+	for _, bs := range reg.groups {
 		for _, b := range bs {
 			chain(b)
 		}
 	}
 	var out []*binding
-	for _, b := range st.all {
+	for _, b := range reg.all {
 		if serving[b] {
 			out = append(out, b)
 		}

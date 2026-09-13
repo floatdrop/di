@@ -182,11 +182,10 @@ func newState(name string, parent *state) *state {
 	st := &state{
 		name:       name,
 		parent:     parent,
-		index:      map[key]*binding{},
-		groups:     map[key][]*binding{},
 		scoped:     map[*binding]*instance{},
 		shutdownCh: make(chan struct{}),
 	}
+	st.reg.Store(emptyRegistry)
 	// One graph per container, shared by every scope under the root.
 	if parent != nil {
 		st.graph = parent.graph
@@ -251,18 +250,23 @@ func moduleName(m Module) string {
 // scope under it. Use it for logging and metrics.
 func (s *Scope) Observe(fn func(Event)) {
 	s.mu.Lock()
-	s.observers = append(s.observers, fn)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	var obs []func(Event)
+	if p := s.observers.Load(); p != nil {
+		obs = slices.Clone(*p)
+	}
+	obs = append(obs, fn)
+	s.observers.Store(&obs)
 }
 
-// emit delivers ev to the observers of st and its ancestors.
+// emit delivers ev to the observers of st and its ancestors. It takes no
+// lock: every build in every request scope reports through the root.
 func (st *state) emit(ev Event) {
 	for ; st != nil; st = st.parent {
-		st.mu.Lock()
-		obs := slices.Clone(st.observers)
-		st.mu.Unlock()
-		for _, fn := range obs {
-			fn(ev)
+		if p := st.observers.Load(); p != nil {
+			for _, fn := range *p {
+				fn(ev)
+			}
 		}
 	}
 }

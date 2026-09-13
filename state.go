@@ -20,24 +20,37 @@ type state struct {
 	parent *state
 	graph  *graph // the container's wait-for graph, shared with every other scope under the root
 
-	mu        sync.Mutex
-	pending   []*binding // registrations not yet indexed
-	index     map[key]*binding
-	groups    map[key][]*binding
-	frozen    bool
-	all       []*binding             // every binding, in registration order
-	eager     []*binding             // derived by deriveEager: what Start builds
-	started   []*instance            // build order; stopped in reverse
-	scoped    map[*binding]*instance // per-scope instances of Scoped bindings
-	served    map[key]bool           // keys this scope resolved from an outer scope; lazily made
-	children  []*state
-	observers []func(Event)
+	// reg is the committed registry. freeze builds a new one and stores it,
+	// and nothing writes to a registry after that, so a lookup reads it
+	// without the mutex. hasPending says whether freeze has a batch to
+	// commit: register sets it and freeze clears it, both under mu, so a
+	// lookup that finds it clear skips the lock as well.
+	reg        atomic.Pointer[registry]
+	hasPending atomic.Bool
+
+	mu       sync.Mutex
+	pending  []*binding // registrations not yet indexed
+	frozen   bool
+	started  []*instance            // build order; stopped in reverse
+	scoped   map[*binding]*instance // per-scope instances of Scoped bindings
+	served   map[key]bool           // keys this scope resolved from an outer scope; lazily made
+	children []*state
+
+	// observers is replaced whole by Observe, under mu, and read without it
+	// by emit, which runs for every step in every scope below this one.
+	observers atomic.Pointer[[]func(Event)]
 
 	stopped  atomic.Bool     // set by Stop or a failed Start; resolution then fails with ErrStopped
 	stopCtx  context.Context // the context Stop was called with
 	stopOnce once            // this scope's teardown; later Stop calls wait for it
-	startCtx context.Context // set by Start; read by Context()
-	running  bool            // set once Start reaches the hook phase; enables late OnStart
+
+	// startCtx is set once, by Start, and running once Start reaches its
+	// hook phase, which is when a service built later starts itself. Both
+	// are atomic because every build reads them up the whole scope chain.
+	// What makes a late build start exactly once is their order against
+	// publish, not a mutex: see startIfRunning.
+	startCtx atomic.Pointer[context.Context]
+	running  atomic.Bool
 
 	// drainOnce is the scope-wide drain phase, once-with-wait like stopOnce:
 	// a second Stop reaching this scope waits for the first drain instead of
@@ -49,20 +62,37 @@ type state struct {
 	shutdownErr  error
 }
 
+// registry is a scope's committed registrations. It is immutable once
+// stored: freeze builds the next one from copies and swaps it in whole.
+type registry struct {
+	index  map[key]*binding
+	groups map[key][]*binding
+	all    []*binding // every binding, in registration order
+	eager  []*binding // derived by deriveEager: what Start builds
+}
+
+// emptyRegistry is what a scope starts with. Sharing it is safe because no
+// registry is ever written to.
+var emptyRegistry = &registry{index: map[key]*binding{}, groups: map[key][]*binding{}}
+
 // freeze commits the pending registrations. The batch is validated against a
 // copy of the registry and committed only if it passes, so a rejected
 // registration leaves the scope as it was and is rejected identically on
 // every later attempt.
 func (st *state) freeze() {
+	if !st.hasPending.Load() {
+		return // the warm path: nothing queued, so nothing to lock for
+	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if len(st.pending) == 0 {
 		return
 	}
 
-	index := maps.Clone(st.index)
-	groups := maps.Clone(st.groups)
-	all := slices.Clone(st.all)
+	cur := st.reg.Load()
+	index := maps.Clone(cur.index)
+	groups := maps.Clone(cur.groups)
+	all := slices.Clone(cur.all)
 	for _, b := range st.pending {
 		// A wrapper is built where what it wraps is built, so it takes that
 		// lifetime, read here rather than at registration because the
@@ -123,8 +153,9 @@ func (st *state) freeze() {
 	}
 	eager := deriveEager(all, index)
 
-	st.index, st.groups, st.all, st.eager = index, groups, all, eager
+	st.reg.Store(&registry{index: index, groups: groups, all: all, eager: eager})
 	st.pending, st.frozen = nil, true
+	st.hasPending.Store(false)
 }
 
 // deriveEager returns the ordered set of bindings Start builds, and is the
@@ -184,11 +215,8 @@ func (st *state) isStopped() bool {
 // with a nil ctx, since start records the context before setting the flag.
 func (st *state) runContext() (ctx context.Context, running bool) {
 	for ; st != nil; st = st.parent {
-		st.mu.Lock()
-		ctx, running = st.startCtx, st.running
-		st.mu.Unlock()
-		if ctx != nil {
-			return ctx, running
+		if p := st.startCtx.Load(); p != nil {
+			return *p, st.running.Load()
 		}
 	}
 	return nil, false

@@ -7,6 +7,17 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Changed
+
+- A warm resolution, of a service that is already built, no longer takes a
+  mutex in the scope that owns it, and observers are called without one.
+  Every `Get` of an application singleton used to serialise on the
+  application scope, so it got slower per call as cores were added: 46 ns on
+  one core and 418 ns on eight, on an M3 Max. It is now 44 ns and 55 ns, and
+  a whole request scope at eight cores went from 2.3 µs to 1.4 µs.
+  No API or behaviour changes; the new `benchmarks/parallel_test.go` records
+  the shapes.
+
 ## [0.16.1] - 2026-09-12
 
 One fix. `go doc -all` against 0.16.0 is unchanged in `di`, `dihttp` and

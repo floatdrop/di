@@ -68,10 +68,7 @@ func (s *Scope) groupMembers(k key) []found {
 	var out []found
 	for st := s.state; st != nil; st = st.parent {
 		st.freeze()
-		st.mu.Lock()
-		bs := slices.Clone(st.groups[k])
-		st.mu.Unlock()
-		for _, b := range bs {
+		for _, b := range st.reg.Load().groups[k] {
 			out = append(out, found{b: b, owner: st})
 		}
 	}
@@ -191,10 +188,7 @@ func (s *Scope) declaredBy(b *binding, except []dep) []string {
 // the registrations already committed.
 func peek(st *state, k key) *binding {
 	for ; st != nil; st = st.parent {
-		st.mu.Lock()
-		b, ok := st.index[k]
-		st.mu.Unlock()
-		if ok {
+		if b, ok := st.reg.Load().index[k]; ok {
 			return b
 		}
 	}
