@@ -201,7 +201,7 @@ func newState(name string, parent *state) *state {
 	if parent != nil {
 		st.graph = parent.graph
 	} else {
-		st.graph = &graph{blockedFor: map[*resolver]*instance{}}
+		st.graph = &graph{under: map[*resolver]map[*waitEdge]struct{}{}}
 	}
 	return st
 }
