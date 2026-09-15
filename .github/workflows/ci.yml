@@ -38,7 +38,6 @@ jobs:
           go run ./quickstart
           go run ./scopes
           go run ./explain
-          go run ./optional
           go run ./observe
           go run ./reload
       - name: test

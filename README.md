@@ -98,15 +98,14 @@ func main() {
 
 ## Guide
 
-The sections follow the order an application comes together: register and
-resolve, add a lifecycle, split into scopes, compose modules, then check and
-inspect. Every embedded example is a compiled program under
-[`examples/`](examples/), built in CI.
+The sections follow the order an application comes together. Every
+embedded example is a compiled program under [`examples/`](examples/), built
+in CI.
 
 ### Registering and resolving
 
-Each registration returns a `Binding[T]`. Its methods adjust the
-registration and must be called before the scope is first resolved.
+Each registration returns a `Binding[T]`. Its methods must be called before
+the scope is first resolved.
 
 | Call | Registers |
 |---|---|
@@ -126,7 +125,7 @@ registration and must be called before the scope is first resolved.
 | `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
 | `.Go(f)` | A worker: a long-running function in a goroutine of its own, cancelled on stop. |
 
-To get a service back, call the scope, from a constructor or from outside:
+To get a service back:
 
 | Call | Returns |
 |---|---|
@@ -144,16 +143,12 @@ di: building *app.Repo (provided at app/wire.go:31): *app.DB: not provided (need
 di: building *app.A (provided at ...): di: building *app.B (provided at ...): di: dependency cycle: [*app.A *app.B] -> *app.A
 ```
 
-`Provide` takes a closure that pulls its dependencies with `s.Get`; the
-container learns what it needed by watching it run. `Wire` takes a
-constructor as it is written, `func(A, B) T` or `func(A, B) (T, error)`;
-its parameters are its dependencies, resolved as the closure would have
-resolved them and known before it runs, so [Validate](#validate) can check
-them and `Explain` can draw them. The signature is read with reflection
-once, at registration, and a constructor of the wrong shape is rejected
-there. A slice parameter is a key like any other, not the group for its
-element type, and a constructor that needs the scope itself, for
-`s.Context()` or a dependency chosen at run time, stays a `Provide` closure.
+`Provide` takes a closure that pulls its dependencies with `s.Get`. `Wire`
+takes a plain constructor, `func(A, B) T` or `func(A, B) (T, error)`; its
+parameters are its dependencies, so `Validate` can check them before
+anything runs, and a wrong shape is rejected at registration. A slice
+parameter is a key, not a group. A constructor that needs the scope itself
+stays a closure.
 
 An interface is served by a constructor that returns the implementation:
 
@@ -162,187 +157,64 @@ app.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })
 app.Wire[Reader](NewRepo) // the same, when NewRepo returns *Repo
 ```
 
-Both keys share one instance, since the constructor returns the same
-pointer; mark it `Scoped()` too when the target is. `Wire` accepts any
-result assignable to the key.
+Both keys share one instance. Mark it `Scoped()` too when the target is.
+`Wire` accepts any result assignable to the key.
 
-Three rules, all checked when the scope is next resolved:
+Three rules, checked when the scope is next resolved:
 
-- A second registration of a key in one scope must say `Override()`, and
-  then serves the key and inherits its eagerness. A duplicate without the
-  marker, or an `Override()` with nothing to override, is rejected naming
-  both registrations. A child shadows its parent's key without the marker,
-  since that is a different scope.
-- Once a key has served a value it cannot be replaced, in the scope that
-  owns it or in any scope that resolved through it. A failed resolution
-  built nothing, so the key stays open.
-- `Eager` on a `Scoped` binding, and `Scoped` on a `Value`, are rejected
-  whichever order the methods were called in.
+- A second registration of a key in one scope must say `Override()`, or it
+  is rejected naming both sites; so is an `Override()` with nothing to
+  override. It inherits the key's eagerness. A child shadows its parent's
+  key without the marker.
+- A key that has served a value cannot be replaced, in its own scope or in
+  any scope that resolved through it.
+- `Eager` on a `Scoped` binding, and `Scoped` on a `Value`, are rejected.
 
 #### Optional dependencies
 
-There is no `optional` marker. A key is provided or it is not, and a
-dependency nothing provides is an error, so a service that can do without
-something says so by providing the absence.
+There is no `optional` marker: a dependency nothing provides is an error. A
+service that can do without something provides the absence instead.
 
-The first way is a nil default. `s.Value[*Cache](nil)` provides the key
-with nothing in it, and `*Cache` stays an ordinary declared dependency:
-`Validate` checks the edge, `Explain` draws it, and a deployment that has a
-cache overrides it. The constructor handles the nil.
-
-For an interface, a null object goes further: an implementation that does
-nothing, so nothing downstream has a branch to write. Either way the absence
-is a registration with a call site, `Explain` and `Modules` report it, and
-the real one gets in with an `Override()` before anything resolves.
-
-Branching on presence is the third way, for a key nothing registers at all.
-`s.Maybe[T]()` returns `(T, bool)`, false meaning no scope in the chain
-provides `T`, and only a `Provide` closure can ask:
-
-<details>
-<summary><code>examples/optional/main.go</code>, the program that prints the output below</summary>
-
-[embedmd]:# (examples/optional/main.go go)
 ```go
-// Optional dependencies: a key that a deployment may or may not have. A nil
-// default and a null object keep every declared edge provided, so the graph
-// still checks; Maybe answers presence when a constructor has to branch on a
-// key nothing registered at all.
-package main
-
-import (
-	"fmt"
-
-	"github.com/floatdrop/di"
-)
-
-type Cache struct{ addr string }
-type Tracer struct{}
-type Store struct{ cache *Cache }
-type Report struct{ line string }
-
-type Metrics interface{ Count(string) }
-
-type nopMetrics struct{}
-type logMetrics struct{}
-
-func (nopMetrics) Count(string)   {}
-func (logMetrics) Count(n string) { fmt.Println("count:", n) }
-
-// The constructors know nothing about di. A dependency that may be absent is
-// a parameter like any other, and the nil is the absence.
-func NewCache() *Cache          { return &Cache{addr: "localhost:6379"} }
-func NewNopMetrics() nopMetrics { return nopMetrics{} }
-func NewLogMetrics() logMetrics { return logMetrics{} }
-
-func NewStore(c *Cache, m Metrics) *Store {
-	m.Count("store.built")
-	return &Store{cache: c}
-}
-
-// Something has to handle the absence, and this is where it happens.
-func (s *Store) Get(key string) string {
-	if s.cache == nil {
-		return "db:" + key
-	}
-	return "cache:" + key
-}
-
-// A closure is what can ask whether a key is registered at all: Maybe is
-// (T, bool), and false means nothing in this scope or above provides it.
-func NewReport(s *di.Scope) *Report {
-	line := s.Get[*Store]().Get("1")
-	if _, ok := s.Maybe[*Tracer](); ok {
-		line = "traced(" + line + ")"
-	}
-	return &Report{line: line}
-}
-
-// Base is the wiring every deployment shares. *Cache is provided as nil and
-// Metrics as a null object, so *Store has no unprovided dependency and needs
-// no di import to say it can do without them.
-func Base(s *di.Scope) {
-	s.Value[*Cache](nil)
-	s.Wire[Metrics](NewNopMetrics)
-	s.Wire[*Store](NewStore)
-	s.Provide(NewReport)
-}
-
-func main() {
-	plain := di.New()
-	plain.Use(Base)
-
-	// Every declared edge is provided, so there is nothing to report. The
-	// closure is unchecked, which is what asking with Maybe costs.
-	v := plain.Validate()
-	fmt.Println("errors:   ", v.Err())
-	fmt.Println("unchecked:", v.Unchecked)
-	fmt.Println("plain:    ", plain.Get[*Report]().line)
-
-	// A deployment that has a cache and a tracer registers them. The
-	// defaults are overridden, and nothing that depends on them changes.
-	full := di.New()
-	full.Use(Base)
-	full.Wire[*Cache](NewCache).Override()
-	full.Wire[Metrics](NewLogMetrics).Override()
-	full.Value(&Tracer{}) // a new key in this scope, so no marker is needed
-	fmt.Println("full:     ", full.Get[*Report]().line)
-	fmt.Print(full.Explain[*Store]())
-}
+app.Value[*Cache](nil)           // a nil default: provided, checked, overridden where there is one
+app.Wire[Metrics](NewNopMetrics) // a null object: nothing downstream has a branch
+app.Provide(func(s *di.Scope) *Report {
+    _, traced := s.Maybe[*Tracer]() // presence, for a key nothing registers at all
+    return NewReport(s.Get[*Store](), traced)
+})
 ```
 
-</details>
-
-```
-errors:    <nil>
-unchecked: [*main.Report (provided at main.Base (main.go:62))]
-plain:     db:1
-count: store.built
-full:      traced(cache:1)
-*main.Store: singleton in root, built (provided at main.go:61)
-├── *main.Cache: singleton in root, built (provided at main.go:80)
-└── main.Metrics: singleton in root, built (provided at main.go:81)
-needed by: *main.Report in root
-```
-
-A nil default makes the key present, so `Maybe[*Cache]()` reports it as
-provided, with a nil value. `Maybe` records nothing when the key is absent,
-so a later registration of it is not rejected and a constructor that already
-ran will not see it; a nil default is the better answer whenever the key can
-be named up front.
-
-A pointer parameter is not optional on its own: nearly every dependency in
-Go is a pointer or an interface, and that rule would leave `Validate`
-nothing to prove. This is fx's `optional:"true"` tag, with the absence
-registered rather than tagged.
+A nil default makes the key present, so `Maybe` reports it provided, with
+nil in it. `Maybe` records nothing when the key is absent, so a later
+registration is not rejected and a constructor that already ran will not
+see it; only a closure can ask, so `Validate` lists it as unchecked. A
+pointer parameter is not optional on its own; that is fx's `optional:"true"`
+tag, registered rather than tagged.
 
 ### Lifecycle
 
 `Start` builds every `Eager` binding, then runs `OnStart` hooks in build
-order. If a constructor or hook fails, `Start` stops what had started, child
-scopes included, and returns both errors. A service built after `Start` runs
-its `OnStart` as it is built, so nothing is handed out unstarted.
+order. If one fails, `Start` stops what had started, child scopes included,
+and returns both errors. A service built after `Start` runs its `OnStart` as
+it is built.
 
-`Stop` has three phases: drain, stop the child scopes, then run `OnStop`
-hooks in reverse build order. Every failure is joined into the returned
-error. A service is stopped when its `OnStart` succeeded or when it has no
-`OnStart`, in which case `OnStop` is a plain destructor. After `Stop`, the
-scope and everything under it refuses to resolve with `di.ErrStopped`.
+`Stop` drains, stops the child scopes, then runs `OnStop` hooks in reverse
+build order, and joins every failure into its error. `OnStop` runs when
+`OnStart` succeeded or when there is none. After `Stop`, the scope and
+everything under it resolves with `di.ErrStopped`.
 
-`Stop` is safe to call twice or concurrently. The first call does the work;
-the others wait for it and report its result. That is also why a hook must
-not call `Stop` on its own scope or an ancestor, which would wait on itself.
-Call `Shutdown`, which never blocks.
+`Stop` is safe to call twice or concurrently: later calls wait for the first
+and report its result. So a hook must not call `Stop` on its own scope or an
+ancestor; it calls `Shutdown`, which never blocks.
 
-`OnStart` should return when the service is ready, not run it. A server binds
-its listener in the hook, so a busy port fails `Start`, and serves in a
-goroutine.
+`OnStart` returns when the service is ready. A server binds its listener in
+the hook, so a busy port fails `Start`, and serves in a goroutine.
 
 #### Draining
 
-`OnDrain` runs before anything is stopped, innermost scope first and in
-reverse build order, while every scope still resolves. It is where a service
-stops taking new work and finishes what it has.
+`OnDrain` runs before anything is stopped, innermost scope first, while
+every scope still resolves. It is where a service stops taking work and
+finishes what it has.
 
 ```go
 app.Wire[*http.Server](newServer).Eager().
@@ -350,14 +222,14 @@ app.Wire[*http.Server](newServer).Eager().
     OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Close() })
 ```
 
-An HTTP server is the case that needs it: its handlers hold request scopes,
-and shutting it down from `OnStop` would race their teardown. Draining first
-keeps those scopes alive until the handlers return.
+An HTTP server's handlers hold request scopes, and shutting it down from
+`OnStop` would race their teardown. Draining first keeps them alive until
+the handlers return.
 
 #### Workers
 
-`Go` registers a worker, for anything that loops until told to stop:
-consumers, pollers, schedulers. It is errgroup's `Go`, applied to a service.
+`Go` registers a worker: a function that loops until told to stop, in a
+goroutine of its own. It is errgroup's `Go`, applied to a service.
 
 ```go
 app.Wire[*Mailer](newMailer).Eager().Go(func(ctx context.Context, m *Mailer) error {
@@ -365,18 +237,15 @@ app.Wire[*Mailer](newMailer).Eager().Go(func(ctx context.Context, m *Mailer) err
 })
 ```
 
-The function starts in its own goroutine when the service starts. Its
-context is cancelled when the service stops, and `Stop` waits for it within
-the stop deadline. A worker that returns an error calls `Shutdown`, so a
-dead worker takes the application down instead of leaving it half alive.
-`context.Canceled` after cancellation is the one return that means nothing.
+The context is cancelled when the service stops, and `Stop` waits for the
+function within its deadline. A worker that returns an error calls
+`Shutdown`; `context.Canceled` after cancellation means nothing.
 
 #### Run and Shutdown
 
-`Run` is the helper for `main`. It starts the scope and blocks until the
-context is cancelled, `SIGINT` or `SIGTERM` arrives, or `Shutdown` is called.
-Then it stops everything with a bounded context. A second signal during the
-stop cancels that context, so a hung hook cannot keep the process alive.
+`Run` is the helper for `main`: start, block until the context is cancelled,
+`SIGINT` or `SIGTERM` arrives, or `Shutdown` is called, then stop with a
+bounded context. A second signal cancels that context.
 
 <details>
 <summary><code>examples/server/main.go</code>, an HTTP server with OnStart, OnDrain and OnStop, run with a stop timeout</summary>
@@ -455,8 +324,8 @@ func main() {
 
 ### Scopes
 
-A child scope resolves through its parent, shares the parent's singletons,
-and owns what it builds itself.
+A child scope resolves through its parent, shares its singletons, and owns
+what it builds itself.
 
 [embedmd]:# (examples/scopes/main.go go)
 ```go
@@ -494,17 +363,16 @@ func main() {
 }
 ```
 
-A singleton is built in the scope that registered it, so a child cannot
-rewire a parent's singleton. A service that has to see a child's values is
-marked `Scoped()`: one instance per resolving scope, built there.
+A singleton is built in the scope that registered it. A service that has
+to see a child's values is `Scoped()`: one instance per resolving scope,
+built there.
 
 #### Request scopes
 
-A `dihttp.Middleware` gives each request a child scope holding the
-`*http.Request`, attaches it to the request context, and stops it when the
-handler returns. It has the usual `func(http.Handler) http.Handler` shape,
-so a router accepts it too. `dihttp.Module` registers one, and a server's
-constructor takes it like any other dependency:
+`dihttp.Middleware` gives each request a child scope holding the
+`*http.Request`, puts it in the request context, and stops it when the
+handler returns. It has the `func(http.Handler) http.Handler` shape.
+`dihttp.Module` registers one:
 
 ```go
 import "github.com/floatdrop/di/dihttp"
@@ -520,33 +388,24 @@ func NewServer(cfg Config, mw dihttp.Middleware) *http.Server {
 ```
 
 `dihttp.Handle` resolves a handler type from the request's scope and calls
-the method. Mark the type `Scoped()` when it needs the request and leave it
-a singleton when it does not. A handler written by hand reaches the scope
-with `di.FromContext(r.Context())`, and `dihttp.NewMiddleware(app)` makes a
-middleware outside the container.
-
+the method; mark the type `Scoped()` when it needs the request.
+`di.FromContext(r.Context())` reaches the scope by hand, and
+`dihttp.NewMiddleware(app)` makes a middleware outside the container.
 Services that depend on the request are declared once, in the root, as
-`Scoped()`. They are built per request, kept for its duration, and stopped
-with it:
+`Scoped()`:
 
 ```go
 app.Wire[*User](func(r *http.Request) *User { return &User{Name: r.Header.Get("X-User")} }).Scoped()
 ```
 
-`di.WithScope` and `di.FromContext` are the primitives when `net/http` is
-not in the picture. A complete service with a worker, a health endpoint,
-request scopes and graceful shutdown is in
-[`examples/app`](examples/app/main.go).
+`di.WithScope` and `di.FromContext` are the primitives without `net/http`.
+[`examples/app`](examples/app/main.go) is a complete service.
 
 #### Values that change
 
-There is no transient lifetime. Two shapes cover what one would be asked
-for.
-
-A value made fresh on every use is a function, registered like any other
-service and asked for like one. Its type is the key, so it is named: two
-factories with the same signature would otherwise collide, and the name is
-what `Explain` shows and what a wired constructor asks for.
+There is no transient lifetime. A value made fresh on every use is a
+function, registered and resolved like any service. Its type is the key, so
+it is named:
 
 ```go
 type NewID func(n int) string
@@ -556,20 +415,14 @@ app.Wire[NewID](func(cfg Config) NewID {
 })
 ```
 
-The container builds the factory once, with dependencies and hooks of its
-own, and never sees what it makes. Those values are the caller's to release,
-as a `*sql.Conn` from `sql.DB.Conn` is, or the factory keeps them and its
-`OnStop` releases them, which is what a pool is. A value that needs a
-lifecycle of its own is a scope's, not a factory's: mark it `Scoped()`,
-resolve it from a child opened for one unit of work, and stop the child when
-the work ends. The container then drains it, stops it in order and shows it
-in `Explain`, at the cost of a scope per unit of work.
+The container builds the factory once and never sees what it makes. A value
+that needs a lifecycle of its own is `Scoped()` and resolved from a child
+opened for one unit of work, which stops it.
 
-A value that changes while the application runs, such as configuration
-reloaded in the background, is the other shape, and a lifetime would not
+A value that changes while the application runs, such as reloaded
+configuration, is held by a service that does not. A lifetime would not
 help: a singleton's constructor is called once and captures one snapshot
-whatever the lifetime of what it asked for. A value that changes is held by
-a service that does not:
+regardless.
 
 <details>
 <summary><code>examples/reload/main.go</code>, the program that prints the output below</summary>
@@ -687,29 +540,17 @@ request a: 100 per minute
 request b: 200 per minute
 ```
 
-The source is an ordinary singleton whose worker applies reloads until the
-application stops. A long-lived service takes the source and reads
-`Current()` when it needs the value. A per-request service keeps taking
-`Config`: a snapshot wired from the source and marked `Scoped()` is built
-once per request scope, so a request sees one configuration throughout and
-the next sees the current one. `Validate` and `Explain` see the edge either
-way.
-
-A snapshot resolved from the application scope is cached there, like any
-`Scoped` value, and is then as stale as a singleton: resolve it from request
-scopes and let singletons take the source. A service that has to react to a
-change rather than read the next one subscribes to the source; that is the
-source's API, not the container's.
-
-samber/do's `ProvideTransient` does not track its instances either, and
-uber/fx has no transient at all.
+A long-lived service takes the source and reads `Current()` when it needs
+the value. A per-request service takes `Config`: a `Scoped()` snapshot
+wired from the source, built once per request scope. Resolve it from
+request scopes; one resolved from the application scope is cached there. A
+service that must react to a change subscribes to the source.
 
 #### Groups
 
-`Group()` makes a registration one member of the group for its type instead
-of the binding for it, and `All` resolves every member across the scope
-chain. The usual case is a health endpoint: a group of checkers, and a
-handler that decides what healthy means.
+`Group()` makes a registration a member of the group for its type, and
+`All` resolves every member across the scope chain. The usual case is a
+health endpoint:
 
 ```go
 type Checker interface{ Check(ctx context.Context) error }
@@ -727,27 +568,21 @@ mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
-`All` builds any member not built yet, so a checker's target is up by the
-time it is asked. Members keep their own lifetimes and hooks. A plain
-registration of the same type is neither shadowed by the group nor part of
-it.
+`All` builds members not built yet. Members keep their own lifetimes and
+hooks. A plain registration of the same type is neither shadowed by the
+group nor part of it.
 
 #### More than one instance of a type
 
 A key is a Go type, so two live instances of one type need two types. While
-the set is fixed — a primary and a replica, two HTTP clients with different
-timeouts — a defined type names each one, and embedding keeps the methods:
-`type Primary struct{ *DB }`. The surrogate appears in constructor signatures
-and nowhere else. `Wire` resolves it like any other parameter, so nothing has
-to be annotated to say which instance feeds which argument, and `Validate`
-and `Explain` see two distinct services rather than one type registered
-twice.
+the set is fixed, a defined type names each one and embedding keeps the
+methods: `type Primary struct{ *DB }`. The surrogate appears in constructor
+signatures and nowhere else; `Wire` resolves it like any parameter, and
+`Validate` and `Explain` see two services.
 
-When the set comes from configuration there are no types to write. Register
-the instances as a group, fold them into a registry, and let the scope that
-resolves the key say which one it wants: the selector is an ordinary
-constructor whose parameter is the key, and `Scoped()` leaves the choice to
-the resolving scope.
+When the set comes from configuration, register the instances as a group,
+fold them into a registry, and let the resolving scope pick: the selector is
+a constructor whose parameter is the key, marked `Scoped()`.
 
 <details>
 <summary><code>examples/instances/main.go</code>, a primary and a replica by type, and configured shards by a scoped selector</summary>
@@ -853,25 +688,21 @@ func main() {
 
 Rules and traps:
 
-- Use `Wire` for the selector rather than `Provide`. Its parameter declares
-  the key, so `Validate` reports the key in `Owed` — the obligation the
-  resolving scope carries — and `Validate(di.Provided[T]())` discharges it
-  as a request scope would. A `Provide` closure behaves identically at run time and
-  declares nothing, so the missing key is found by the first request that
-  needs it.
-- One key resolves to one value per scope. A caller that needs two shards at
-  once reads the registry, or opens a scope for each.
-- A type alias is not a new key. `type CacheDB = *DB` is the same
-  `reflect.Type`, and the second registration of it is rejected as a
-  duplicate. A surrogate has to be a defined type.
-- A surrogate that embeds an interface satisfies that interface, so
-  `type Cold struct{ Store }` compiles wherever a `Store` is wanted. It is
-  still a separate key: registering `Cold` does not serve `Store`.
+- Use `Wire` for the selector. Its parameter declares the key, so `Validate`
+  reports it in `Owed` and `Validate(di.Provided[T]())` discharges it. A
+  `Provide` closure declares nothing, so the missing key is found by the
+  first request.
+- One key resolves to one value per scope. Two shards at once means the
+  registry, or a scope each.
+- A type alias is not a new key: `type CacheDB = *DB` is the same
+  `reflect.Type`. A surrogate is a defined type.
+- A surrogate that embeds an interface satisfies it but is still a separate
+  key: registering `Cold` does not serve `Store`.
 
 ### Composing modules
 
 A module is a function that registers into a scope. `Use` applies modules
-in order and records which module made each registration:
+in order and records which made each registration:
 
 ```go
 func Storage(s *di.Scope) {
@@ -892,15 +723,13 @@ app.Get[*Repo]()
 // Override() to replace the first
 ```
 
-Without that rule the second `*DB` would have won silently and rewired
-`Storage`'s `*Repo` to `Caching`'s database. Two modules that each need a
-`*DB` of their own declare distinct types, `type CacheDB struct{ *DB }`; a
-module that means to replace another's registration says `Override()`.
+Without that rule the second `*DB` would silently rewire `Storage`'s
+`*Repo`. Two modules that each need their own `*DB` declare distinct types;
+a module that means to replace another's registration says `Override()`.
 
-Keys are types, so a service whose type is unexported can be named, and
-therefore resolved, overridden, shadowed or wrapped, only by its own package.
-That is the whole privacy model. A module exports its contract and its
-`Module` function and keeps the rest lowercase:
+Keys are types, so an unexported type can be named, and so resolved,
+overridden or wrapped, only by its own package. That is the privacy model: a
+module exports its contract and its `Module` function.
 
 ```go
 type db struct{ dsn string }               // only this package can say Get[*db]()
@@ -911,18 +740,16 @@ func Module(s *di.Scope) {
 }
 ```
 
-`Explain`, `Graph` and `Validate` still see the private services. A test
-can override exactly what is exported: the contract, or the configuration
-the private service is built from.
+`Explain`, `Graph` and `Validate` still see private services. A test
+overrides what is exported.
 
 #### Wrapping a service
 
-`Wrap[T]` composes over whatever serves `T` at the time it is called: the
-latest registration in this scope, or the one an ancestor provides. The
-function takes the wrapped value first and its other dependencies after it,
-and returns `T` or `(T, error)`. The wrapped registration keeps its hooks
-and lifetime; it is built first, as the wrapper's dependency, and stopped
-after it. Wrappers chain in registration order. uber/fx calls this
+`Wrap[T]` composes over whatever serves `T` when it is called: the latest
+registration in this scope, or an ancestor's. The function takes the wrapped
+value first, then its dependencies, and returns `T` or `(T, error)`. The
+wrapped registration keeps its hooks and lifetime, is built first and
+stopped after. Wrappers chain in registration order. uber/fx calls this
 `Decorate`.
 
 <details>
@@ -997,15 +824,12 @@ pg closed
 
 Three rules:
 
-- A wrapper takes the lifetime of what it wraps, so a wrapper over a `Scoped`
-  service is one per scope. `Scoped()` on the wrapper puts one wrapper per
-  scope around a shared singleton.
-- A wrapper in a child scope applies to that child and its descendants. The
-  parent and its other children keep the original.
-- `Override()` after a wrapper replaces the wrapper and everything it
-  wrapped. A registration some wrapper composes over cannot be overridden
-  while that wrapper stands. Nothing to wrap, a group, and a key this scope
-  has already resolved are rejected.
+- A wrapper takes the lifetime of what it wraps; `Scoped()` on the wrapper
+  puts one per scope around a shared singleton.
+- A wrapper in a child scope applies to that child and its descendants.
+- `Override()` after a wrapper replaces the whole chain, and a wrapped
+  registration cannot be overridden while the wrapper stands. Nothing to
+  wrap, a group, and a key already resolved are rejected.
 
 #### Testing
 
@@ -1039,11 +863,10 @@ func TestRepo(t *testing.T) {
 #### Validate
 
 A wired constructor's dependencies are known at registration, so the graph
-they form can be checked with nothing built. `Validate` walks it and reports
-what would fail: a dependency nothing provides, a cycle, or a singleton that
-would build a request-scoped service in the wrong scope. A closure's
-dependencies are unknown until it runs, so `Provide` registrations are listed
-as unchecked rather than checked.
+can be checked with nothing built. `Validate` reports what would fail: a
+missing dependency, a cycle, or a singleton that would build a
+request-scoped service in the wrong scope. `Provide` closures are listed as
+unchecked.
 
 <details>
 <summary><code>examples/wire/main.go</code>, the program that prints the output below</summary>
@@ -1131,21 +954,18 @@ di: *net/http.Request: not provided in scope root (needed by [*main.Mailer *main
 | `s.Validate(di.Provided[T]()...)` | The same check as the resolving scope would make it, told that it holds a `T`. With stubs nothing is owed: what neither the scope nor the stubs provide is an error. |
 
 A `Scoped` binding is checked as the calling scope would resolve it, so what
-that scope does not provide is owed rather than wrong: call `Validate` from
+that scope does not provide is owed rather than wrong. Call `Validate` from
 the scope that will provide it, or say what it holds with
 `di.Provided[T]()`.
 
 #### Explain, Graph and Modules
 
-A closure's dependencies are learned by watching it resolve them; a wired
-constructor's are declared. What has been built has a recorded graph, what
-was wired has a declared one, and three methods render them: `Explain` for
-one service, `Graph` for everything built, and `Modules` for what each
-module provides and needs.
+Three renderers: `Explain` for one service, `Graph` for everything built,
+`Modules` for what each module provides and needs. What was built has a
+recorded graph; what was wired has a declared one.
 
-`Explain[T]` prints the dependency tree of one service, with each node's
-lifetime, scope, lifecycle phase and registration site, followed by what
-needed it:
+`Explain[T]` prints one service's dependency tree with lifetime, scope,
+phase and registration site, then what needed it:
 
 ```
 *main.Server: singleton in root, eager, started (provided at main.go:36)
@@ -1160,8 +980,7 @@ needed it:
 needed by: *main.Repo in root, *main.Cache in root
 ```
 
-A dependency reached twice is expanded once, so a diamond is drawn as one.
-Registration sites are absolute paths, shortened above.
+A dependency reached twice is expanded once.
 
 `Graph` renders everything built in a scope and its descendants as Graphviz
 DOT, one cluster per scope:
@@ -1170,11 +989,8 @@ DOT, one cluster per scope:
 go run ./examples/explain | dot -Tsvg > graph.svg
 ```
 
-`Modules` is the report for whoever composes the application: which module
-provides which keys, what each needs and which module serves it, what it
-wraps, and which of its constructors are closures whose needs are unknown
-until they run. A need only a resolving scope can provide is owed, as in
-`Validate`. This is the guide application's report, before anything is
+`Modules` reports what each module provides, needs and wraps, and which
+module serves each need. The guide application's report, before anything is
 built:
 
 [embedmd]:# (examples/guide/testdata/modules.txt)
@@ -1201,11 +1017,10 @@ api.Module
              dihttp.Middleware ← dihttp.Module
 ```
 
-None of the three builds anything. An unbuilt wired service is drawn with
-its declared dependencies dashed, as in the `Validate` example above, and
-`declared by:` names the unbuilt services that declare it. A closure that
-has not run ends its branch: for closures the graph is what ran, not what
-could run ([known limitation](docs/DESIGN.md#known-limitations)).
+None of the three builds anything: an unbuilt wired service shows its
+declared dependencies dashed, as under `Validate`, and a closure that has
+not run ends its branch
+([known limitation](docs/DESIGN.md#known-limitations)).
 
 <details>
 <summary><code>examples/explain/main.go</code>, the program that prints the first two trees in this section</summary>
@@ -1280,22 +1095,18 @@ app.Observe(func(ev di.Event) {
 })
 ```
 
-Observers receive an `Event` for every constructor and every `OnStart`,
-`OnDrain` and `OnStop` hook in the scope and its descendants, and one per
-`Shutdown`. Each event names the service and the import path of its type, its
-scope and module, the registration site, the duration, and the error if any.
-
-For logging, [`dislog`](dislog/) is that function already written against
-`log/slog`:
+Observers receive an `Event` for every constructor and hook in the scope
+and its descendants, and one per `Shutdown`: service, package, scope,
+module, site, duration and error. [`dislog`](dislog/) is that function
+written against `log/slog`:
 
 ```go
 app.Observe(dislog.New(slog.Default()))
 ```
 
-The event's kind is the message and the rest are attributes. A failed step
-is logged at `slog.LevelError` with the error and the registration site,
-anything else at `slog.LevelInfo` or the level `dislog.Level` sets, and
-`dislog.Site()` logs the site every time. Any handler will do:
+A failed step is logged at `slog.LevelError` with the site, anything else
+at `slog.LevelInfo` or the level `dislog.Level` sets; `dislog.Site()` logs
+the site every time.
 
 <details>
 <summary><code>examples/observe/main.go</code>, the program that prints the output below</summary>
@@ -1367,10 +1178,9 @@ ERRO stop service=*store.DB pkg=github.com/acme/app/internal/store scope=root mo
 WARN stopped with failures err="di: stopping *store.DB: connection reset"
 ```
 
-Observers see the scope they are registered on and every scope under it, so
-one on the application scope logs request scopes too. Events arrive on the
-goroutine that did the work, so a slow handler slows the application down.
-[`examples/guide/cmd/api`](examples/guide/cmd/api/main.go) wires it this way.
+Observers see the scope they are registered on and everything under it.
+Events arrive on the goroutine that did the work, so a slow handler slows
+the application.
 
 ## Performance
 
