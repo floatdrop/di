@@ -12,6 +12,10 @@
 // di appears twice because dig's Provide is reflective: Wire is the comparable
 // registration, and the Provide closure is what the same graph costs when the
 // dependencies are pulled by hand.
+//
+// The cold figure counts the registration-site strings, so its byte total
+// moves with how deep the source sits on disk; compare allocation counts
+// across checkouts, not bytes.
 package bench
 
 import (

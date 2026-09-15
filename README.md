@@ -105,11 +105,10 @@ func main() {
 
 ## Guide
 
-The sections follow the order an application comes together: register
-services and resolve them, give them a lifecycle, split them into scopes,
-compose them from modules, and then check and inspect the result. Every
-embedded example is a compiled program under [`examples/`](examples/), built
-in CI.
+The sections follow the order an application comes together: register and
+resolve, add a lifecycle, split into scopes, compose modules, then check and
+inspect. Every embedded example is a compiled program under
+[`examples/`](examples/), built in CI.
 
 ### Registering and resolving
 
@@ -152,22 +151,16 @@ di: building *app.Repo (provided at app/wire.go:31): *app.DB: not provided (need
 di: building *app.A (provided at ...): di: building *app.B (provided at ...): di: dependency cycle: [*app.A *app.B] -> *app.A
 ```
 
-`Provide` takes a closure. It pulls its dependencies with `s.Get` and can do
-anything else it likes, and the container learns what it needed by watching
-it run. `Wire` takes a constructor as it is written, `func(A, B) T` or
-`func(A, B) (T, error)`, and its parameters are its dependencies. Each one is
-resolved as the closure would have resolved it, from the same scope, so
-lifetimes, hooks, cycles and errors behave the same. The difference is that
-a wired constructor's dependencies are known before it runs, so
-[Validate](#validate) can check them and `Explain` can draw them.
-
-`Wire` reads the signature with reflection once, when the constructor is
-registered, and rejects one of the wrong shape there. Building calls it
-through `reflect.Call`, about 150 ns and two allocations more than a closure;
-a warm `Get` is the same code for both. Two things to know: a slice parameter
-is a key like any other, not the group for its element type; and a
-constructor that needs the scope itself, for `s.Context()` or a dependency
-chosen at run time, stays a `Provide` closure.
+`Provide` takes a closure that pulls its dependencies with `s.Get`; the
+container learns what it needed by watching it run. `Wire` takes a
+constructor as it is written, `func(A, B) T` or `func(A, B) (T, error)`;
+its parameters are its dependencies, resolved as the closure would have
+resolved them and known before it runs, so [Validate](#validate) can check
+them and `Explain` can draw them. The signature is read with reflection
+once, at registration, and a constructor of the wrong shape is rejected
+there. A slice parameter is a key like any other, not the group for its
+element type, and a constructor that needs the scope itself, for
+`s.Context()` or a dependency chosen at run time, stays a `Provide` closure.
 
 An interface is served by a constructor that returns the implementation:
 
@@ -176,49 +169,42 @@ app.Provide(func(s *di.Scope) Reader { return s.Get[*Repo]() })
 app.Wire[Reader](NewRepo) // the same, when NewRepo returns *Repo
 ```
 
-The compiler checks that `*Repo` satisfies `Reader`, and both keys share one
-instance, since the constructor returns the same pointer. Mark it `Scoped()`
-too when the target is. `Wire` needs only a result assignable to the key, so
-`app.Wire[Reader](NewRepo)` serves the interface directly, and a constructor
-whose result is not assignable is rejected at registration.
+Both keys share one instance, since the constructor returns the same
+pointer; mark it `Scoped()` too when the target is. `Wire` accepts any
+result assignable to the key.
 
 Three rules, all checked when the scope is next resolved:
 
-- A second registration of a key in one scope must say `Override()`. It then
-  serves the key and inherits its eagerness. A duplicate without the marker,
-  or an `Override()` with nothing to override, is rejected, naming both
-  registrations. A child scope shadows its parent's key without the marker,
-  because that is a different scope.
+- A second registration of a key in one scope must say `Override()`, and
+  then serves the key and inherits its eagerness. A duplicate without the
+  marker, or an `Override()` with nothing to override, is rejected naming
+  both registrations. A child shadows its parent's key without the marker,
+  since that is a different scope.
 - Once a key has served a value it cannot be replaced, in the scope that
-  owns it or in any scope that resolved through it. A resolution that failed
+  owns it or in any scope that resolved through it. A failed resolution
   built nothing, so the key stays open.
 - `Eager` on a `Scoped` binding, and `Scoped` on a `Value`, are rejected
   whichever order the methods were called in.
 
 #### Optional dependencies
 
-There is no `optional` marker on a parameter. A key is provided or it is not,
-and a dependency nothing provides is an error — so a service that can do
-without something says so by providing the absence instead.
+There is no `optional` marker. A key is provided or it is not, and a
+dependency nothing provides is an error, so a service that can do without
+something says so by providing the absence.
 
-The first way is a nil default. `s.Value[*Cache](nil)` provides the key with
-nothing in it, and `*Cache` stays an ordinary declared dependency: `Validate`
-checks the edge, `Explain` draws it, and a deployment that has a cache
-overrides it. The constructor takes the parameter as it takes any other and
-handles the nil.
+The first way is a nil default. `s.Value[*Cache](nil)` provides the key
+with nothing in it, and `*Cache` stays an ordinary declared dependency:
+`Validate` checks the edge, `Explain` draws it, and a deployment that has a
+cache overrides it. The constructor handles the nil.
 
-For an interface, a null object goes further: provide an implementation that
-does nothing, and nothing downstream has a branch to write at all. Either way
-the absence is a registration with a call site, which is what `Explain` and
-`Modules` report, and the key really is provided — so the rules above still
-hold. An `Override()` before anything resolves is how the real one gets in,
-and once the nil has been served a later registration of `*Cache` in that
-scope is rejected, so the two halves of the program cannot end up disagreeing
-about whether there is a cache.
+For an interface, a null object goes further: an implementation that does
+nothing, so nothing downstream has a branch to write. Either way the absence
+is a registration with a call site, `Explain` and `Modules` report it, and
+the real one gets in with an `Override()` before anything resolves.
 
-Branching on presence is the third way, and it is for a key nothing registers
-at all. `s.Maybe[T]()` returns `(T, bool)`, where false means no scope in the
-chain provides `T`, and only a `Provide` closure can ask:
+Branching on presence is the third way, for a key nothing registers at all.
+`s.Maybe[T]()` returns `(T, bool)`, false meaning no scope in the chain
+provides `T`, and only a `Provide` closure can ask:
 
 <details>
 <summary><code>examples/optional/main.go</code>, the program that prints the output below</summary>
@@ -326,35 +312,16 @@ full:      traced(cache:1)
 needed by: *main.Report in root
 ```
 
-Three things to know:
+A nil default makes the key present, so `Maybe[*Cache]()` reports it as
+provided, with a nil value. `Maybe` records nothing when the key is absent,
+so a later registration of it is not rejected and a constructor that already
+ran will not see it; a nil default is the better answer whenever the key can
+be named up front.
 
-- A nil default makes the key present, so `Maybe[*Cache]()` reports it as
-  provided — with a nil value. The two are answers to different questions:
-  whether anything provides the key, and whether there is anything in it.
-- `Maybe` records nothing when the key is absent, so a registration of it
-  afterwards is not rejected, and a constructor that already ran will not see
-  it. A nil default is the better answer whenever the key can be named up
-  front.
-- Asking with `Maybe` needs a closure, and a closure's dependencies are known
-  only once it runs, so it is listed as unchecked by
-  [Validate](#validate) instead of checked.
-
-Without the default, the same graph fails as any missing dependency does.
-`Validate` says so with nothing built, because `*Store` was wired, and the
-resolution says so again with its path:
-
-```
-di: *main.Cache: not provided (needed by [*main.Store], provided at main.Base (main.go:61))
-di: building *main.Report (...): di: building *main.Store (...): di: *main.Cache: not provided (needed by [*main.Report *main.Store])
-```
-
-A pointer parameter is not treated as optional on its own. Nearly every
-dependency in Go is a pointer or an interface, so that rule would make almost
-every wiring mistake a nil dereference inside a constructor rather than an
-error naming the resolution path, and would leave `Validate` with nothing to
-prove. Coming from fx or dig, this is the `optional:"true"` tag on a `dig.In`
-field; there are no parameter objects here, so the absence is registered
-rather than tagged.
+A pointer parameter is not optional on its own: nearly every dependency in
+Go is a pointer or an interface, and that rule would leave `Validate`
+nothing to prove. This is fx's `optional:"true"` tag, with the absence
+registered rather than tagged.
 
 ### Lifecycle
 
@@ -390,11 +357,9 @@ app.Wire[*http.Server](newServer).Eager().
     OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Close() })
 ```
 
-An HTTP server is the case that needs it. Its handlers hold request scopes
-under the application scope. Shutting the server down from `OnStop` would
-race the teardown of those scopes, and a request in flight would fail with
-`di.ErrStopped` before the server finished waiting for it. Draining first
-keeps the handlers' scopes alive until they return.
+An HTTP server is the case that needs it: its handlers hold request scopes,
+and shutting it down from `OnStop` would race their teardown. Draining first
+keeps those scopes alive until the handlers return.
 
 #### Workers
 
@@ -409,11 +374,9 @@ app.Wire[*Mailer](newMailer).Eager().Go(func(ctx context.Context, m *Mailer) err
 
 The function starts in its own goroutine when the service starts. Its
 context is cancelled when the service stops, and `Stop` waits for it within
-the stop deadline. A worker that returns an error calls `Shutdown`, so a dead
-worker takes the application down instead of leaving it half alive, even when
-the failure surfaces during shutdown. The one return that means nothing is
-`context.Canceled` after cancellation: the worker stopped because it was told
-to.
+the stop deadline. A worker that returns an error calls `Shutdown`, so a
+dead worker takes the application down instead of leaving it half alive.
+`context.Canceled` after cancellation is the one return that means nothing.
 
 #### Run and Shutdown
 
@@ -564,10 +527,8 @@ func NewServer(cfg Config, mw dihttp.Middleware) *http.Server {
 ```
 
 `dihttp.Handle` resolves a handler type from the request's scope and calls
-the method. A method expression names both, so one type per resource, with a
-method per route, keeps its dependencies in one place. Mark the type
-`Scoped()` when it needs the request and leave it a singleton when it does
-not; `Handle` follows either. A handler written by hand reaches the scope
+the method. Mark the type `Scoped()` when it needs the request and leave it
+a singleton when it does not. A handler written by hand reaches the scope
 with `di.FromContext(r.Context())`, and `dihttp.NewMiddleware(app)` makes a
 middleware outside the container.
 
@@ -587,83 +548,35 @@ request scopes and graceful shutdown is in
 #### Values that change
 
 There is no transient lifetime. Two shapes cover what one would be asked
-for, and neither needs the container to hand out a value it does not keep.
+for.
 
 A value made fresh on every use is a function, registered like any other
-service and asked for like one:
+service and asked for like one. Its type is the key, so it is named: two
+factories with the same signature would otherwise collide, and the name is
+what `Explain` shows and what a wired constructor asks for.
 
-[embedmd]:# (examples/factory/main.go go)
 ```go
-// Factories: a value made fresh on every use is a function, and one that
-// also needs a lifecycle is a scope.
-package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/floatdrop/di"
-)
-
-type Config struct{ Prefix string }
-
-// The function's type is the key, so it is named: two factories with the
-// same signature would otherwise collide, and the name is what Explain shows
-// and what a wired constructor asks for.
 type NewID func(n int) string
 
-type Job struct{ id string }
-
-func NewIDs(cfg Config) NewID {
-	return func(n int) string { return fmt.Sprintf("%s-%d", cfg.Prefix, n) }
-}
-func NewJob(newID NewID) *Job                 { return &Job{id: newID(3)} }
-func release(_ context.Context, j *Job) error { fmt.Println("released", j.id); return nil }
-
-func main() {
-	app := di.New()
-	app.Value(Config{Prefix: "job"})
-	app.Wire[NewID](NewIDs)
-	// A value with a lifecycle of its own is Scoped, resolved from a child
-	// scope opened for one unit of work and stopped with it.
-	app.Wire[*Job](NewJob).Scoped().OnStop(release)
-
-	// The container built the factory once and never sees what it makes;
-	// the values are the caller's.
-	newID := app.Get[NewID]()
-	fmt.Println(newID(1), newID(2))
-
-	work := app.Child("work")
-	fmt.Println("running", work.Get[*Job]().id)
-	_ = work.Stop(context.Background())
-}
+app.Wire[NewID](func(cfg Config) NewID {
+    return func(n int) string { return fmt.Sprintf("%s-%d", cfg.Prefix, n) }
+})
 ```
 
-```
-job-1 job-2
-running job-3
-released job-3
-```
-
-The function's type is the key, so it is named. Two factories with the same
-signature would otherwise collide, and `NewID` is what `Explain` shows and
-what `NewJob` asks for. The container builds the factory once, with
-dependencies and hooks of its own, and never sees what it makes: those values
-are the caller's to release, as a `*sql.Conn` from `sql.DB.Conn` is, or the
-factory keeps what it made and its `OnStop` releases it, which is what a pool
-is.
-
-A value that needs a lifecycle of its own is a scope's, not a factory's.
-Mark it `Scoped()`, resolve it from a child opened for one unit of work, and
-stop the child when the work ends. The container then drains it, stops it in
-order and shows it in `Explain`. The cost is a scope per unit of work rather
-than a call, so it is for values worth tracking.
+The container builds the factory once, with dependencies and hooks of its
+own, and never sees what it makes. Those values are the caller's to release,
+as a `*sql.Conn` from `sql.DB.Conn` is, or the factory keeps them and its
+`OnStop` releases them, which is what a pool is. A value that needs a
+lifecycle of its own is a scope's, not a factory's: mark it `Scoped()`,
+resolve it from a child opened for one unit of work, and stop the child when
+the work ends. The container then drains it, stops it in order and shows it
+in `Explain`, at the cost of a scope per unit of work.
 
 A value that changes while the application runs, such as configuration
-reloaded in the background, is the other shape, and a lifetime would not help
-with it: a singleton's constructor is called once, so it captures one
-snapshot whatever the lifetime of what it asked for. A value that changes is
-held by a service that does not:
+reloaded in the background, is the other shape, and a lifetime would not
+help: a singleton's constructor is called once and captures one snapshot
+whatever the lifetime of what it asked for. A value that changes is held by
+a service that does not:
 
 <details>
 <summary><code>examples/reload/main.go</code>, the program that prints the output below</summary>
@@ -781,29 +694,22 @@ request a: 100 per minute
 request b: 200 per minute
 ```
 
-The source is an ordinary singleton. Its worker applies reloads for as long
-as the application runs and is cancelled with it, so the watcher is started
-and stopped like everything else. A long-lived service takes the source and
-reads `Current()` at the moment it needs the value, which is the only place
-freshness can be decided. A per-request service keeps taking `Config`: a
-snapshot wired from the source and marked `Scoped()` is built once per
-request scope, so a request sees one configuration from start to finish and
-the next request sees the current one. `Validate` and `Explain` see the edge
-either way, and the handler's constructor does not know the value can change.
+The source is an ordinary singleton whose worker applies reloads until the
+application stops. A long-lived service takes the source and reads
+`Current()` when it needs the value. A per-request service keeps taking
+`Config`: a snapshot wired from the source and marked `Scoped()` is built
+once per request scope, so a request sees one configuration throughout and
+the next sees the current one. `Validate` and `Explain` see the edge either
+way.
 
-Two things to know:
+A snapshot resolved from the application scope is cached there, like any
+`Scoped` value, and is then as stale as a singleton: resolve it from request
+scopes and let singletons take the source. A service that has to react to a
+change rather than read the next one subscribes to the source; that is the
+source's API, not the container's.
 
-- A snapshot resolved from the application scope is cached there, as any
-  `Scoped` value is in the scope that resolves it, and is then as stale as a
-  singleton would be. Resolve it from request scopes, and let singletons take
-  the source.
-- A service that has to react to a change rather than read the next one
-  subscribes to the source, in its constructor or in `OnStart`. That is the
-  source's API, not the container's.
-
-samber/do has `ProvideTransient`, whose instances the container does not
-track either, so a function here is the same thing said plainly; uber/fx has
-no transient at all and uses the same function.
+samber/do's `ProvideTransient` does not track its instances either, and
+uber/fx has no transient at all.
 
 #### Groups
 
@@ -1021,10 +927,10 @@ the private service is built from.
 `Wrap[T]` composes over whatever serves `T` at the time it is called: the
 latest registration in this scope, or the one an ancestor provides. The
 function takes the wrapped value first and its other dependencies after it,
-and returns `T` or `(T, error)`, read the way `Wire` reads a constructor.
-The wrapped registration keeps its hooks and lifetime. It is built first, as
-the wrapper's dependency, and stopped after it. Wrappers chain in
-registration order. uber/fx calls this `Decorate`.
+and returns `T` or `(T, error)`. The wrapped registration keeps its hooks
+and lifetime; it is built first, as the wrapper's dependency, and stopped
+after it. Wrappers chain in registration order. uber/fx calls this
+`Decorate`.
 
 <details>
 <summary><code>examples/wrap/main.go</code>, the program that prints the output below</summary>
@@ -1231,12 +1137,10 @@ di: *net/http.Request: not provided in scope root (needed by [*main.Mailer *main
 | `s.Validate()` | A `Validation`. `Err()` joins `Errors`, the failures the declared graph proves. `Owed` lists what a `Scoped` binding needs that this scope does not provide, left to the scope that resolves it. `Unchecked` lists the `Provide` closures. |
 | `s.Validate(di.Provided[T]()...)` | The same check as the resolving scope would make it, told that it holds a `T`. With stubs nothing is owed: what neither the scope nor the stubs provide is an error. |
 
-A singleton is checked against the scope that registered it, because that
-is where it is built. A `Scoped` binding is built in whichever scope resolves
-it, so `Validate` checks it as if the calling scope were that scope, and what
-the calling scope does not provide is owed rather than wrong: a descendant
-may provide it, as request scopes provide the request. Call `Validate` from
-that descendant, or say what it will hold with `di.Provided[T]()` stubs.
+A `Scoped` binding is checked as the calling scope would resolve it, so what
+that scope does not provide is owed rather than wrong: call `Validate` from
+the scope that will provide it, or say what it holds with
+`di.Provided[T]()`.
 
 #### Explain, Graph and Modules
 
@@ -1304,23 +1208,11 @@ api.Module
              dihttp.Middleware ← dihttp.Module
 ```
 
-None of the three builds anything. A service that has not been resolved is
-shown with its registration and left alone. If it was registered with `Wire`,
-its declared dependencies are drawn under it with dashed edges, each
-continuing as a recorded tree where it has been built and as a declared one
-where it has not, and `declared by:` names the unbuilt services that declare
-it. A closure that has not run ends its branch: for closures the graph is
-what ran, not what could run
-([known limitation](docs/DESIGN.md#known-limitations)).
-
-```
-*main.Handler: scoped in root, not built (provided at main.go:35)
-├╌╌ *main.Repo: singleton in root, not built (provided at main.go:33)
-│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:32)
-│       └╌╌ main.Config: value in root, not built (provided at main.go:31)
-└╌╌ *main.User: scoped in root, not built (provided at main.go:34)
-    └╌╌ *net/http.Request: not provided
-```
+None of the three builds anything. An unbuilt wired service is drawn with
+its declared dependencies dashed, as in the `Validate` example above, and
+`declared by:` names the unbuilt services that declare it. A closure that
+has not run ends its branch: for closures the graph is what ran, not what
+could run ([known limitation](docs/DESIGN.md#known-limitations)).
 
 <details>
 <summary><code>examples/explain/main.go</code>, the program that prints the first two trees in this section</summary>
@@ -1407,14 +1299,10 @@ For logging, [`dislog`](dislog/) is that function already written against
 app.Observe(dislog.New(slog.Default()))
 ```
 
-The event's kind is the message and the rest are attributes. A step that
-failed is logged at `slog.LevelError` with the error and the registration
-site, since that is what a failure is read with; anything else at
-`slog.LevelInfo`, or at the level `dislog.Level` sets — `slog.LevelDebug` is
-the usual second choice, because every build is worth a line while an
-application is being wired and noise once it works. `dislog.Site()` logs the
-site every time. The package imports nothing beyond `log/slog`, so any
-handler will do, including one that colours its output:
+The event's kind is the message and the rest are attributes. A failed step
+is logged at `slog.LevelError` with the error and the registration site,
+anything else at `slog.LevelInfo` or the level `dislog.Level` sets, and
+`dislog.Site()` logs the site every time. Any handler will do:
 
 <details>
 <summary><code>examples/observe/main.go</code>, the program that prints the output below</summary>
@@ -1486,11 +1374,6 @@ ERRO stop service=*store.DB pkg=github.com/acme/app/internal/store scope=root mo
 WARN stopped with failures err="di: stopping *store.DB: connection reset"
 ```
 
-A service is named the way it is written in Go, with the import path lifted
-out into `pkg`, since the path is most of the length and none of the meaning.
-Both come from the event -- `Service` and `Package` -- so nothing is parsed,
-and a key whose type is unnamed reports no package and keeps its whole name.
-
 Observers see the scope they are registered on and every scope under it, so
 one on the application scope logs request scopes too. Events arrive on the
 goroutine that did the work, so a slow handler slows the application down.
@@ -1510,22 +1393,15 @@ so the library itself stays dependency-free. On an Apple M3 Pro:
 | `do` v2.1 | 125 ns, 192 B, 6 allocs | 6.1 µs, 11.5 kB, 120 allocs |
 | `dig` v1.19 | 445 ns, 768 B, 24 allocs | 16.4 µs, 24.3 kB, 302 allocs |
 
-`di` is measured twice because `dig.Provide` is reflective like `Wire` rather
-than like a `Provide` closure. The two warm figures are the same, which is
-what "a warm `Get` is the same code for both" means; the cold difference is
-the signature read and `reflect.Call`, about 120 ns per constructor here.
+`di` is measured twice because `dig.Provide` is reflective like `Wire`
+rather than like a closure; the warm figures are the same, and the cold
+difference is the signature read and `reflect.Call`.
 
 **The `dig` warm figure needs a caveat.** dig has no typed accessor, so the
 nearest thing to a resolve is `Invoke` with a function dig reflects over on
-every call, and an fx application invokes once at startup and never again.
-The cold comparison is the fair one, and it is the one fx cares about; read
-the warm number as what dig costs if used for something it does not set out
-to do — resolving on a request path, which is what `Scoped` bindings here are
-for.
-
-The cold figure counts the registration-site strings, so its byte total moves
-with how deep the source sits on disk; compare allocation counts across
-checkouts, not bytes.
+every call, and an fx application invokes once at startup. The cold
+comparison is the fair one; read the warm number as what dig costs on a
+request path, which it does not set out to serve.
 
 ```sh
 cd benchmarks && go test -bench . -benchmem
