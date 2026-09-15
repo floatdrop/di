@@ -23,13 +23,6 @@ app.Wire[*Repo](NewRepo) // func NewRepo(*DB) *Repo
 repo := app.Get[*Repo]() // builds Config, then DB, then Repo, each once
 ```
 
-A registration takes `OnStart` and `OnStop` hooks and a `Go` worker, typed on
-the service, and `app.Run(ctx)` starts everything in dependency order, waits for
-a signal, and stops it in reverse. Child scopes hold what belongs to one
-request or one test; a second registration of a key is rejected unless it
-says `Override()`; and `Explain`, `Graph` and `Modules` show what was built,
-from what, and by which module.
-
 There is no code generation and no dependency outside the standard library.
 `Wire` reads a constructor's signature once, with reflection, which is how
 `Validate` can check the whole graph before a single constructor runs.
