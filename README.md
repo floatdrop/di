@@ -172,130 +172,24 @@ Three rules, checked when the scope is next resolved:
 
 #### Optional dependencies
 
-There is no `optional` marker: a dependency nothing provides is an error.
-A service that can do without something provides the absence instead.
+There is no `optional` marker: a dependency nothing provides is an error. A
+service that can do without something provides the absence instead.
 
-- A nil default: `s.Value[*Cache](nil)`. The key is provided, `Validate`
-  checks the edge, and a deployment that has a cache says `Override()`. The
-  constructor handles the nil.
-- A null object, for an interface: an implementation that does nothing, so
-  nothing downstream branches.
-- `s.Maybe[T]()` returns `(T, bool)`, false when no scope in the chain
-  provides `T`, for a constructor that has to branch on a key nothing
-  registers. Only a `Provide` closure can ask, so `Validate` lists it as
-  unchecked.
-
-<details>
-<summary><code>examples/optional/main.go</code>, the program that prints the output below</summary>
-
-[embedmd]:# (examples/optional/main.go go)
 ```go
-// Optional dependencies: a key that a deployment may or may not have. A nil
-// default and a null object keep every declared edge provided, so the graph
-// still checks; Maybe answers presence when a constructor has to branch on a
-// key nothing registered at all.
-package main
-
-import (
-	"fmt"
-
-	"github.com/floatdrop/di"
-)
-
-type Cache struct{ addr string }
-type Tracer struct{}
-type Store struct{ cache *Cache }
-type Report struct{ line string }
-
-type Metrics interface{ Count(string) }
-
-type nopMetrics struct{}
-type logMetrics struct{}
-
-func (nopMetrics) Count(string)   {}
-func (logMetrics) Count(n string) { fmt.Println("count:", n) }
-
-// The constructors know nothing about di. A dependency that may be absent is
-// a parameter like any other, and the nil is the absence.
-func NewCache() *Cache          { return &Cache{addr: "localhost:6379"} }
-func NewNopMetrics() nopMetrics { return nopMetrics{} }
-func NewLogMetrics() logMetrics { return logMetrics{} }
-
-func NewStore(c *Cache, m Metrics) *Store {
-	m.Count("store.built")
-	return &Store{cache: c}
-}
-
-// Something has to handle the absence, and this is where it happens.
-func (s *Store) Get(key string) string {
-	if s.cache == nil {
-		return "db:" + key
-	}
-	return "cache:" + key
-}
-
-// A closure is what can ask whether a key is registered at all: Maybe is
-// (T, bool), and false means nothing in this scope or above provides it.
-func NewReport(s *di.Scope) *Report {
-	line := s.Get[*Store]().Get("1")
-	if _, ok := s.Maybe[*Tracer](); ok {
-		line = "traced(" + line + ")"
-	}
-	return &Report{line: line}
-}
-
-// Base is the wiring every deployment shares. *Cache is provided as nil and
-// Metrics as a null object, so *Store has no unprovided dependency and needs
-// no di import to say it can do without them.
-func Base(s *di.Scope) {
-	s.Value[*Cache](nil)
-	s.Wire[Metrics](NewNopMetrics)
-	s.Wire[*Store](NewStore)
-	s.Provide(NewReport)
-}
-
-func main() {
-	plain := di.New()
-	plain.Use(Base)
-
-	// Every declared edge is provided, so there is nothing to report. The
-	// closure is unchecked, which is what asking with Maybe costs.
-	v := plain.Validate()
-	fmt.Println("errors:   ", v.Err())
-	fmt.Println("unchecked:", v.Unchecked)
-	fmt.Println("plain:    ", plain.Get[*Report]().line)
-
-	// A deployment that has a cache and a tracer registers them. The
-	// defaults are overridden, and nothing that depends on them changes.
-	full := di.New()
-	full.Use(Base)
-	full.Wire[*Cache](NewCache).Override()
-	full.Wire[Metrics](NewLogMetrics).Override()
-	full.Value(&Tracer{}) // a new key in this scope, so no marker is needed
-	fmt.Println("full:     ", full.Get[*Report]().line)
-	fmt.Print(full.Explain[*Store]())
-}
+app.Value[*Cache](nil)           // a nil default: provided, checked, overridden where there is one
+app.Wire[Metrics](NewNopMetrics) // a null object: nothing downstream has a branch
+app.Provide(func(s *di.Scope) *Report {
+    _, traced := s.Maybe[*Tracer]() // presence, for a key nothing registers at all
+    return NewReport(s.Get[*Store](), traced)
+})
 ```
 
-</details>
-
-```
-errors:    <nil>
-unchecked: [*main.Report (provided at main.Base (main.go:62))]
-plain:     db:1
-count: store.built
-full:      traced(cache:1)
-*main.Store: singleton in root, built (provided at main.go:61)
-├── *main.Cache: singleton in root, built (provided at main.go:80)
-└── main.Metrics: singleton in root, built (provided at main.go:81)
-needed by: *main.Report in root
-```
-
-A nil default makes the key present: `Maybe[*Cache]()` reports it provided,
-with nil in it. `Maybe` records nothing when the key is absent, so a later
+A nil default makes the key present, so `Maybe` reports it provided, with
+nil in it. `Maybe` records nothing when the key is absent, so a later
 registration is not rejected and a constructor that already ran will not
-see it. A pointer parameter is not optional on its own; that is fx's
-`optional:"true"` tag, registered rather than tagged.
+see it; only a closure can ask, so `Validate` lists it as unchecked. A
+pointer parameter is not optional on its own; that is fx's `optional:"true"`
+tag, registered rather than tagged.
 
 ### Lifecycle
 
