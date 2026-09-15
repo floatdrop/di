@@ -40,7 +40,6 @@ jobs:
           go run ./explain
           go run ./optional
           go run ./observe
-          go run ./factory
           go run ./reload
       - name: test
         run: go test -race -count=1 -coverprofile=coverage.out ./...
