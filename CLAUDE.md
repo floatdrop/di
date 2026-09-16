@@ -28,6 +28,7 @@ go vet ./... && golangci-lint run ./...       # lint (config in .golangci.yml)
 test -z "$(gofmt -l .)"                       # formatting gate
 go run github.com/campoy/embedmd@v1.0.0 -d README.md   # README in sync?
 go run github.com/campoy/embedmd@v1.0.0 -w README.md   # re-embed after editing examples/
+go run scripts/og.go                          # redraw the social card after a logo change
 cd benchmarks && go test -bench . -benchmem   # separate module, see below
 
 cd site && npm ci && npm run check && npm run build   # the guide site; BASE_PATH=/di for Pages
@@ -778,6 +779,19 @@ reverse is caught by the fuzzer in 0.06s and *not* by the 400 seeded sequences.
   has the rest**, including the traps -- every one of them produces a page that
   reads as a botched design rather than a missing file, so read it before
   believing a rendering bug.
+- **The social card is generated, and uploading it is a manual step.**
+  `go run scripts/og.go` reads `docs/assets/logo.svg` and writes
+  `docs/assets/og.svg` and `og.png` (1280x640, GitHub's recommended size and
+  a shape link unfurlers crop from without losing anything), rasterising with
+  whichever of `resvg` or `rsvg-convert` is on PATH. Both files are committed,
+  so a redrawn logo reaches the card by re-running this rather than by being
+  copied into it -- the rule `site/src/components/Logo.tsx` and
+  `site/public/favicon.svg` follow for the same file. GitHub has **no API for a
+  repository's social preview**: the PNG has to be uploaded by hand under
+  Settings, General, Social preview, so a regenerated card is not live until
+  someone does that. The type is set in whatever the system resolves the
+  families in `og.go` to, which is why the PNG is committed rather than built
+  in CI: if the type in a fresh render shifts, it is the font that changed.
 - **`examples/guide` is a multi-package application** (config, storage, cache,
   mail, api) whose `cmd/api` blocks on signals like the other servers; its
   tests start it on a random port instead. It uses no `Provide` closure: the one
