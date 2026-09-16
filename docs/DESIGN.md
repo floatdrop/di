@@ -14,13 +14,6 @@ app.Wire[*DB](NewDB)   // a registration: the key *DB, made by NewDB
 app.Get[*DB]()         // an instance: the *DB that NewDB returned
 ```
 
-```mermaid
-flowchart LR
-    R["<b>registration</b><br/>key: *DB<br/>how: NewDB<br/>lifetime, hooks"]
-    I["<b>instance</b><br/>value: &DB{...}<br/>phase: started<br/>what it needed"]
-    R -->|"built, on the first Get that wants it"| I
-```
-
 One registration produces zero, one, or many instances:
 
 | It produces | When |
