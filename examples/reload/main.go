@@ -40,7 +40,7 @@ func (s *Source) Watch(ctx context.Context) error {
 			return ctx.Err()
 		case cfg := <-s.reloads:
 			s.cur.Store(&cfg)
-			fmt.Println("reloaded:", cfg.RateLimit, "per minute")
+			fmt.Println("reloaded: ", cfg.RateLimit, "per minute")
 			s.applied <- struct{}{}
 		}
 	}

@@ -471,7 +471,7 @@ func (s *Source) Watch(ctx context.Context) error {
 			return ctx.Err()
 		case cfg := <-s.reloads:
 			s.cur.Store(&cfg)
-			fmt.Println("reloaded:", cfg.RateLimit, "per minute")
+			fmt.Println("reloaded: ", cfg.RateLimit, "per minute")
 			s.applied <- struct{}{}
 		}
 	}
@@ -534,7 +534,7 @@ func main() {
 ```
 limiter:   100 per minute
 request a: 100 per minute
-reloaded: 200 per minute
+reloaded:  200 per minute
 limiter:   200 per minute
 request a: 100 per minute
 request b: 200 per minute
