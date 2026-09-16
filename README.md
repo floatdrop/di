@@ -1019,8 +1019,7 @@ api.Module
 
 None of the three builds anything: an unbuilt wired service shows its
 declared dependencies dashed, as under `Validate`, and a closure that has
-not run ends its branch
-([known limitation](docs/DESIGN.md#known-limitations)).
+not run ends its branch.
 
 <details>
 <summary><code>examples/explain/main.go</code>, the program that prints the first two trees in this section</summary>
