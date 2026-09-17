@@ -1218,6 +1218,10 @@ upgrade can break a caller.
 
 ## Contributing
 
+External contributions need a one-time CLA declaration on the pull request;
+[CONTRIBUTING.md](CONTRIBUTING.md) has the sentence and the link. The pull
+request template lists the rest.
+
 There is one regression test per historical defect, and generative suites
 for the parts that proved easiest to get wrong: a property test over random
 registration sequences, a model-based test over random operation sequences

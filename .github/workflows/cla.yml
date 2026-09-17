@@ -1,0 +1,76 @@
+name: CLA
+
+# CONTRIBUTING.md asks an external contributor for a one-time Contributor
+# License Agreement declaration. This records who has made it, in
+# .github/cla-signatures.json, so the "it is enough to provide us such
+# notification once" in CONTRIBUTING.md holds across pull requests instead of
+# being something a reviewer has to remember.
+#
+# The declaration has to be posted as a *comment* on the pull request. The
+# action reads the comment list, not the pull request body, so a declaration
+# written into the description is not seen.
+#
+# pull_request_target runs with a write token in the context of the base
+# repository, which is why nothing here checks anything out: a checkout of the
+# pull request's head would run a fork's code with that token. The action works
+# entirely through the API.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write # re-runs the blocked check once a declaration arrives
+  contents: write # commits the signature file
+  pull-requests: write # posts the request and the confirmation
+  statuses: write # sets the check a branch protection rule can require
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record the CLA declaration
+        # A cheap pre-filter only. The action does the real matching; this
+        # keeps the job from starting on every unrelated comment.
+        if: >-
+          github.event_name == 'pull_request_target' ||
+          github.event.comment.body == 'recheck' ||
+          startsWith(github.event.comment.body, 'I hereby agree to the terms of the CLA')
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: .github/cla-signatures.json
+          path-to-document: https://yandex.ru/legal/cla/?lang=en
+          branch: main
+          # The owner does not declare against his own employer's CLA, and a
+          # bot is not a person who can agree to anything. A `*` in a pattern
+          # becomes `.*`; everything else is compared for equality.
+          allowlist: floatdrop,*[bot]
+
+          # With this set the action compares the whole comment for equality,
+          # case-insensitively and trimmed, rather than searching it -- see
+          # isCommentSignedByUser in the action's source. So the sentence has
+          # to stand alone in the comment, and only one spelling of it can be
+          # accepted: this is CONTRIBUTING.md's sentence with the English link.
+          # A declaration that arrives with the Russian link is still a valid
+          # one under CONTRIBUTING.md; it just has to be accepted by hand, by
+          # adding the contributor to the signature file or the allowlist.
+          custom-pr-sign-comment: 'I hereby agree to the terms of the CLA available at: https://yandex.ru/legal/cla/?lang=en'
+
+          # The action appends a rule, the sentence above, and another rule, so
+          # this has to read into it. `$you` is substituted for "you" or
+          # "you all".
+          custom-notsigned-prcomment: |
+            Thanks for the pull request.
+
+            Before it can be merged, Yandex needs a one-time Contributor License Agreement declaration from $you. Please read the CLA — [English](https://yandex.ru/legal/cla/?lang=en), [Russian](https://yandex.ru/legal/cla/?lang=ru) — and then post **a new comment on this pull request containing exactly the line below and nothing else**:
+          custom-allsigned-prcomment: |
+            **CLA** — the declaration is on file. Thank you.
+
+          # Kept at the default: the comment is the declaration, so a merged
+          # pull request is locked to keep it from being edited away. The
+          # signature file is the record, but the comment is the evidence.
+          lock-pullrequest-aftermerge: true
