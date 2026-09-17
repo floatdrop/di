@@ -38,3 +38,6 @@ go.work.sum
 site/node_modules/
 site/build/
 site/.ssr/
+
+# MacOS
+.DS_Store
