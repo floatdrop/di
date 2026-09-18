@@ -200,9 +200,9 @@ single place that decides it, and validates in the same loop.
 through a `Scope` view carrying the function's name; `register` stamps it on the
 binding, and `view`/`Child`/`construct` propagate it. Lookup is unchanged:
 modules are attribution for messages and events. Privacy, if ever wanted, must
-be a namespace *within* a scope — teardown is children-first, so an exported
-dependency in a child would outlive nothing and be torn down before its
-dependants (#6).
+be a namespace *within* a scope, never a child scope with exports: teardown is
+children-first, so an exported dependency in a child would be torn down before
+its dependants in the parent (#6).
 
 **The graph is recorded by watching, only while a constructor runs.** `resolve`
 appends the instance it produced to `deps` on the instance of `s.r`, the node

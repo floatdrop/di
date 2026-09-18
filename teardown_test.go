@@ -39,12 +39,11 @@ func TestRegressionStartRace(t *testing.T) {
 			OnStop(func(ctx context.Context, v *rD) error { return down(ctx, v) })
 
 		var wg sync.WaitGroup
-		wg.Add(5)
-		go func() { defer wg.Done(); _ = s.Start(context.Background()) }()
-		go func() { defer wg.Done(); _, _ = s.Resolve[*rA]() }()
-		go func() { defer wg.Done(); _, _ = s.Resolve[*rB]() }()
-		go func() { defer wg.Done(); _, _ = s.Resolve[*rC]() }()
-		go func() { defer wg.Done(); _, _ = s.Resolve[*rD]() }()
+		wg.Go(func() { _ = s.Start(context.Background()) })
+		wg.Go(func() { _, _ = s.Resolve[*rA]() })
+		wg.Go(func() { _, _ = s.Resolve[*rB]() })
+		wg.Go(func() { _, _ = s.Resolve[*rC]() })
+		wg.Go(func() { _, _ = s.Resolve[*rD]() })
 		wg.Wait()
 
 		nstarted := started.Load()
