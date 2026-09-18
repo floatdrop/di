@@ -82,7 +82,7 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 
-	app.Provide(func(s *di.Scope) *http.Server {
+	app.Wire[*http.Server](func() *http.Server {
 		return &http.Server{Addr: ":8080", Handler: dihttp.NewMiddleware(app)(mux)}
 	}).
 		Eager().

@@ -447,39 +447,24 @@ import (
 type Config struct{ RateLimit int }
 
 // Source holds the current configuration. Current is what a long-lived
-// service calls at the moment it needs the value; Watch is the worker that
-// applies reloads as they arrive. Here they arrive on a channel; a real
-// source follows a file, a signal or a remote endpoint.
-type Source struct {
-	cur     atomic.Pointer[Config]
-	reloads chan Config
-	applied chan struct{}
-}
+// service calls at the moment it needs the value. A real source follows a
+// file, a signal or a remote endpoint and calls Reload: that watcher is a Go
+// hook, and wants Eager() so it starts with the application rather than on
+// the first resolution.
+type Source struct{ cur atomic.Pointer[Config] }
 
 func NewSource() *Source {
-	s := &Source{reloads: make(chan Config), applied: make(chan struct{})}
+	s := &Source{}
 	s.cur.Store(&Config{RateLimit: 100}) // the initial read
 	return s
 }
 
 func (s *Source) Current() Config { return *s.cur.Load() }
 
-func (s *Source) Watch(ctx context.Context) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case cfg := <-s.reloads:
-			s.cur.Store(&cfg)
-			fmt.Println("reloaded: ", cfg.RateLimit, "per minute")
-			s.applied <- struct{}{}
-		}
-	}
+func (s *Source) Reload(cfg Config) {
+	s.cur.Store(&cfg)
+	fmt.Println("reloaded: ", cfg.RateLimit, "per minute")
 }
-
-// Reload hands a new configuration to the watcher and returns once it has
-// been applied, which keeps this program's output in order.
-func (s *Source) Reload(cfg Config) { s.reloads <- cfg; <-s.applied }
 
 // A singleton lives as long as the application, so it takes the source and
 // reads it on every use. Taking Config instead would capture one snapshot
@@ -497,8 +482,7 @@ func NewHandler(cfg Config) *Handler { return &Handler{cfg: cfg} }
 
 func main() {
 	app := di.New()
-	app.Wire[*Source](NewSource).Eager().
-		Go(func(ctx context.Context, src *Source) error { return src.Watch(ctx) })
+	app.Wire[*Source](NewSource)
 	app.Wire[Config](func(src *Source) Config { return src.Current() }).Scoped()
 	app.Wire[*Limiter](NewLimiter)
 	app.Wire[*Handler](NewHandler).Scoped()
@@ -580,18 +564,13 @@ methods: `type Primary struct{ *DB }`. The surrogate appears in constructor
 signatures and nowhere else; `Wire` resolves it like any parameter, and
 `Validate` and `Explain` see two services.
 
-When the set comes from configuration, register the instances as a group,
-fold them into a registry, and let the resolving scope pick: the selector is
-a constructor whose parameter is the key, marked `Scoped()`.
-
 <details>
-<summary><code>examples/instances/main.go</code>, a primary and a replica by type, and configured shards by a scoped selector</summary>
+<summary><code>examples/instances/main.go</code>, a primary and a replica told apart by type</summary>
 
 [embedmd]:# (examples/instances/main.go go)
 ```go
-// More than one instance of a type: a defined type names each one while the
-// set is fixed, and a Scoped selector picks one when the set comes from
-// configuration.
+// More than one instance of a type: while the set is fixed, a defined type
+// names each one.
 package main
 
 import (
@@ -605,8 +584,8 @@ type DB struct{ dsn string }
 
 func (d *DB) Query() string { return "query " + d.dsn }
 
-// A fixed set: one defined type per instance. Embedding promotes the methods,
-// so only the constructor below mentions the surrogate.
+// One defined type per instance. Embedding promotes the methods, so only the
+// constructor below mentions the surrogate.
 type Primary struct{ *DB }
 type Replica struct{ *DB }
 
@@ -614,9 +593,51 @@ type Repo struct{ read, write *DB }
 
 func NewRepo(p Primary, r Replica) *Repo { return &Repo{write: p.DB, read: r.DB} }
 
-// A configured set: the shards are not known until the config is read, so no
-// type can name them. They are registered as a group, folded into a registry,
-// and picked by a value the resolving scope provides.
+func main() {
+	app := di.New()
+
+	// Two databases, told apart by type. Each keeps its own hooks.
+	app.Value(Primary{&DB{dsn: "primary"}}).
+		OnStop(func(context.Context, Primary) error { fmt.Println("primary closed"); return nil })
+	app.Value(Replica{&DB{dsn: "replica"}}).
+		OnStop(func(context.Context, Replica) error { fmt.Println("replica closed"); return nil })
+	app.Wire[*Repo](NewRepo)
+
+	repo := app.Get[*Repo]()
+	fmt.Println("writes:", repo.write.Query())
+	fmt.Println("reads: ", repo.read.Query())
+
+	_ = app.Stop(context.Background())
+}
+```
+
+</details>
+
+When the set comes from configuration, register the instances as a group,
+fold them into a registry, and let the resolving scope pick: the selector is
+a constructor whose parameter is the key, marked `Scoped()`.
+
+<details>
+<summary><code>examples/shards/main.go</code>, configured shards picked by a scoped selector</summary>
+
+[embedmd]:# (examples/shards/main.go go)
+```go
+// A configured set of instances: the members are not known until the config
+// is read, so no type can name them. They are registered as a group, folded
+// into a registry, and picked by a value the resolving scope provides.
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/floatdrop/di"
+)
+
+type DB struct{ dsn string }
+
+func (d *DB) Query() string { return "query " + d.dsn }
+
 type Config struct{ Shards []string }
 
 type Shard struct {
@@ -641,17 +662,6 @@ func main() {
 
 	app := di.New()
 	app.Value(cfg)
-
-	// Two databases, told apart by type. Each keeps its own hooks.
-	app.Value(Primary{&DB{dsn: "primary"}}).
-		OnStop(func(context.Context, Primary) error { fmt.Println("primary closed"); return nil })
-	app.Value(Replica{&DB{dsn: "replica"}}).
-		OnStop(func(context.Context, Replica) error { fmt.Println("replica closed"); return nil })
-	app.Wire[*Repo](NewRepo)
-
-	repo := app.Get[*Repo]()
-	fmt.Println("writes:", repo.write.Query())
-	fmt.Println("reads: ", repo.read.Query())
 
 	// One binding per configured shard, read back together as a registry.
 	for _, name := range cfg.Shards {
@@ -805,6 +815,10 @@ func main() {
 
 	fmt.Println("app:  ", app.Get[Store]().Get("1"))
 	fmt.Println("debug:", debug.Get[Store]().Get("1"))
+
+	// Both paths went through the one caching wrapper, which is the *Cache
+	// the child's tracing wrapper composes over rather than a second one.
+	fmt.Println("hits: ", app.Get[*Cache]().hits)
 	fmt.Print(app.Explain[Store]())
 	_ = app.Stop(context.Background())
 }
@@ -815,6 +829,7 @@ func main() {
 ```
 app:   row 1
 debug: traced(row 1)
+hits:  2
 main.Store: singleton wrapper in root, built (provided at main.go:40)
 ├── main.Store: singleton in root, built (provided at main.go:34)
 └── *main.Cache: value in root, built (provided at main.go:33)
