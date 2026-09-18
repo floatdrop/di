@@ -11,8 +11,13 @@ import (
 
 	charm "github.com/charmbracelet/log"
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
 	"github.com/floatdrop/di/dislog"
-	"github.com/floatdrop/di/examples/guide"
+	"github.com/floatdrop/di/examples/guide/internal/api"
+	"github.com/floatdrop/di/examples/guide/internal/cache"
+	"github.com/floatdrop/di/examples/guide/internal/config"
+	"github.com/floatdrop/di/examples/guide/internal/mail"
+	"github.com/floatdrop/di/examples/guide/internal/storage"
 )
 
 func main() {
@@ -36,8 +41,17 @@ func main() {
 	// a *slog.Logger as a parameter like any other dependency.
 	app.Value(logger)
 
-	// guide.Modules is the list, kept beside the tests that pin the graph.
-	app.Use(guide.Modules...)
+	// The application, in the order it is composed. Order matters in one
+	// place: cache wraps what serves storage.Store, so its module comes after
+	// storage's.
+	app.Use(
+		config.Module,
+		storage.Module,
+		cache.Module,
+		mail.Module,
+		dihttp.Module,
+		api.Module,
+	)
 
 	// Nothing has been built yet. The constructors declared their
 	// dependencies, so the graph is checked here, as a request scope holding

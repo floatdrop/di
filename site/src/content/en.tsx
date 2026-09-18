@@ -80,18 +80,11 @@ export const en: Content = {
 					<p>
 						So this is where to start reading. <C>main</C> builds the logger, registers it as
 						a service so any constructor can take one, checks the graph and runs. The
-						application itself is the list of modules beside it: a module is a function a
+						application itself is the list of modules it applies: a module is a function a
 						package exports that registers that package's services into a scope. Every step
 						after this one opens one of those modules, in the order <C>Use</C> applies them.
 					</p>
 					{f.main}
-					<p>
-						The list is its own file because the tests that pin the graph read the same one.
-						Written out in <C>main</C> it would be a second copy, and a module added to only
-						one of them would leave the graph on this page describing a program that is not
-						the one that runs.
-					</p>
-					{f.wiring}
 					<p>
 						<C>Use</C> applies the modules in order and attributes each registration to the
 						module that made it, which is what an error names when two modules collide. A
@@ -162,7 +155,7 @@ export const en: Content = {
 						and its other dependencies after it. The store keeps its registration and its
 						hooks, is built first, and is stopped after the wrapper, and the wrapper forwards
 						what it does not change. The one thing to get right is module order: the cache's
-						module comes after storage's, which is the order <C>main</C> lists them in. A
+						module comes after storage's, which is the order <C>main</C> applies them in. A
 						wrapper registered in a child scope applies to that scope and its descendants
 						only. Like storage, this package exports only its <C>Module</C>: a cross-cutting
 						concern composes over an exported contract, never over a package's internals.

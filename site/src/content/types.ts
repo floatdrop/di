@@ -25,7 +25,6 @@ export type FigureId =
 	| 'storage'
 	| 'config'
 	| 'main'
-	| 'wiring'
 	| 'mail'
 	| 'api'
 	| 'cache'

@@ -32,20 +32,21 @@ func (m *Mailer) Send(msg string) {
 // the mailer depends on are stopped. Cancellation means stop accepting, not
 // stop finishing: what is already queued is delivered before returning, so a
 // request that queued a message just before shutdown is not silently dropped.
+//
+// The tail is bounded by what is queued at that moment, not by the queue
+// running dry. Draining until empty would let a Send racing the shutdown keep
+// the worker past Stop's deadline, and a worker that does not return is
+// reported as a teardown failure.
 func (m *Mailer) run(ctx context.Context) error {
 	for {
 		select {
 		case msg := <-m.queue:
 			m.log.Info("mail: sent", "msg", msg)
 		case <-ctx.Done():
-			for {
-				select {
-				case msg := <-m.queue:
-					m.log.Info("mail: sent", "msg", msg)
-				default:
-					return nil
-				}
+			for range len(m.queue) {
+				m.log.Info("mail: sent", "msg", <-m.queue)
 			}
+			return nil
 		}
 	}
 }

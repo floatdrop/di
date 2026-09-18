@@ -1,5 +1,3 @@
-// These tests pin two things the guide shows: that the wiring validates, and
-// what Explain says about it before anything is built.
 package guide
 
 import (
@@ -14,17 +12,27 @@ import (
 	"testing"
 
 	"github.com/floatdrop/di"
+	"github.com/floatdrop/di/dihttp"
+	"github.com/floatdrop/di/examples/guide/internal/api"
+	"github.com/floatdrop/di/examples/guide/internal/cache"
+	"github.com/floatdrop/di/examples/guide/internal/config"
+	"github.com/floatdrop/di/examples/guide/internal/mail"
 	"github.com/floatdrop/di/examples/guide/internal/storage"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/explain.txt from the current wiring")
 
-// wire is cmd/api's composition minus the process: the same Modules, so this
-// cannot pin a graph the application does not have, and a logger that says
-// nothing instead of the one main builds.
+// These tests pin two things the guide shows: that the wiring validates, and
+// what Explain and Modules say about it before anything is built.
+//
+// wire is cmd/api's composition minus the process, and a logger that says
+// nothing instead of the one main builds. **It is a copy of what main does**,
+// because a test cannot import package main: change the list there and change
+// it here, or these tests and the output the guide shows describe a program
+// that is not the one that runs.
 func wire(app *di.Scope) {
 	app.Value(slog.New(slog.DiscardHandler))
-	app.Use(Modules...)
+	app.Use(config.Module, storage.Module, cache.Module, mail.Module, dihttp.Module, api.Module)
 }
 
 func TestWiringValidates(t *testing.T) {

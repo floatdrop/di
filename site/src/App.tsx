@@ -44,11 +44,6 @@ function buildFigures(code: Code, content: Content): Figures {
 				<Highlighted html={code.html.main} />
 			</Figure>
 		),
-		wiring: (
-			<Figure caption="modules.go">
-				<Highlighted html={code.html.wiring} />
-			</Figure>
-		),
 		mail: (
 			<Figure caption="internal/mail/mail.go">
 				<Highlighted html={code.html.mail} />
