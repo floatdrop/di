@@ -135,6 +135,10 @@ func (s *Scope) declaredInto(sb *strings.Builder, b *binding, holder *state, pre
 		sb.WriteString(prefix + branch)
 		target, owner := e.b, e.owner
 		if target == nil {
+			if e.optional {
+				sb.WriteString(e.k.String() + ": not provided, optional\n")
+				continue
+			}
 			sb.WriteString(e.k.String() + ": not provided\n")
 			continue
 		}
@@ -179,13 +183,40 @@ func (s *Scope) declaredBy(b *binding, except []dep) []string {
 			if d == b || slices.ContainsFunc(except, func(e dep) bool { return e.in.b == d }) {
 				continue
 			}
-			if d.inner != b && (!slices.Contains(d.wants, b.key) || peek(st, b.key) != b) {
+			if d.inner != b && !declares(d, b, st) {
 				continue
 			}
 			out = append(out, d.key.String()+" in "+st.name)
 		}
 	}
 	return out
+}
+
+// declares reports whether d's parameters would resolve to b from st. A key
+// and a group of one type are different bindings, so the kind of the parameter
+// decides which of the two a declaration reaches: a plain one what the index
+// serves, an AllOf one every member of the group.
+func declares(d, b *binding, st *state) bool {
+	return slices.ContainsFunc(d.wants, func(w want) bool {
+		switch {
+		case w.k != b.key:
+			return false
+		case w.kind == wantGroup:
+			return b.group && inGroupFrom(st, b)
+		}
+		return !b.group && peek(st, b.key) == b
+	})
+}
+
+// inGroupFrom reports whether b is in the group for its key as a build in st
+// would read it, among the registrations already committed.
+func inGroupFrom(st *state, b *binding) bool {
+	for ; st != nil; st = st.parent {
+		if slices.Contains(st.reg.Load().groups[b.key], b) {
+			return true
+		}
+	}
+	return false
 }
 
 // peek is lookup without the freeze: the binding k resolves to from st among
@@ -524,10 +555,18 @@ func (s *Scope) Modules() string {
 			if b.scoped {
 				holder = s.st
 			}
-			for _, k := range b.wants {
-				dep, _ := (&Scope{st: holder}).lookup(k)
+			for _, w := range b.wants {
+				if w.kind == wantGroup {
+					// A group is a set, not one registration, and every member
+					// names its own module under "provides".
+					add(m, &m.needs, "all of "+shortName(w.k.t))
+					continue
+				}
+				dep, _ := (&Scope{st: holder}).lookup(w.k)
 				var from string
 				switch {
+				case dep == nil && w.kind == wantOptional:
+					from = "not provided, optional"
 				case dep == nil && b.scoped:
 					from = "owed to a resolving scope"
 				case dep == nil:
@@ -537,7 +576,7 @@ func (s *Scope) Modules() string {
 				default:
 					from = moduleLabel(dep)
 				}
-				add(m, &m.needs, shortName(k.t)+" ← "+from)
+				add(m, &m.needs, shortName(w.k.t)+" ← "+from)
 			}
 		}
 	}

@@ -120,6 +120,7 @@ the scope is first resolved.
 | `.Scoped()` | One instance per resolving scope, built and stopped there. |
 | `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
+| `.Needs(...)` | How to fill a `Wire` parameter that is not a plain dependency: `di.AllOf[T]()` for a `[]T` holding the group, `di.Optional[T]()` for one that may go unprovided. |
 | `.Override()` | Replace an earlier registration of `T` in this scope; a second one without it is rejected. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
@@ -147,8 +148,8 @@ di: building *app.A (provided at ...): di: building *app.B (provided at ...): di
 takes a plain constructor, `func(A, B) T` or `func(A, B) (T, error)`; its
 parameters are its dependencies, so `Validate` can check them before
 anything runs, and a wrong shape is rejected at registration. A slice
-parameter is a key, not a group. A constructor that needs the scope itself
-stays a closure.
+parameter is a key rather than a group unless `Needs(di.AllOf[T]())` says
+otherwise. A constructor that needs the scope itself stays a closure.
 
 An interface is served by a constructor that returns the implementation:
 
@@ -172,22 +173,31 @@ Three rules, checked when the scope is next resolved:
 
 #### Optional dependencies
 
-There is no `optional` marker: a dependency nothing provides is an error. A
-service that can do without something provides the absence instead.
+A dependency nothing provides is an error unless the registration says
+otherwise. `Needs` says so, and the constructor stays a function anyone can
+call:
+
+```go
+// func NewReport(s *Store, t *Tracer) *Report
+app.Wire[*Report](NewReport).Needs(di.Optional[*Tracer]())
+```
+
+`*Tracer` is passed if anything provides it and nil if nothing does. The
+marker is on the registration rather than on the parameter, so it is fx's
+`optional:"true"` without a struct tag — and because it is declared,
+`Validate` checks the rest of that constructor, `Explain` draws the
+parameter as `not provided, optional`, and `Modules` lists it.
+
+Two alternatives are often better than optionality at all:
 
 ```go
 app.Value[*Cache](nil)           // a nil default: provided, checked, overridden where there is one
 app.Wire[Metrics](NewNopMetrics) // a null object: nothing downstream has a branch
-app.Provide(func(s *di.Scope) *Report {
-    _, traced := s.Maybe[*Tracer]() // presence, for a key nothing registers at all
-    return NewReport(s.Get[*Store](), traced)
-})
 ```
 
-A nil default makes the key present, so `Maybe` reports it provided, with
-nil in it. Only a closure can ask, so `Validate` lists it as unchecked. A
-pointer parameter is not optional on its own; that is fx's `optional:"true"`
-tag, registered rather than tagged.
+`Scope.Maybe` asks the same question from inside a closure, for a key
+nothing registers at all. It is the escape hatch: a closure declares
+nothing, so `Validate` lists it as unchecked.
 
 Whether a key is provided is a question about the chain as it stands — a
 child scope may answer it differently — so registering it later is never
@@ -589,6 +599,19 @@ mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 hooks. A plain registration of the same type is neither shadowed by the
 group nor part of it.
 
+A constructor takes the group as a plain slice, and `Needs` says which
+parameter it is:
+
+```go
+// func NewRouter(rs []Route) *Router
+app.Wire[*Router](NewRouter).Needs(di.AllOf[Route]())
+```
+
+That is `All[Route]()` called where the constructor runs, so a `Scoped`
+consumer sees the members its own scope adds, and an empty group is the nil
+slice rather than an error. The dependency stays declared, so `Validate`
+walks every member and `Explain` draws them.
+
 Membership is read when you ask, so a group may grow and adding a member is
 never rejected. A value already built from the group keeps the members it
 got, though, and `Explain` says so, as it does for an optional key wired
@@ -668,7 +691,9 @@ a constructor whose parameter is the key, marked `Scoped()`.
 ```go
 // A configured set of instances: the members are not known until the config
 // is read, so no type can name them. They are registered as a group, folded
-// into a registry, and picked by a value the resolving scope provides.
+// into a registry, and picked by a value the resolving scope provides. Every
+// constructor here is plain, so the whole graph is checked before anything
+// is built: nothing is unchecked and only the shard name is owed.
 package main
 
 import (
@@ -701,6 +726,16 @@ func selectShard(want ShardName, all Shards) (*DB, error) {
 	return db, nil
 }
 
+// The fold is an ordinary constructor too: its parameter is the group, which
+// Needs says at the registration rather than here.
+func shardRegistry(all []Shard) Shards {
+	m := Shards{}
+	for _, sh := range all {
+		m[sh.Name] = sh.DB
+	}
+	return m
+}
+
 func main() {
 	cfg := Config{Shards: []string{"eu-1", "us-1"}}
 
@@ -711,13 +746,7 @@ func main() {
 	for _, name := range cfg.Shards {
 		app.Value(Shard{Name: name, DB: &DB{dsn: name}}).Group()
 	}
-	app.Provide(func(s *di.Scope) Shards {
-		m := Shards{}
-		for _, sh := range s.All[Shard]() {
-			m[sh.Name] = sh.DB
-		}
-		return m
-	})
+	app.Wire[Shards](shardRegistry).Needs(di.AllOf[Shard]())
 
 	// The selector is an ordinary constructor: its ShardName parameter is the
 	// key, and Scoped() leaves the choice to the scope that resolves it.
@@ -945,7 +974,11 @@ import (
 
 type Config struct{ DSN string }
 type DB struct{ dsn string }
-type Repo struct{ db *DB }
+type Tracer struct{}
+type Repo struct {
+	db     *DB
+	tracer *Tracer // nil unless something provides one
+}
 type User struct{ name string }
 type Handler struct {
 	repo *Repo
@@ -955,7 +988,7 @@ type Mailer struct{ user *User }
 
 // The constructors know nothing about di.
 func NewDB(cfg Config) *DB                       { return &DB{dsn: cfg.DSN} }
-func NewRepo(db *DB) *Repo                       { return &Repo{db: db} }
+func NewRepo(db *DB, t *Tracer) *Repo            { return &Repo{db: db, tracer: t} }
 func NewUser(r *http.Request) *User              { return &User{name: r.Header.Get("X-User")} }
 func NewHandler(repo *Repo, user *User) *Handler { return &Handler{repo: repo, user: user} }
 func NewMailer(user *User) *Mailer               { return &Mailer{user: user} }
@@ -964,7 +997,9 @@ func main() {
 	app := di.New()
 	app.Value(Config{DSN: "postgres://localhost/app"})
 	app.Wire[*DB](NewDB)
-	app.Wire[*Repo](NewRepo)
+	// Needs says which parameter is not a plain dependency: nothing provides a
+	// *Tracer, so NewRepo is called with nil and the graph still checks out.
+	app.Wire[*Repo](NewRepo).Needs(di.Optional[*Tracer]())
 	app.Wire[*User](NewUser).Scoped() // one per request scope, where the *http.Request is
 	app.Wire[*Handler](NewHandler).Scoped()
 
@@ -994,15 +1029,16 @@ func main() {
 </details>
 
 ```
-*main.Handler: scoped in root, not built (provided at main.go:35)
-├╌╌ *main.Repo: singleton in root, not built (provided at main.go:33)
-│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:32)
-│       └╌╌ main.Config: value in root, not built (provided at main.go:31)
-└╌╌ *main.User: scoped in root, not built (provided at main.go:34)
+*main.Handler: scoped in root, not built (provided at main.go:41)
+├╌╌ *main.Repo: singleton in root, not built (provided at main.go:39)
+│   ├╌╌ *main.DB: singleton in root, not built (provided at main.go:36)
+│   │   └╌╌ main.Config: value in root, not built (provided at main.go:35)
+│   └╌╌ *main.Tracer: not provided, optional
+└╌╌ *main.User: scoped in root, not built (provided at main.go:40)
     └╌╌ *net/http.Request: not provided
 
 errors: <nil>
-owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:34)]
+owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:40)]
 request scopes: <nil>
 di: *net/http.Request: not provided in scope root (needed by [*main.Mailer *main.User]; *main.User is Scoped, so the singleton *main.Mailer would build it there)
 ```

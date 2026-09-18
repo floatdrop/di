@@ -537,35 +537,48 @@ func (s *Scope) Get[T any]() T { return as[T](s.get(key{t: reflect.TypeFor[T]()}
 // wired too late shows up. A miss outside a constructor records nothing,
 // since no value was built on the answer.
 func (s *Scope) Maybe[T any]() (T, bool) {
-	k := key{t: reflect.TypeFor[T]()}
+	v, ok := s.maybe(key{t: reflect.TypeFor[T]()})
+	return as[T](v), ok
+}
+
+// maybe is Maybe by key, shared with the Optional parameter of a Wire
+// constructor.
+func (s *Scope) maybe(k key) (any, bool) {
 	if b, _ := s.lookup(k); b == nil {
 		if s.inFlight() && s.r.b != nil {
 			s.r.declined(k, s.st)
 		}
-		var zero T
-		return zero, false
+		return nil, false
 	}
-	return s.Get[T](), true
+	return s.get(k), true
 }
 
 // All resolves the multi-binding group for T across the scope chain. Members
 // have the same lifetimes and lifecycle as any other binding.
 func (s *Scope) All[T any]() []T {
+	var out []T // nil for a group with no members, as this has always returned
+	for _, v := range s.all(key{t: reflect.TypeFor[T]()}) {
+		out = append(out, as[T](v))
+	}
+	return out
+}
+
+// all is All by key, shared with the AllOf parameter of a Wire constructor.
+func (s *Scope) all(k key) []any {
 	if !s.inFlight() {
 		defer unwrapAbort()
-		return s.enter().All[T]()
+		return s.enter().all(k)
 	}
-	k := key{t: reflect.TypeFor[T]()}
-	var out []T
+	var out []any
 	var members []*binding
 	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
 		for _, b := range st.reg.Load().groups[k] { // immutable: freeze appends to a copy
-			out = append(out, as[T](s.resolve(b, st)))
+			out = append(out, s.resolve(b, st))
 			members = append(members, b)
 		}
 	}
-	if s.inFlight() && s.r.b != nil {
+	if s.r.b != nil {
 		// Inside a build, so the value keeps these members however the group
 		// grows afterwards; Explain reports one that arrives too late.
 		s.r.readGroup(k, s.st, members)

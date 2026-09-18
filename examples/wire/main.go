@@ -11,7 +11,11 @@ import (
 
 type Config struct{ DSN string }
 type DB struct{ dsn string }
-type Repo struct{ db *DB }
+type Tracer struct{}
+type Repo struct {
+	db     *DB
+	tracer *Tracer // nil unless something provides one
+}
 type User struct{ name string }
 type Handler struct {
 	repo *Repo
@@ -21,7 +25,7 @@ type Mailer struct{ user *User }
 
 // The constructors know nothing about di.
 func NewDB(cfg Config) *DB                       { return &DB{dsn: cfg.DSN} }
-func NewRepo(db *DB) *Repo                       { return &Repo{db: db} }
+func NewRepo(db *DB, t *Tracer) *Repo            { return &Repo{db: db, tracer: t} }
 func NewUser(r *http.Request) *User              { return &User{name: r.Header.Get("X-User")} }
 func NewHandler(repo *Repo, user *User) *Handler { return &Handler{repo: repo, user: user} }
 func NewMailer(user *User) *Mailer               { return &Mailer{user: user} }
@@ -30,7 +34,9 @@ func main() {
 	app := di.New()
 	app.Value(Config{DSN: "postgres://localhost/app"})
 	app.Wire[*DB](NewDB)
-	app.Wire[*Repo](NewRepo)
+	// Needs says which parameter is not a plain dependency: nothing provides a
+	// *Tracer, so NewRepo is called with nil and the graph still checks out.
+	app.Wire[*Repo](NewRepo).Needs(di.Optional[*Tracer]())
 	app.Wire[*User](NewUser).Scoped() // one per request scope, where the *http.Request is
 	app.Wire[*Handler](NewHandler).Scoped()
 

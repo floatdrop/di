@@ -94,3 +94,33 @@ func TestModulesReportBuildsNothing(t *testing.T) {
 		t.Fatal("Modules ran a constructor")
 	}
 }
+
+// A Needs parameter is listed like any other: a group as the set it reads,
+// an optional as what it is rather than as a hole. (fx review)
+
+type mRoute struct{}
+type mTracer struct{}
+type mRouter struct{}
+
+func mRouting(s *di.Scope) {
+	s.Wire[mRoute](func() mRoute { return mRoute{} }).Group()
+	s.Wire[*mRouter](func([]mRoute, *mTracer) *mRouter { return &mRouter{} }).
+		Needs(di.AllOf[mRoute](), di.Optional[*mTracer]())
+}
+
+func TestModulesReportsNeeds(t *testing.T) {
+	app := di.New()
+	app.Use(mRouting)
+
+	want := `di_test.mRouting
+  provides   di_test.mRoute, *di_test.mRouter
+  needs      all of di_test.mRoute
+             *di_test.mTracer ← not provided, optional
+`
+	if got := app.Modules(); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	if v := app.Validate(); v.Err() != nil || len(v.Unchecked) != 0 {
+		t.Fatalf("the module is fully declared: %v %v", v.Err(), v.Unchecked)
+	}
+}

@@ -7,14 +7,37 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
-What a comparison with `uber/fx` turned up. Two of these can break a caller: a
-binding that sets one hook twice now panics instead of keeping the last one,
-and a `Run` whose start takes more than 15 seconds now fails and rolls back.
-The third adds no rule and rejects nothing — it reports what wiring something
-late cost.
+What a comparison with `uber/fx` turned up: a group or optional parameter can
+be declared rather than resolved from a closure, `Run` bounds its start, a
+binding carries one hook of each kind, and `Explain` reports what wiring
+something late cost. Two of these can break a caller — a binding that sets one
+hook twice now panics instead of keeping the last one, and a `Run` whose start
+takes more than 15 seconds now fails and rolls back.
 
 ### Added
 
+- `Binding.Needs`, with `Optional[T]()` and `AllOf[T]()`, declares the two
+  parameters a constructor's signature cannot describe on its own:
+
+      // func NewRouter(rs []Route, t *Tracer) *Router
+      s.Wire[*Router](NewRouter).Needs(di.AllOf[Route](), di.Optional[*Tracer]())
+
+  `AllOf[T]` fills a `[]T` with the group for T, exactly as `All[T]()` does —
+  read where the constructor runs, so a `Scoped` consumer sees the members its
+  own scope adds, and the nil slice when the group is empty. `Optional[T]`
+  fills a T if anything provides it and the zero value if nothing does, as
+  `Maybe[T]()` does. Each `Need` is matched to its parameter by type, so
+  parameter order stays the constructor's business; a `Need` that matches no
+  parameter is rejected, as is a parameter described twice, and so is `Needs`
+  on anything but a `Wire` or `Wrap` registration.
+
+  Both were already possible through a `Provide` closure calling `All` or
+  `Maybe`. What the markers add is that the dependency stays declared: the
+  constructor remains a plain function, `Validate` checks it — walking a group
+  member by member, and treating an unprovided optional as no failure —
+  `Explain` draws it before anything is built, and `Modules` lists it. A
+  closure took the whole constructor out of the checked graph for the sake of
+  one parameter.
 - `StartTimeout` bounds `Run`'s start phase as `StopTimeout` bounds its stop,
   and is 15 seconds by default: the context the `OnStart` hooks receive
   expires after it, the start ends between steps once it has, and the rollback

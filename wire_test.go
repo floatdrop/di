@@ -199,3 +199,136 @@ func TestWireStoresAnAssignableResultAsTheKey(t *testing.T) {
 }
 
 type wSink struct{}
+
+// Needs fills the two parameters a plain constructor cannot declare: a group
+// and an optional dependency. The constructor imports nothing. (fx review)
+
+type wRoute struct{ path string }
+type wTracer struct{}
+type wRouter struct {
+	routes []wRoute
+	tracer *wTracer
+}
+
+func newWRouter(rs []wRoute, t *wTracer) *wRouter { return &wRouter{rs, t} }
+
+func TestNeedsFillsAGroupAndAnOptional(t *testing.T) {
+	s := di.New()
+	s.Wire[wRoute](func() wRoute { return wRoute{"/a"} }).Group()
+	s.Wire[wRoute](func() wRoute { return wRoute{"/b"} }).Group()
+	s.Wire[*wRouter](newWRouter).Needs(di.AllOf[wRoute](), di.Optional[*wTracer]())
+
+	r, err := s.Resolve[*wRouter]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.routes) != 2 || r.routes[0].path != "/a" || r.routes[1].path != "/b" {
+		t.Fatalf("routes: %v", r.routes)
+	}
+	if r.tracer != nil {
+		t.Fatalf("nothing provides *wTracer, so it should be nil: %v", r.tracer)
+	}
+
+	// The same graph with the optional provided.
+	s2 := di.New()
+	s2.Wire[wRoute](func() wRoute { return wRoute{"/a"} }).Group()
+	s2.Value(&wTracer{})
+	s2.Wire[*wRouter](newWRouter).Needs(di.AllOf[wRoute](), di.Optional[*wTracer]())
+	if r, err := s2.Resolve[*wRouter](); err != nil || r.tracer == nil {
+		t.Fatalf("the optional was provided: %v %v", r, err)
+	}
+}
+
+// An empty group is not a failure, and the parameter is the nil slice All
+// returns. (fx review)
+func TestNeedsAllOfAnEmptyGroup(t *testing.T) {
+	s := di.New()
+	s.Wire[*wRouter](newWRouter).Needs(di.AllOf[wRoute](), di.Optional[*wTracer]())
+	r, err := s.Resolve[*wRouter]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.routes != nil {
+		t.Fatalf("an empty group should be the nil slice, got %#v", r.routes)
+	}
+}
+
+// A group parameter is read where the constructor runs, so a Scoped consumer
+// sees the members its own scope adds. (fx review)
+func TestNeedsAllOfReadsFromTheBuildingScope(t *testing.T) {
+	root := di.New()
+	root.Wire[wRoute](func() wRoute { return wRoute{"root"} }).Group()
+	root.Wire[*wRouter](newWRouter).Scoped().
+		Needs(di.AllOf[wRoute](), di.Optional[*wTracer]())
+
+	child := root.Child("child")
+	child.Wire[wRoute](func() wRoute { return wRoute{"child"} }).Group()
+	r, err := child.Resolve[*wRouter]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.routes) != 2 {
+		t.Fatalf("the child's own member is missing: %v", r.routes)
+	}
+	if rr, err := root.Resolve[*wRouter](); err != nil || len(rr.routes) != 1 {
+		t.Fatalf("the root must not see the child's member: %v %v", rr, err)
+	}
+}
+
+// Needs is matched by type, so it is rejected when nothing matches, when one
+// parameter is described twice, and on a registration with no declared
+// parameters at all. (fx review)
+func TestNeedsRejections(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		wire func(*di.Scope)
+	}{
+		{"no such parameter", "matches no *github.com/floatdrop/di_test.wTracer parameter", func(s *di.Scope) {
+			s.Wire[*wRepo](newWRepo).Needs(di.Optional[*wTracer]())
+		}},
+		{"group needs a slice parameter", "matches no []di_test.wRoute parameter", func(s *di.Scope) {
+			s.Wire[*wRepo](newWRepo).Needs(di.AllOf[wRoute]())
+		}},
+		{"twice over", "already resolved as Optional", func(s *di.Scope) {
+			s.Wire[*wRouter](newWRouter).
+				Needs(di.Optional[*wTracer](), di.Optional[*wTracer]())
+		}},
+		{"on a closure", "applies to a Wire or Wrap constructor", func(s *di.Scope) {
+			s.Provide(func(*di.Scope) *wDB { return &wDB{} }).Needs(di.Optional[*wTracer]())
+		}},
+		{"on a value", "applies to a Wire or Wrap constructor", func(s *di.Scope) {
+			s.Value(&wDB{}).Needs(di.Optional[*wTracer]())
+		}},
+		{"the zero Need", "the zero Need", func(s *di.Scope) {
+			s.Wire[*wRouter](newWRouter).Needs(di.Need{})
+		}},
+		{"two parameters of one type", "which type cannot tell apart", func(s *di.Scope) {
+			s.Wire[*wDB](func(a, b *wTracer) *wDB { return &wDB{} }).
+				Needs(di.Optional[*wTracer]())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mustPanic(t, tc.want, func() { tc.wire(di.New()) })
+		})
+	}
+}
+
+// A wrapper's parameters go through the same path, so Needs applies there
+// too, past the value being wrapped. (fx review)
+func TestNeedsOnAWrapper(t *testing.T) {
+	s := di.New()
+	s.Wire[wRoute](func() wRoute { return wRoute{"/a"} }).Group()
+	s.Value(&wRouter{})
+	s.Wrap[*wRouter](func(next *wRouter, rs []wRoute, t *wTracer) *wRouter {
+		return &wRouter{append(next.routes, rs...), t}
+	}).Needs(di.AllOf[wRoute](), di.Optional[*wTracer]())
+
+	r, err := s.Resolve[*wRouter]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.routes) != 1 || r.tracer != nil {
+		t.Fatalf("the wrapper's needs were not filled: %#v", r)
+	}
+}
