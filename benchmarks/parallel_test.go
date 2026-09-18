@@ -6,7 +6,6 @@
 package bench
 
 import (
-	"context"
 	"net/http"
 	"sync"
 	"testing"
@@ -65,7 +64,7 @@ func BenchmarkDI_Parallel_ChildGet(b *testing.B) {
 func BenchmarkDI_Parallel_RequestScope(b *testing.B) {
 	s := parallelApp()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	ctx := context.Background()
+	ctx := b.Context()
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {

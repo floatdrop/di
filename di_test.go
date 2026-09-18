@@ -146,10 +146,10 @@ func TestLifecycleOrder(t *testing.T) {
 		OnStart(func(context.Context, *Repo) error { log = append(log, "start repo"); return nil }).
 		OnStop(func(context.Context, *Repo) error { log = append(log, "stop repo"); return nil })
 
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	want := "start db,start repo,stop repo,stop db"
@@ -164,7 +164,7 @@ func TestStopCollectsErrors(t *testing.T) {
 	s.Provide(func(*di.Scope) *DB { return &DB{} }).OnStop(func(context.Context, *DB) error { return e1 })
 	s.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} }).OnStop(func(context.Context, *Repo) error { return e2 })
 	s.Get[*Repo]()
-	err := s.Stop(context.Background())
+	err := s.Stop(t.Context())
 	if !errors.Is(err, e1) || !errors.Is(err, e2) {
 		t.Fatalf("want both errors, got %v", err)
 	}
@@ -173,7 +173,7 @@ func TestStopCollectsErrors(t *testing.T) {
 func TestStartReportsMissingEagerDependency(t *testing.T) {
 	s := di.New()
 	s.Provide(func(s *di.Scope) *Repo { return &Repo{db: s.Get[*DB]()} }).Eager()
-	if err := s.Start(context.Background()); !errors.Is(err, di.ErrNotProvided) {
+	if err := s.Start(t.Context()); !errors.Is(err, di.ErrNotProvided) {
 		t.Fatalf("got %v", err)
 	}
 }

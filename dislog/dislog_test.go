@@ -140,7 +140,7 @@ func TestNewOnARunningScope(t *testing.T) {
 		OnStart(func(context.Context, *DB) error { return nil }).
 		OnStop(func(context.Context, *DB) error { return nil })
 
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := app.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestNewSeesChildScopes(t *testing.T) {
 
 	req := app.Child("request")
 	req.Get[*DB]()
-	if err := req.Stop(context.Background()); err != nil {
+	if err := req.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 

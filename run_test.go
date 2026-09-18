@@ -24,14 +24,14 @@ func TestStartRollsBackOnFailure(t *testing.T) {
 		OnStart(func(context.Context, *Repo) error { return boom }).
 		OnStop(func(context.Context, *Repo) error { log = append(log, "stop repo"); return nil })
 
-	err := s.Start(context.Background())
+	err := s.Start(t.Context())
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
 	if got := strings.Join(log, ","); got != "start db,stop db" {
 		t.Fatalf("rollback order %q", got)
 	}
-	if err := s.Stop(context.Background()); err != nil || len(log) != 2 {
+	if err := s.Stop(t.Context()); err != nil || len(log) != 2 {
 		t.Fatalf("Stop after failed Start must be a no-op, log=%v err=%v", log, err)
 	}
 }
@@ -46,7 +46,7 @@ func TestStopStopsChildrenFirst(t *testing.T) {
 		OnStop(func(context.Context, *Repo) error { log = append(log, "stop repo"); return nil })
 	child.Get[*Repo]()
 
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(log, ","); got != "stop repo,stop db" {
@@ -58,7 +58,7 @@ func TestRunReturnsShutdownError(t *testing.T) {
 	s := di.New()
 	cause := errors.New("listener died")
 	done := make(chan error, 1)
-	go func() { done <- s.Run(context.Background()) }()
+	go func() { done <- s.Run(t.Context()) }()
 	time.Sleep(10 * time.Millisecond)
 	s.Shutdown(cause)
 	s.Shutdown(errors.New("ignored")) // first call wins
@@ -77,7 +77,7 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	s := di.New()
 	s.Value(&DB{}).OnStop(func(context.Context, *DB) error { stopped = true; return nil })
 	s.Get[*DB]()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := s.Run(ctx); err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestRunReturnsStartError(t *testing.T) {
 	s := di.New()
 	boom := errors.New("boom")
 	s.Value(&DB{}).Eager().OnStart(func(context.Context, *DB) error { return boom })
-	if err := s.Run(context.Background()); !errors.Is(err, boom) {
+	if err := s.Run(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -100,7 +100,7 @@ func TestShutdownFromChildReachesRoot(t *testing.T) {
 	s := di.New()
 	child := s.Child("worker")
 	done := make(chan error, 1)
-	go func() { done <- s.Run(context.Background()) }()
+	go func() { done <- s.Run(t.Context()) }()
 	time.Sleep(10 * time.Millisecond)
 	child.Shutdown(nil)
 	select {
@@ -119,7 +119,7 @@ func TestStopTimeoutBoundsHooks(t *testing.T) {
 	s.Get[*DB]()
 	s.Shutdown(nil)
 	start := time.Now()
-	err := s.Run(context.Background(), di.StopTimeout(50*time.Millisecond))
+	err := s.Run(t.Context(), di.StopTimeout(50*time.Millisecond))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v", err)
 	}
@@ -158,7 +158,7 @@ func TestRunDrainsHTTPServer(t *testing.T) {
 		OnStop(func(ctx context.Context, srv *http.Server) error { return srv.Shutdown(ctx) })
 
 	runErr := make(chan error, 1)
-	go func() { runErr <- app.Run(context.Background()) }()
+	go func() { runErr <- app.Run(t.Context()) }()
 
 	body := make(chan string, 1)
 	go func() {

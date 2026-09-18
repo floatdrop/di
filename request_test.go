@@ -14,11 +14,11 @@ import (
 type User struct{ Name string }
 
 func TestWithScopeRoundTrip(t *testing.T) {
-	if _, ok := di.FromContext(context.Background()); ok {
+	if _, ok := di.FromContext(t.Context()); ok {
 		t.Fatal("empty context must have no scope")
 	}
 	s := di.New()
-	got, ok := di.FromContext(di.WithScope(context.Background(), s))
+	got, ok := di.FromContext(di.WithScope(t.Context(), s))
 	if !ok || got != s {
 		t.Fatal("scope not round-tripped")
 	}
@@ -42,10 +42,10 @@ func TestScopedIsOnePerScope(t *testing.T) {
 	if a.Get[*Repo]().db != b.Get[*Repo]().db {
 		t.Fatal("scoped instances still share root singletons")
 	}
-	if err := a.Stop(context.Background()); err != nil || stops != 1 {
+	if err := a.Stop(t.Context()); err != nil || stops != 1 {
 		t.Fatalf("scoped instance must stop with its scope: stops=%d err=%v", stops, err)
 	}
-	if err := root.Stop(context.Background()); err != nil || stops != 2 {
+	if err := root.Stop(t.Context()); err != nil || stops != 2 {
 		t.Fatalf("root Stop must stop b's instance only: stops=%d err=%v", stops, err)
 	}
 }
@@ -99,7 +99,7 @@ func TestMiddlewareGivesEachRequestAScope(t *testing.T) {
 	if stops != 2 {
 		t.Fatalf("request scopes stopped %d times", stops)
 	}
-	if err := app.Stop(context.Background()); err != nil || stops != 2 {
+	if err := app.Stop(t.Context()); err != nil || stops != 2 {
 		t.Fatalf("stopped request scopes must be detached: stops=%d err=%v", stops, err)
 	}
 }

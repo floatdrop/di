@@ -60,7 +60,7 @@ func TestReviewRequestSurvivesDrain(t *testing.T) {
 	stopped := make(chan error, 1)
 	go func() {
 		close(release)
-		stopped <- app.Stop(context.Background())
+		stopped <- app.Stop(t.Context())
 	}()
 
 	select {
@@ -98,7 +98,7 @@ func TestReviewDrainOrder(t *testing.T) {
 		OnStop(func(context.Context, *Worker) error { log = append(log, "stop worker"); return nil })
 	child.Get[*Worker]()
 
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	want := "drain worker,drain db,stop worker,stop db"
@@ -115,10 +115,10 @@ func TestReviewDrainSkipsUnbuiltAndRunsOnce(t *testing.T) {
 	s.Provide(func(*di.Scope) *Worker { t.Fatal("an unbuilt service was drained"); return nil }).
 		OnDrain(func(context.Context, *Worker) error { return nil })
 	s.Get[*DB]()
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if drains != 1 {
@@ -131,7 +131,7 @@ func TestReviewDrainFailureIsReported(t *testing.T) {
 	s := di.New()
 	s.Value(&DB{}).OnDrain(func(context.Context, *DB) error { return boom })
 	s.Get[*DB]()
-	if err := s.Stop(context.Background()); !errors.Is(err, boom) {
+	if err := s.Stop(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -156,19 +156,19 @@ func TestReview2ConcurrentStopWaitsForAncestorDrain(t *testing.T) {
 			}
 			return nil
 		})
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := kid.Start(context.Background()); err != nil {
+	if err := kid.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
 	rootStop := make(chan error, 1)
-	go func() { rootStop <- root.Stop(context.Background()) }()
+	go func() { rootStop <- root.Stop(t.Context()) }()
 	<-inDrain
 
 	kidStop := make(chan error, 1)
-	go func() { kidStop <- kid.Stop(context.Background()) }()
+	go func() { kidStop <- kid.Stop(t.Context()) }()
 	select {
 	case err := <-kidStop:
 		t.Fatalf("the second Stop walked past a drain in flight: %v", err)
@@ -210,19 +210,19 @@ func TestReview2AncestorStopWaitsForIndependentChildDrain(t *testing.T) {
 			_, resolveErr = kid.Resolve[*DB]()
 			return nil
 		})
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := kid.Start(context.Background()); err != nil {
+	if err := kid.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
 	kidStop := make(chan error, 1)
-	go func() { kidStop <- kid.Stop(context.Background()) }()
+	go func() { kidStop <- kid.Stop(t.Context()) }()
 	<-inDrain
 
 	rootStop := make(chan error, 1)
-	go func() { rootStop <- root.Stop(context.Background()) }()
+	go func() { rootStop <- root.Stop(t.Context()) }()
 	time.Sleep(100 * time.Millisecond) // let root.Stop reach the point of marking itself stopped
 	close(release)
 
@@ -261,10 +261,10 @@ func TestReview2LateBuildDuringDrainIsDrained(t *testing.T) {
 			note("drain worker")
 			return nil
 		})
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -303,10 +303,10 @@ func TestReview2LateChildDrainCanResolve(t *testing.T) {
 			_, err := req.Resolve[*Repo]()
 			return err
 		})
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !ran.Load() {
@@ -342,10 +342,10 @@ func TestReview2LateBuildIntoSweptChildIsDrained(t *testing.T) {
 			return nil
 		})
 
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -396,12 +396,12 @@ func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
 			return nil
 		})
 
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
 	rootStop := make(chan error, 1)
-	go func() { rootStop <- root.Stop(context.Background()) }()
+	go func() { rootStop <- root.Stop(t.Context()) }()
 
 	select {
 	case <-bDraining:
@@ -410,7 +410,7 @@ func TestReview2LateDrainIsNotReleasedUnderneath(t *testing.T) {
 	}
 
 	kidStop := make(chan error, 1)
-	go func() { kidStop <- kid.Stop(context.Background()) }()
+	go func() { kidStop <- kid.Stop(t.Context()) }()
 	time.Sleep(150 * time.Millisecond) // let kid.Stop reach the release
 
 	if overlap.Load() {
@@ -449,7 +449,7 @@ func TestReview3DrainHookCanStopASiblingScope(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- root.Stop(context.Background()) }()
+	go func() { done <- root.Stop(t.Context()) }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -491,10 +491,10 @@ func TestReview3LostDrainWaitStillReleases(t *testing.T) {
 	}
 
 	rootStop := make(chan error, 1)
-	go func() { rootStop <- root.Stop(context.Background()) }()
+	go func() { rootStop <- root.Stop(t.Context()) }()
 
 	<-inDrain
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	if err := child.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("child.Stop: want the missed deadline reported, got %v", err)
@@ -539,10 +539,10 @@ func TestReview4ChildStopReportsItsOwnDrainFailure(t *testing.T) {
 		}
 
 		rootErr := make(chan error, 1)
-		go func() { rootErr <- root.Stop(context.Background()) }()
+		go func() { rootErr <- root.Stop(t.Context()) }()
 		<-inDrain
 		childErr := make(chan error, 1)
-		go func() { childErr <- child.Stop(context.Background()) }()
+		go func() { childErr <- child.Stop(t.Context()) }()
 		time.Sleep(20 * time.Millisecond) // let the child reach the phase
 		close(release)
 
@@ -574,7 +574,7 @@ func TestReview5RootStopReportsAChildsDrainFailure(t *testing.T) {
 	if _, err := child.Resolve[*Repo](); err != nil {
 		t.Fatal(err)
 	}
-	if err := root.Stop(context.Background()); !errors.Is(err, drainFailed) {
+	if err := root.Stop(t.Context()); !errors.Is(err, drainFailed) {
 		t.Fatalf("root.Stop: want the child's drain failure, got %v", err)
 	}
 }
@@ -615,14 +615,14 @@ func TestReview6ServiceStartedDuringDrainIsDrained(t *testing.T) {
 		})
 
 	startErr := make(chan error, 1)
-	go func() { startErr <- s.Start(context.Background()) }()
+	go func() { startErr <- s.Start(t.Context()) }()
 	select {
 	case <-aEntered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start never reached the blocking OnStart")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := s.Stop(ctx); err != nil {
 		t.Fatal(err)

@@ -402,7 +402,7 @@ func (m *machine) step(i int, o op) {
 
 	case opStop:
 		out := m.call(label, func() (any, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(m.t.Context(), 2*time.Second)
 			defer cancel()
 			return nil, s.Stop(ctx)
 		})
@@ -522,7 +522,7 @@ func (m *machine) stoppedTree(i int) bool {
 // finish enforces I5 and I6.
 func (m *machine) finish() {
 	_ = m.call("final Stop", func() (any, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(m.t.Context(), 5*time.Second)
 		defer cancel()
 		return nil, m.scopes[0].Stop(ctx)
 	})

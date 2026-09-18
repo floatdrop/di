@@ -1,7 +1,6 @@
 package storage_test
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -17,7 +16,7 @@ func TestStoreFindsUsers(t *testing.T) {
 	s := di.Test(t, config.Module, storage.Module)
 	s.Value(config.Config{DSN: "sqlite://memory"}).Override()
 
-	user, err := s.Get[storage.Store]().Find(context.Background(), "42")
+	user, err := s.Get[storage.Store]().Find(t.Context(), "42")
 	if err != nil {
 		t.Fatal(err)
 	}

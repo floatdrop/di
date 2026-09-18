@@ -641,7 +641,7 @@ func (m *cmachine) step(i int, o op) {
 		case opRegister:
 			m.register(s, o)
 		case opStart:
-			_ = s.Start(context.Background())
+			_ = s.Start(m.t.Context())
 		case opStop:
 			// An impatient Stop cannot finish the hooks it starts, which is
 			// how the driver reaches the release that outlives its caller.
@@ -658,7 +658,7 @@ func (m *cmachine) step(i int, o op) {
 				}
 				m.impatient.Store(m.names[o.scope], struct{}{})
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), d)
+			ctx, cancel := context.WithTimeout(m.t.Context(), d)
 			defer cancel()
 			err := s.Stop(ctx)
 			m.stopReturned.Store(m.names[o.scope], struct{}{})
@@ -685,7 +685,7 @@ func (m *cmachine) step(i int, o op) {
 		case opRun:
 			// Run with a context that is already cancelled: it starts the
 			// scope and stops it again.
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(m.t.Context())
 			cancel()
 			_ = s.Run(ctx, di.StopTimeout(5*time.Second))
 			m.stopReturned.Store(m.names[o.scope], struct{}{})
@@ -756,7 +756,7 @@ func (m *cmachine) run() {
 	m.tearing.Store(true)
 	m.parallel(append(up, down...))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(m.t.Context(), 10*time.Second)
 	defer cancel()
 	m.call("final Stop", func() {
 		err := m.scopes[0].Stop(ctx)
@@ -1085,8 +1085,8 @@ func TestConcurrentStopKeepsScopeOrder(t *testing.T) {
 		req.Get[*Repo]()
 
 		var wg sync.WaitGroup
-		wg.Go(func() { _ = req.Stop(context.Background()) })
-		wg.Go(func() { _ = root.Stop(context.Background()) })
+		wg.Go(func() { _ = req.Stop(t.Context()) })
+		wg.Go(func() { _ = root.Stop(t.Context()) })
 		wg.Wait()
 
 		if msgs := order.failures(); len(msgs) > 0 {
@@ -1191,10 +1191,10 @@ func TestConcurrentImpatientStopStillReleases(t *testing.T) {
 		}
 
 		rootDone := make(chan error, 1)
-		go func() { rootDone <- root.Stop(context.Background()) }()
+		go func() { rootDone <- root.Stop(t.Context()) }()
 		<-inDrain
 
-		spent, cancel := context.WithTimeout(context.Background(), 0)
+		spent, cancel := context.WithTimeout(t.Context(), 0)
 		if err := child.Stop(spent); err == nil {
 			t.Fatal("a Stop with a spent context reported success")
 		}
@@ -1231,14 +1231,14 @@ func TestConcurrentDrainWaitsForAnInFlightStartStep(t *testing.T) {
 			OnStart(func(context.Context, *DB) error { close(starting); <-release; return nil }).
 			OnDrain(func(context.Context, *DB) error { drained.Store(true); return nil }).
 			OnStop(func(context.Context, *DB) error { stoppedAfterDrain.Store(drained.Load()); return nil })
-		if err := root.Start(context.Background()); err != nil {
+		if err := root.Start(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		go func() { _, _ = root.Resolve[*DB]() }()
 		<-starting
 
 		go func() { time.Sleep(2 * time.Millisecond); close(release) }()
-		if err := root.Stop(context.Background()); err != nil {
+		if err := root.Stop(t.Context()); err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
 		if !drained.Load() {

@@ -32,11 +32,11 @@ func TestObserveSeesWholeLifecycle(t *testing.T) {
 		OnStart(func(context.Context, *DB) error { return nil }).
 		OnStop(func(context.Context, *DB) error { return errors.New("close failed") })
 
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	s.Shutdown(nil)
-	_ = s.Stop(context.Background())
+	_ = s.Stop(t.Context())
 
 	if got := kinds(evs); got != "build,start,shutdown,stop!" {
 		t.Fatalf("got %q", got)
@@ -105,14 +105,14 @@ func TestBuildRacingStopIsUndone(t *testing.T) {
 				b = b.OnStart(func(context.Context, *DB) error { return nil })
 			}
 			b.OnStop(func(context.Context, *DB) error { stops++; return nil })
-			if err := s.Start(context.Background()); err != nil {
+			if err := s.Start(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 
 			result := make(chan error, 1)
 			go func() { _, err := s.Resolve[*DB](); result <- err }()
 			<-building
-			if err := s.Stop(context.Background()); err != nil { // snapshot is empty: nothing to stop yet
+			if err := s.Stop(t.Context()); err != nil { // snapshot is empty: nothing to stop yet
 				t.Fatal(err)
 			}
 			close(release)

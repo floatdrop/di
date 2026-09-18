@@ -39,7 +39,7 @@ func TestRegressionStartRace(t *testing.T) {
 			OnStop(func(ctx context.Context, v *rD) error { return down(ctx, v) })
 
 		var wg sync.WaitGroup
-		wg.Go(func() { _ = s.Start(context.Background()) })
+		wg.Go(func() { _ = s.Start(t.Context()) })
 		wg.Go(func() { _, _ = s.Resolve[*rA]() })
 		wg.Go(func() { _, _ = s.Resolve[*rB]() })
 		wg.Go(func() { _, _ = s.Resolve[*rC]() })
@@ -47,7 +47,7 @@ func TestRegressionStartRace(t *testing.T) {
 		wg.Wait()
 
 		nstarted := started.Load()
-		_ = s.Stop(context.Background())
+		_ = s.Stop(t.Context())
 		if nstopped := stopped.Load(); nstopped > nstarted {
 			t.Fatalf("iteration %d: %d instances stopped but only %d started", i, nstopped, nstarted)
 		}
@@ -69,7 +69,7 @@ func TestRegressionRollbackSkipsNeverStarted(t *testing.T) {
 	s.Get[*rA]()
 	s.Get[*rB]()
 	s.Get[*rC]()
-	if err := s.Start(context.Background()); err == nil {
+	if err := s.Start(t.Context()); err == nil {
 		t.Fatal("expected a start failure")
 	}
 	if got := strings.Join(log, ","); got != "startA,stopA" {
@@ -85,7 +85,7 @@ func TestRegressionRollbackStopsChildren(t *testing.T) {
 	child.Value(&DB{}).OnStop(func(context.Context, *DB) error { childStopped = true; return nil })
 	child.Get[*DB]()
 	s.Value(&Worker{}).Eager().OnStart(func(context.Context, *Worker) error { return errors.New("boom") })
-	if err := s.Start(context.Background()); err == nil {
+	if err := s.Start(t.Context()); err == nil {
 		t.Fatal("expected a start failure")
 	}
 	if !childStopped {
@@ -106,7 +106,7 @@ func TestRegressionRollbackAwaitsWorkerHook(t *testing.T) {
 		})
 	s.Provide(func(*di.Scope) *rA { return &rA{} }).Eager().
 		OnStart(func(ctx context.Context, _ *rA) error { return errors.New("boom") })
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := s.Start(ctx); err == nil {
 		t.Fatal("expected a start failure")
@@ -125,13 +125,13 @@ func TestRegressionLateUndoHonoursDeadline(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { close(building); <-release; return &Worker{} }).
 		Go(func(ctx context.Context, w *Worker) error { time.Sleep(3 * time.Second); return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
 	go func() { _, _ = s.Resolve[*Worker](); close(done) }()
 	<-building
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	_ = s.Stop(ctx)
 	close(release)
@@ -153,7 +153,7 @@ func TestStopWaitsForAnInFlightStartStep(t *testing.T) {
 	s.Provide(func(*di.Scope) *DB { return &DB{} }).
 		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
 		OnStop(func(context.Context, *DB) error { stopped.Store(true); return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	res := make(chan error, 1)
@@ -161,7 +161,7 @@ func TestStopWaitsForAnInFlightStartStep(t *testing.T) {
 	<-entered
 
 	go func() { time.Sleep(20 * time.Millisecond); close(release) }()
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !stopped.Load() {
@@ -185,7 +185,7 @@ func TestRegressionEagerConstructorFailureRollsBack(t *testing.T) {
 		OnStop(func(context.Context, *DB) error { stops = append(stops, "db"); return nil })
 	s.Provide(func(sc *di.Scope) *Repo { return sc.Must((*Repo)(nil), boom) }).Eager()
 
-	err := s.Start(context.Background())
+	err := s.Start(t.Context())
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
@@ -227,11 +227,11 @@ func TestStopFromAHookIsReported(t *testing.T) {
 			got := make(chan error, 1)
 			s := di.New()
 			tc.wire(s, got)
-			if err := s.Start(context.Background()); err != nil {
+			if err := s.Start(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			done := make(chan struct{})
-			go func() { defer close(done); _ = s.Stop(context.Background()) }()
+			go func() { defer close(done); _ = s.Stop(t.Context()) }()
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
@@ -257,14 +257,14 @@ func TestStopFromAHookWithItsOwnContextIsBounded(t *testing.T) {
 	s := di.New()
 	s.Value(&DB{}).Eager().
 		OnStart(func(context.Context, *DB) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 			defer cancel()
 			got <- s.Stop(ctx)
 			return nil
 		})
 	// The Stop is real, so Start reports the scope stopped under it; what is
 	// checked is that the hook's own call came back.
-	if err := s.Start(context.Background()); !errors.Is(err, di.ErrStopped) {
+	if err := s.Start(t.Context()); !errors.Is(err, di.ErrStopped) {
 		t.Fatalf("Start: %v", err)
 	}
 	select {
@@ -289,13 +289,13 @@ func TestRegressionExpiredStopDoesNotOrphan(t *testing.T) {
 		OnStart(func(context.Context, *Worker) error { close(entered); time.Sleep(150 * time.Millisecond); return nil }).
 		Go(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); close(runCancelled); return nil }).
 		OnStop(func(context.Context, *Worker) error { close(stopped); return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	go func() { _, _ = s.Resolve[*Worker]() }()
 	<-entered
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	_ = s.Stop(ctx)
 
@@ -319,7 +319,7 @@ func TestRegressionAncestorStoppedRejectsChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	grand := child.Child("grand")
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	for name, sc := range map[string]*di.Scope{"child": child, "grandchild": grand} {
@@ -337,8 +337,8 @@ func TestStartReportsAScopeStoppedUnderIt(t *testing.T) {
 	s := di.New()
 	s.Value(&DB{}).Eager().
 		OnStart(func(context.Context, *DB) error { close(entered); time.Sleep(50 * time.Millisecond); return nil })
-	go func() { <-entered; _ = s.Stop(context.Background()) }()
-	if err := s.Start(context.Background()); !errors.Is(err, di.ErrStopped) {
+	go func() { <-entered; _ = s.Stop(t.Context()) }()
+	if err := s.Start(t.Context()); !errors.Is(err, di.ErrStopped) {
 		t.Fatalf("got %v, want ErrStopped", err)
 	}
 }
@@ -360,14 +360,14 @@ func TestStopReportsTheTeardownItWaitedFor(t *testing.T) {
 	s.Provide(func(*di.Scope) *DB { return &DB{} }).
 		OnStart(func(context.Context, *DB) error { close(entered); <-release; return nil }).
 		OnStop(func(context.Context, *DB) error { return flush })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	go func() { _, _ = s.Resolve[*DB]() }()
 	<-entered
 	go func() { time.Sleep(20 * time.Millisecond); close(release) }()
 
-	if err := s.Stop(context.Background()); !errors.Is(err, flush) {
+	if err := s.Stop(t.Context()); !errors.Is(err, flush) {
 		t.Fatalf("Stop returned %v, want the teardown failure it waited for", err)
 	}
 	select {
@@ -400,10 +400,10 @@ func TestFirstStopOwnsALateTeardownsContext(t *testing.T) {
 	go func() { _, _ = s.Resolve[*DB]() }() // still constructing when Stop runs
 	<-entered
 
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	cancelled, cancel := context.WithCancel(context.Background())
+	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 	_ = s.Stop(cancelled) // nothing left to stop, must not change the owned context
 
@@ -439,11 +439,11 @@ func TestReviewConcurrentChildStopPreservesDependencyOrder(t *testing.T) {
 	child.Get[*Repo]()
 
 	childDone := make(chan struct{})
-	go func() { _ = child.Stop(context.Background()); close(childDone) }()
+	go func() { _ = child.Stop(t.Context()); close(childDone) }()
 	<-entered
 
 	rootDone := make(chan struct{})
-	go func() { _ = root.Stop(context.Background()); close(rootDone) }()
+	go func() { _ = root.Stop(t.Context()); close(rootDone) }()
 	time.Sleep(50 * time.Millisecond) // long enough for a racing root to run ahead
 	close(release)
 
@@ -473,7 +473,7 @@ func TestReviewRunRollbackHonoursStopTimeout(t *testing.T) {
 		OnStart(func(context.Context, *Repo) error { return errors.New("boom") })
 
 	done := make(chan error, 1)
-	go func() { done <- s.Run(context.Background(), di.StopTimeout(10*time.Millisecond)) }()
+	go func() { done <- s.Run(t.Context(), di.StopTimeout(10*time.Millisecond)) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -501,7 +501,7 @@ func TestReviewResolveWaitsForInFlightStart(t *testing.T) {
 			return nil
 		})
 
-	go func() { _ = s.Start(context.Background()) }()
+	go func() { _ = s.Start(t.Context()) }()
 	<-entered
 
 	got := make(chan bool, 1)
@@ -524,7 +524,7 @@ func TestReviewResolveWaitsForInFlightStart(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Resolve never returned")
 	}
-	_ = s.Stop(context.Background())
+	_ = s.Stop(t.Context())
 }
 
 // A scope that has stopped refuses to resolve, including a resolution that
@@ -542,7 +542,7 @@ func TestReview2StoppedScopeServesNothingAfterWaiting(t *testing.T) {
 	go func() { _, err := kid.Resolve[*DB](); res <- err }()
 	<-inCtor
 
-	if err := kid.Stop(context.Background()); err != nil {
+	if err := kid.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -571,7 +571,7 @@ func TestReview2PanickingStartHookIsAFailure(t *testing.T) {
 	root.Provide(func(*di.Scope) *DB { return &DB{} }).
 		OnStart(func(context.Context, *DB) error { starts.Add(1); panic("boom") }).
 		OnStop(func(context.Context, *DB) error { stops.Add(1); return nil })
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -585,7 +585,7 @@ func TestReview2PanickingStartHookIsAFailure(t *testing.T) {
 	if _, err := root.Resolve[*DB](); err == nil {
 		t.Fatal("a later resolve was served the unstarted service")
 	}
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := stops.Load(); got != 0 {
@@ -610,7 +610,7 @@ func TestPanickingStartHookIsObserved(t *testing.T) {
 	root.Provide(func(*di.Scope) *DB { return &DB{} }).
 		OnStart(func(context.Context, *DB) error { panic("boom") }).
 		Eager()
-	if err := root.Start(context.Background()); err == nil {
+	if err := root.Start(t.Context()); err == nil {
 		t.Fatal("Start succeeded with a panicking OnStart")
 	}
 	if len(events) != 1 {
@@ -657,7 +657,7 @@ func TestPanickingTeardownHooksAreReported(t *testing.T) {
 			s.Get[*DB]()
 
 			done := make(chan error, 1)
-			go func() { done <- s.Stop(context.Background()) }()
+			go func() { done <- s.Stop(t.Context()) }()
 			var err error
 			select {
 			case err = <-done:
@@ -671,7 +671,7 @@ func TestPanickingTeardownHooksAreReported(t *testing.T) {
 				t.Fatal("the teardown was abandoned: an earlier instance was never released")
 			}
 			// A second Stop reports the same result at once.
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			if again := s.Stop(ctx); again == nil || errors.Is(again, context.DeadlineExceeded) {
 				t.Fatalf("second Stop: %v", again)
