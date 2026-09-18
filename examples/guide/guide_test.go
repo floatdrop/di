@@ -1,10 +1,8 @@
-// Package guide is the application the step-by-step guide walks through.
-// This test pins two things the guide shows: that the wiring validates, and
-// what Explain says about it before anything is built.
 package guide
 
 import (
 	"flag"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,7 +22,16 @@ import (
 
 var update = flag.Bool("update", false, "rewrite testdata/explain.txt from the current wiring")
 
+// These tests pin two things the guide shows: that the wiring validates, and
+// what Explain and Modules say about it before anything is built.
+//
+// wire is cmd/api's composition minus the process, and a logger that says
+// nothing instead of the one main builds. **It is a copy of what main does**,
+// because a test cannot import package main: change the list there and change
+// it here, or these tests and the output the guide shows describe a program
+// that is not the one that runs.
 func wire(app *di.Scope) {
+	app.Value(slog.New(slog.DiscardHandler))
 	app.Use(config.Module, storage.Module, cache.Module, mail.Module, dihttp.Module, api.Module)
 }
 

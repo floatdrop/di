@@ -36,15 +36,19 @@ export type FigureId =
 
 export type Figures = Record<FigureId, ReactNode>;
 
-/** The ten steps, in order; the id is the anchor. */
+/**
+ * The ten steps, in order; the id is the anchor. The order is main first and
+ * then its modules as `Use` lists them, so the page is read the way the
+ * application is: every locale's `steps` array follows this.
+ */
 export type StepId =
 	| 'shape'
-	| 'constructors'
-	| 'config'
 	| 'main'
+	| 'config'
+	| 'constructors'
+	| 'wrap'
 	| 'workers'
 	| 'http'
-	| 'wrap'
 	| 'testing'
 	| 'graph'
 	| 'run';

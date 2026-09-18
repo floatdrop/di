@@ -31,23 +31,33 @@ func newCachingStore(next storage.Store, c *cache) storage.Store {
 	return &cachingStore{next: next, cache: c}
 }
 
-func (s *cachingStore) Find(ctx context.Context, id string) (storage.User, error) {
-	s.cache.mu.Lock()
-	user, ok := s.cache.users[id]
+// hit reads the cache and counts the lookup if it was there. It is a method
+// of its own because the lock must be released before the store is asked.
+func (c *cache) hit(id string) (storage.User, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	user, ok := c.users[id]
 	if ok {
-		s.cache.hits++
+		c.hits++
 	}
-	s.cache.mu.Unlock()
-	if ok {
+	return user, ok
+}
+
+func (c *cache) put(id string, user storage.User) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.users[id] = user
+}
+
+func (s *cachingStore) Find(ctx context.Context, id string) (storage.User, error) {
+	if user, ok := s.cache.hit(id); ok {
 		return user, nil
 	}
 	user, err := s.next.Find(ctx, id)
 	if err != nil {
 		return user, err
 	}
-	s.cache.mu.Lock()
-	s.cache.users[id] = user
-	s.cache.mu.Unlock()
+	s.cache.put(id, user)
 	return user, nil
 }
 

@@ -1,34 +1,51 @@
-// Package mail sends messages from a background worker.
+// Package mail sends messages from a background worker. It exports its
+// contract, Mailer, and its Module; the constructor and the loop are private.
 package mail
 
 import (
 	"context"
-	"log"
+	"log/slog"
 
 	"github.com/floatdrop/di"
 )
 
-type Mailer struct{ queue chan string }
+type Mailer struct {
+	log   *slog.Logger
+	queue chan string
+}
 
-func New() *Mailer { return &Mailer{queue: make(chan string, 64)} }
+// newMailer takes the logger as a parameter, like any other dependency.
+func newMailer(log *slog.Logger) *Mailer {
+	return &Mailer{log: log, queue: make(chan string, 64)}
+}
 
 // Send queues a message; the worker delivers it.
 func (m *Mailer) Send(msg string) {
 	select {
 	case m.queue <- msg:
 	default:
-		log.Println("mail: queue full, dropped", msg)
+		m.log.Warn("mail: queue full, dropped", "msg", msg)
 	}
 }
 
-// Run delivers until ctx is cancelled, which Stop does before the services
-// the mailer depends on are stopped.
-func (m *Mailer) Run(ctx context.Context) error {
+// run delivers until ctx is cancelled, which Stop does before the services
+// the mailer depends on are stopped. Cancellation means stop accepting, not
+// stop finishing: what is already queued is delivered before returning, so a
+// request that queued a message just before shutdown is not silently dropped.
+//
+// The tail is bounded by what is queued at that moment, not by the queue
+// running dry. Draining until empty would let a Send racing the shutdown keep
+// the worker past Stop's deadline, and a worker that does not return is
+// reported as a teardown failure.
+func (m *Mailer) run(ctx context.Context) error {
 	for {
 		select {
 		case msg := <-m.queue:
-			log.Println("mail: sent", msg)
+			m.log.Info("mail: sent", "msg", msg)
 		case <-ctx.Done():
+			for range len(m.queue) {
+				m.log.Info("mail: sent", "msg", <-m.queue)
+			}
 			return nil
 		}
 	}
@@ -38,7 +55,7 @@ func (m *Mailer) Run(ctx context.Context) error {
 // once Start returns, its loop runs in its own goroutine, and Stop cancels
 // the loop and waits for it.
 func Module(s *di.Scope) {
-	s.Wire[*Mailer](New).
+	s.Wire[*Mailer](newMailer).
 		Eager().
-		Go(func(ctx context.Context, m *Mailer) error { return m.Run(ctx) })
+		Go(func(ctx context.Context, m *Mailer) error { return m.run(ctx) })
 }

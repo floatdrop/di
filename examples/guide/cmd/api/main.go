@@ -21,12 +21,12 @@ import (
 )
 
 func main() {
-	// charmbracelet/log is an slog handler, so it is the application's logger
-	// and the container's at once.
-	logger := charm.NewWithOptions(os.Stderr, charm.Options{
+	// charmbracelet/log is an slog handler, so one logger serves both the
+	// application and the container.
+	logger := slog.New(charm.NewWithOptions(os.Stderr, charm.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.Kitchen,
-	})
+	}))
 
 	app := di.New()
 
@@ -35,8 +35,15 @@ func main() {
 	// as it builds, starts, drains and stops. Observers see this scope and
 	// every scope under it, request scopes included, so register it first and
 	// the wiring is logged from the beginning.
-	app.Observe(dislog.New(slog.New(logger)))
+	app.Observe(dislog.New(logger))
 
+	// The same logger as a service, so a constructor that wants to log takes
+	// a *slog.Logger as a parameter like any other dependency.
+	app.Value(logger)
+
+	// The application, in the order it is composed. Order matters in one
+	// place: cache wraps what serves storage.Store, so its module comes after
+	// storage's.
 	app.Use(
 		config.Module,
 		storage.Module,
@@ -50,12 +57,14 @@ func main() {
 	// dependencies, so the graph is checked here, as a request scope holding
 	// an *http.Request would resolve it.
 	if err := app.Validate(di.Provided[*http.Request]()).Err(); err != nil {
-		logger.Fatal(err)
+		logger.Error("invalid wiring", "err", err)
+		os.Exit(1)
 	}
 
 	// Run starts the eager services and their hooks, waits for SIGINT or
 	// SIGTERM, then stops everything in reverse order within the timeout.
 	if err := app.Run(context.Background(), di.StopTimeout(10*time.Second)); err != nil {
-		logger.Fatal(err)
+		logger.Error("stopped with failures", "err", err)
+		os.Exit(1)
 	}
 }
