@@ -431,18 +431,28 @@ func NewServer(cfg Config, mw dihttp.Middleware) *http.Server {
 ```
 
 `dihttp.Handle` resolves a handler type from the request's scope and calls
-the method; mark the type `Scoped()` when it needs the request.
-`di.FromContext(r.Context())` reaches the scope by hand, and
-`dihttp.NewMiddleware(app)` makes a middleware outside the container.
-Services that depend on the request are declared once, in the root, as
-`Scoped()`:
+the method; mark the type `Scoped()` when it needs the request. Services
+that depend on the request are declared once, in the root, as `Scoped()`:
 
 ```go
 app.Wire[*User](func(r *http.Request) *User { return &User{Name: r.Header.Get("X-User")} }).Scoped()
 ```
 
+For a server the container does not build, `dihttp.NewMiddleware(app)`
+makes the middleware outside it and `di.FromContext` reaches the scope by
+hand:
+
+```go
+mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
+    req, _ := di.FromContext(r.Context()) // the request scope the middleware opened
+    fmt.Fprintln(w, "hello", req.Get[*User]().Name)
+})
+srv := &http.Server{Handler: dihttp.NewMiddleware(app)(mux)}
+```
+
 `di.WithScope` and `di.FromContext` are the primitives without `net/http`.
-[`examples/app`](examples/app/main.go) is a complete service.
+[`examples/guide`](examples/guide) is a complete application, module by
+module, and [the guide](https://floatdrop.github.io/di/) walks through it.
 
 #### Values that change
 

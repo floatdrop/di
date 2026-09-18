@@ -595,10 +595,10 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   types through `dihttp.Handle((*Users).Show)`. Packages export only their
   contract and `Module` — keys are types, so an unexported type is a private
   service, and that is the whole privacy model.
-- **`examples/app` and `examples/server` block on signals.** Build and run them
-  with output going to the terminal, not redirected — this harness loses a
-  backgrounded server's startup output when redirected, which once produced a
-  false failure report.
+- **`examples/server` and `examples/guide/cmd/api` block on signals.** Build and
+  run them with output going to the terminal, not redirected — this harness
+  loses a backgrounded server's startup output when redirected, which once
+  produced a false failure report.
 - **A teardown finishes after `Stop` returns only when `Stop`'s context expired**
   (waiting for a worker, a start step or a drain hook), plus the one undoing a
   build that completed after the scope stopped. The deadline bounds how long
