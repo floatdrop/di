@@ -46,6 +46,10 @@ func main() {
 
 	fmt.Println("app:  ", app.Get[Store]().Get("1"))
 	fmt.Println("debug:", debug.Get[Store]().Get("1"))
+
+	// Both paths went through the one caching wrapper, which is the *Cache
+	// the child's tracing wrapper composes over rather than a second one.
+	fmt.Println("hits: ", app.Get[*Cache]().hits)
 	fmt.Print(app.Explain[Store]())
 	_ = app.Stop(context.Background())
 }

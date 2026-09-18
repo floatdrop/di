@@ -16,39 +16,24 @@ import (
 type Config struct{ RateLimit int }
 
 // Source holds the current configuration. Current is what a long-lived
-// service calls at the moment it needs the value; Watch is the worker that
-// applies reloads as they arrive. Here they arrive on a channel; a real
-// source follows a file, a signal or a remote endpoint.
-type Source struct {
-	cur     atomic.Pointer[Config]
-	reloads chan Config
-	applied chan struct{}
-}
+// service calls at the moment it needs the value. A real source follows a
+// file, a signal or a remote endpoint and calls Reload: that watcher is a Go
+// hook, and wants Eager() so it starts with the application rather than on
+// the first resolution.
+type Source struct{ cur atomic.Pointer[Config] }
 
 func NewSource() *Source {
-	s := &Source{reloads: make(chan Config), applied: make(chan struct{})}
+	s := &Source{}
 	s.cur.Store(&Config{RateLimit: 100}) // the initial read
 	return s
 }
 
 func (s *Source) Current() Config { return *s.cur.Load() }
 
-func (s *Source) Watch(ctx context.Context) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case cfg := <-s.reloads:
-			s.cur.Store(&cfg)
-			fmt.Println("reloaded: ", cfg.RateLimit, "per minute")
-			s.applied <- struct{}{}
-		}
-	}
+func (s *Source) Reload(cfg Config) {
+	s.cur.Store(&cfg)
+	fmt.Println("reloaded: ", cfg.RateLimit, "per minute")
 }
-
-// Reload hands a new configuration to the watcher and returns once it has
-// been applied, which keeps this program's output in order.
-func (s *Source) Reload(cfg Config) { s.reloads <- cfg; <-s.applied }
 
 // A singleton lives as long as the application, so it takes the source and
 // reads it on every use. Taking Config instead would capture one snapshot
@@ -66,8 +51,7 @@ func NewHandler(cfg Config) *Handler { return &Handler{cfg: cfg} }
 
 func main() {
 	app := di.New()
-	app.Wire[*Source](NewSource).Eager().
-		Go(func(ctx context.Context, src *Source) error { return src.Watch(ctx) })
+	app.Wire[*Source](NewSource)
 	app.Wire[Config](func(src *Source) Config { return src.Current() }).Scoped()
 	app.Wire[*Limiter](NewLimiter)
 	app.Wire[*Handler](NewHandler).Scoped()
