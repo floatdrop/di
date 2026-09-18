@@ -7,12 +7,20 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-18
+
 What a comparison with `uber/fx` turned up: a group or optional parameter can
 be declared rather than resolved from a closure, `Run` bounds its start, a
 binding carries one hook of each kind, and `Explain` reports what wiring
-something late cost. Two of these can break a caller — a binding that sets one
-hook twice now panics instead of keeping the last one, and a `Run` whose start
-takes more than 15 seconds now fails and rolls back.
+something late cost.
+
+`go doc -all` against 0.16.2 adds `Binding.Needs`, `Need`, `Optional`, `AllOf`
+and `StartTimeout`, and changes no signature and removes nothing, in `di`,
+`dihttp` and `dislog` alike. **Two behaviour changes can break a caller**: a
+binding that sets one hook of a kind twice now panics rather than keeping the
+last one, and a `Run` whose start takes more than 15 seconds now fails and
+rolls back, so a start that legitimately takes longer must say
+`StartTimeout`.
 
 ### Added
 
@@ -1083,7 +1091,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/floatdrop/di/compare/v0.16.2...v0.17.0
 [0.16.2]: https://github.com/floatdrop/di/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/floatdrop/di/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/floatdrop/di/compare/v0.15.1...v0.16.0
