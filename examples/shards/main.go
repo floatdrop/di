@@ -1,6 +1,8 @@
 // A configured set of instances: the members are not known until the config
 // is read, so no type can name them. They are registered as a group, folded
-// into a registry, and picked by a value the resolving scope provides.
+// into a registry, and picked by a value the resolving scope provides. Every
+// constructor here is plain, so the whole graph is checked before anything
+// is built: nothing is unchecked and only the shard name is owed.
 package main
 
 import (
@@ -33,6 +35,16 @@ func selectShard(want ShardName, all Shards) (*DB, error) {
 	return db, nil
 }
 
+// The fold is an ordinary constructor too: its parameter is the group, which
+// Needs says at the registration rather than here.
+func shardRegistry(all []Shard) Shards {
+	m := Shards{}
+	for _, sh := range all {
+		m[sh.Name] = sh.DB
+	}
+	return m
+}
+
 func main() {
 	cfg := Config{Shards: []string{"eu-1", "us-1"}}
 
@@ -43,13 +55,7 @@ func main() {
 	for _, name := range cfg.Shards {
 		app.Value(Shard{Name: name, DB: &DB{dsn: name}}).Group()
 	}
-	app.Provide(func(s *di.Scope) Shards {
-		m := Shards{}
-		for _, sh := range s.All[Shard]() {
-			m[sh.Name] = sh.DB
-		}
-		return m
-	})
+	app.Wire[Shards](shardRegistry).Needs(di.AllOf[Shard]())
 
 	// The selector is an ordinary constructor: its ShardName parameter is the
 	// key, and Scoped() leaves the choice to the scope that resolves it.

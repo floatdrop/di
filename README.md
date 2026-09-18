@@ -120,6 +120,7 @@ the scope is first resolved.
 | `.Scoped()` | One instance per resolving scope, built and stopped there. |
 | `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
+| `.Needs(...)` | How to fill a `Wire` parameter that is not a plain dependency: `di.AllOf[T]()` for a `[]T` holding the group, `di.Optional[T]()` for one that may go unprovided. |
 | `.Override()` | Replace an earlier registration of `T` in this scope; a second one without it is rejected. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
@@ -147,8 +148,8 @@ di: building *app.A (provided at ...): di: building *app.B (provided at ...): di
 takes a plain constructor, `func(A, B) T` or `func(A, B) (T, error)`; its
 parameters are its dependencies, so `Validate` can check them before
 anything runs, and a wrong shape is rejected at registration. A slice
-parameter is a key, not a group. A constructor that needs the scope itself
-stays a closure.
+parameter is a key rather than a group unless `Needs(di.AllOf[T]())` says
+otherwise. A constructor that needs the scope itself stays a closure.
 
 An interface is served by a constructor that returns the implementation:
 
@@ -690,7 +691,9 @@ a constructor whose parameter is the key, marked `Scoped()`.
 ```go
 // A configured set of instances: the members are not known until the config
 // is read, so no type can name them. They are registered as a group, folded
-// into a registry, and picked by a value the resolving scope provides.
+// into a registry, and picked by a value the resolving scope provides. Every
+// constructor here is plain, so the whole graph is checked before anything
+// is built: nothing is unchecked and only the shard name is owed.
 package main
 
 import (
@@ -723,6 +726,16 @@ func selectShard(want ShardName, all Shards) (*DB, error) {
 	return db, nil
 }
 
+// The fold is an ordinary constructor too: its parameter is the group, which
+// Needs says at the registration rather than here.
+func shardRegistry(all []Shard) Shards {
+	m := Shards{}
+	for _, sh := range all {
+		m[sh.Name] = sh.DB
+	}
+	return m
+}
+
 func main() {
 	cfg := Config{Shards: []string{"eu-1", "us-1"}}
 
@@ -733,13 +746,7 @@ func main() {
 	for _, name := range cfg.Shards {
 		app.Value(Shard{Name: name, DB: &DB{dsn: name}}).Group()
 	}
-	app.Provide(func(s *di.Scope) Shards {
-		m := Shards{}
-		for _, sh := range s.All[Shard]() {
-			m[sh.Name] = sh.DB
-		}
-		return m
-	})
+	app.Wire[Shards](shardRegistry).Needs(di.AllOf[Shard]())
 
 	// The selector is an ordinary constructor: its ShardName parameter is the
 	// key, and Scoped() leaves the choice to the scope that resolves it.
@@ -967,7 +974,11 @@ import (
 
 type Config struct{ DSN string }
 type DB struct{ dsn string }
-type Repo struct{ db *DB }
+type Tracer struct{}
+type Repo struct {
+	db     *DB
+	tracer *Tracer // nil unless something provides one
+}
 type User struct{ name string }
 type Handler struct {
 	repo *Repo
@@ -977,7 +988,7 @@ type Mailer struct{ user *User }
 
 // The constructors know nothing about di.
 func NewDB(cfg Config) *DB                       { return &DB{dsn: cfg.DSN} }
-func NewRepo(db *DB) *Repo                       { return &Repo{db: db} }
+func NewRepo(db *DB, t *Tracer) *Repo            { return &Repo{db: db, tracer: t} }
 func NewUser(r *http.Request) *User              { return &User{name: r.Header.Get("X-User")} }
 func NewHandler(repo *Repo, user *User) *Handler { return &Handler{repo: repo, user: user} }
 func NewMailer(user *User) *Mailer               { return &Mailer{user: user} }
@@ -986,7 +997,9 @@ func main() {
 	app := di.New()
 	app.Value(Config{DSN: "postgres://localhost/app"})
 	app.Wire[*DB](NewDB)
-	app.Wire[*Repo](NewRepo)
+	// Needs says which parameter is not a plain dependency: nothing provides a
+	// *Tracer, so NewRepo is called with nil and the graph still checks out.
+	app.Wire[*Repo](NewRepo).Needs(di.Optional[*Tracer]())
 	app.Wire[*User](NewUser).Scoped() // one per request scope, where the *http.Request is
 	app.Wire[*Handler](NewHandler).Scoped()
 
@@ -1016,15 +1029,16 @@ func main() {
 </details>
 
 ```
-*main.Handler: scoped in root, not built (provided at main.go:35)
-├╌╌ *main.Repo: singleton in root, not built (provided at main.go:33)
-│   └╌╌ *main.DB: singleton in root, not built (provided at main.go:32)
-│       └╌╌ main.Config: value in root, not built (provided at main.go:31)
-└╌╌ *main.User: scoped in root, not built (provided at main.go:34)
+*main.Handler: scoped in root, not built (provided at main.go:41)
+├╌╌ *main.Repo: singleton in root, not built (provided at main.go:39)
+│   ├╌╌ *main.DB: singleton in root, not built (provided at main.go:36)
+│   │   └╌╌ main.Config: value in root, not built (provided at main.go:35)
+│   └╌╌ *main.Tracer: not provided, optional
+└╌╌ *main.User: scoped in root, not built (provided at main.go:40)
     └╌╌ *net/http.Request: not provided
 
 errors: <nil>
-owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:34)]
+owed:   [*net/http.Request: needed by *main.User (scoped, provided at main.go:40)]
 request scopes: <nil>
 di: *net/http.Request: not provided in scope root (needed by [*main.Mailer *main.User]; *main.User is Scoped, so the singleton *main.Mailer would build it there)
 ```
