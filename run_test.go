@@ -87,6 +87,130 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// StartTimeout bounds the start: a hook that respects its context fails with
+// the deadline and the rollback stops what had started. (fx review)
+func TestRunStartTimeout(t *testing.T) {
+	var log []string
+	s := di.New()
+	s.Value(&DB{}).Eager().
+		OnStop(func(context.Context, *DB) error { log = append(log, "stop db"); return nil })
+	s.Value(&Worker{}).Eager().
+		OnStart(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); return ctx.Err() })
+
+	err := s.Run(t.Context(), di.StartTimeout(20*time.Millisecond))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Join(log, ",") != "stop db" {
+		t.Fatalf("rollback ran %v", log)
+	}
+}
+
+// The phase is checked between steps, so a hook that ignores its context
+// bounds the start too. (fx review)
+func TestRunStartTimeoutEndsBetweenSteps(t *testing.T) {
+	var log []string
+	s := di.New()
+	s.Value(&DB{}).Eager().
+		OnStart(func(context.Context, *DB) error { time.Sleep(40 * time.Millisecond); return nil })
+	s.Value(&Worker{}).Eager().
+		OnStart(func(context.Context, *Worker) error { log = append(log, "start worker"); return nil })
+
+	err := s.Run(t.Context(), di.StartTimeout(10*time.Millisecond))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v", err)
+	}
+	if len(log) != 0 {
+		t.Fatalf("the start went on past its deadline: %v", log)
+	}
+}
+
+// The eager builds are bounded too, between one constructor and the next: a
+// constructor reads Scope.Context, so that is the only place the phase can
+// end one. (fx review)
+func TestRunStartTimeoutEndsBetweenEagerBuilds(t *testing.T) {
+	var built []string
+	s := di.New()
+	s.Provide(func(*di.Scope) *DB {
+		time.Sleep(40 * time.Millisecond)
+		built = append(built, "db")
+		return &DB{}
+	}).Eager()
+	s.Provide(func(*di.Scope) *Worker { built = append(built, "worker"); return &Worker{} }).Eager()
+
+	err := s.Run(t.Context(), di.StartTimeout(10*time.Millisecond))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Join(built, ",") != "db" {
+		t.Fatalf("the eager builds went on past the deadline: %v", built)
+	}
+}
+
+// The deadline is the default, and StartTimeout(0) takes it off. What the
+// hook sees is the whole of it: a constructor reads Scope.Context. (fx review)
+func TestStartTimeoutDefaultAndOff(t *testing.T) {
+	bounded := func(opts ...di.RunOption) bool {
+		var deadline bool
+		s := di.New()
+		s.Value(&DB{}).Eager().OnStart(func(ctx context.Context, _ *DB) error {
+			_, deadline = ctx.Deadline()
+			s.Shutdown(nil)
+			return nil
+		})
+		if err := s.Run(t.Context(), opts...); err != nil {
+			t.Fatal(err)
+		}
+		return deadline
+	}
+	if !bounded() {
+		t.Error("the start phase is unbounded by default")
+	}
+	if bounded(di.StartTimeout(0)) {
+		t.Error("StartTimeout(0) still bounded the start phase")
+	}
+}
+
+// The start deadline bounds the phase, not the application: neither the
+// scope's context nor a worker's carries it. (fx review)
+func TestStartTimeoutDoesNotOutliveTheStart(t *testing.T) {
+	cancelled := make(chan struct{})
+	s := di.New()
+	s.Value(&Worker{}).Eager().Go(func(ctx context.Context, _ *Worker) error {
+		<-ctx.Done() // Stop cancels it; the start deadline must not
+		close(cancelled)
+		return nil
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run(t.Context(), di.StartTimeout(20*time.Millisecond)) }()
+	time.Sleep(60 * time.Millisecond) // well past the deadline
+
+	select {
+	case <-cancelled:
+		t.Fatal("the start deadline cancelled the worker")
+	default:
+	}
+	if _, ok := s.Context().Deadline(); ok {
+		t.Fatal("the scope kept the start phase's deadline")
+	}
+
+	s.Shutdown(nil)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("Stop did not cancel the worker")
+	}
+}
+
 func TestRunReturnsStartError(t *testing.T) {
 	s := di.New()
 	boom := errors.New("boom")

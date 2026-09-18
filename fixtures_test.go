@@ -10,6 +10,7 @@ package di_test
 // 12dba3c; review 2 was checked against 2b8915d and review 3 against 9ace680.
 // (pass 4) is the fourth of the seven narrower passes that preceded those
 // reviews, each checked against the code before the instance-phase refactor.
+// (fx review) is the comparison with uber/fx, checked against 3728d76.
 // An untagged test comes from the first of those passes, or from the
 // generators, which its own comment says. Several fail by hanging rather than
 // by reporting, which is why each bounds its own wait instead of relying on

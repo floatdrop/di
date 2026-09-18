@@ -240,6 +240,12 @@ registration. Eagerness belongs to the *key* — it means the service exists by
 the time `Start` returns, so an `Override()` inherits it. `deriveEager` is the
 single place that decides it, and validates in the same loop.
 
+**One hook per step, rejected at the builder method.** `binding.once` is the
+one exception to `validate`'s rule that rejections wait for freeze: the field
+is written in the setter, so by freeze there is nothing left to compare. It
+names the second call with `callsite(1)` — one more frame count to keep right,
+pinned by `TestSecondHookNamesTheSecondCall`.
+
 **A module is a label on the handle, not a scope.** `Use` calls each `Module`
 through a `Scope` view carrying the function's name; `register` stamps it on the
 binding, and `view`/`Child`/`construct` propagate it. Lookup is unchanged:
@@ -359,6 +365,21 @@ of that predicate, shared by the drain and stop steps.
   child's.
 - `Start`'s rollback goes through `Stop` with `context.WithoutCancel`, so it
   stops child scopes and waits for workers.
+- `start` takes the scope's context and the start phase's *separately*. The
+  first is stored as `startCtx`: it is what `Context()` returns, what
+  constructors read, and what starts anything built after `Start` returned, so
+  it must never carry `StartTimeout`'s deadline. The second bounds only this
+  call's eager builds and start hooks; a worker's context is detached from it in
+  `instance.start`. `expired` fires on a deadline and never on a cancellation,
+  because a cancelled context has to finish the start so the rollback has
+  everything to undo (`TestRegressionRollbackAwaitsWorkerHook`,
+  `TestRunStopsOnContextCancel`). Two things `StartTimeout` therefore does not
+  bound, both documented rather than fixed: a step `startIfRunning` takes
+  inside a start hook, which runs on the scope's context, and `Start`'s own
+  rollback, which detaches its context on purpose. Reaching the first would
+  mean storing the phase context where `runContext` can find it and swapping it
+  back, and a reader that grabbed it just before the swap would fail a hook for
+  a deadline that no longer applies.
 - Whichever `Stop` queues a handoff owns that teardown's context; a later `Stop`
   must not clobber it.
 

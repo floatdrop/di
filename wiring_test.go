@@ -60,6 +60,41 @@ func TestRegressionInvalidCombinations(t *testing.T) {
 	}
 }
 
+// A binding carries one hook of each kind, and a second registration is
+// rejected: it used to assign over the first, so a release the caller asked
+// for was dropped without a word. (fx review)
+func TestSecondHookIsRejected(t *testing.T) {
+	noop := func(context.Context, *DB) error { return nil }
+	for _, tc := range []struct {
+		name string
+		want string
+		set  func(di.Binding[*DB])
+	}{
+		{"OnStart", "a second OnStart hook", func(b di.Binding[*DB]) { b.OnStart(noop) }},
+		{"OnDrain", "a second OnDrain hook", func(b di.Binding[*DB]) { b.OnDrain(noop) }},
+		{"OnStop", "a second OnStop hook", func(b di.Binding[*DB]) { b.OnStop(noop) }},
+		{"Go", "a second Go worker", func(b di.Binding[*DB]) { b.Go(noop) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := di.New().Value(&DB{})
+			tc.set(b)
+			mustPanic(t, tc.want, func() { tc.set(b) })
+		})
+	}
+}
+
+// The rejection names the second call, which is one more frame count to get
+// right; the closure and the at call are one line, so the hook's site is
+// that line. (fx review)
+func TestSecondHookNamesTheSecondCall(t *testing.T) {
+	at := func(fn func()) (int, func()) { _, _, line, _ := runtime.Caller(1); return line, fn }
+	noop := func(context.Context, *DB) error { return nil }
+	b := di.New().Value(&DB{}).OnStop(noop)
+
+	line, second := at(func() { b.OnStop(noop) })
+	mustPanic(t, fmt.Sprintf("wiring_test.go:%d;", line), second)
+}
+
 // Eager services build in registration order, not map order.
 func TestRegressionEagerOrderIsDeterministic(t *testing.T) {
 	for range 50 {

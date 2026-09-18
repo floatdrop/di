@@ -59,15 +59,16 @@
 //
 // # Lifecycle
 //
-// [Binding.OnStart], [Binding.OnDrain] and [Binding.OnStop] are typed hooks.
-// [Scope.Start] builds [Binding.Eager] bindings and runs start hooks in build
-// order, rolling back on failure; services built later start as part of being
-// built. [Scope.Stop] first drains, which lets work already in flight finish
-// while the scope still resolves, then stops child scopes, then services in
-// reverse build order, and afterwards the scope refuses to resolve anything.
-// [Binding.Go] runs a worker, a long-lived function in a goroutine of its
-// own, cancelled on stop. [Scope.Run] ties it together for a main function:
-// start, wait for a signal or [Scope.Shutdown], stop with a deadline.
+// [Binding.OnStart], [Binding.OnDrain] and [Binding.OnStop] are typed hooks,
+// one of each per binding. [Scope.Start] builds [Binding.Eager] bindings and
+// runs start hooks in build order, rolling back on failure; services built
+// later start as part of being built. [Scope.Stop] first drains, which lets
+// work already in flight finish while the scope still resolves, then stops
+// child scopes, then services in reverse build order, and afterwards the scope
+// refuses to resolve anything. [Binding.Go] runs a worker, a long-lived
+// function in a goroutine of its own, cancelled on stop. [Scope.Run] ties it
+// together for a main function: start within [StartTimeout], wait for a signal
+// or [Scope.Shutdown], stop within [StopTimeout].
 // [Scope.Observe] reports every step for logging and metrics.
 //
 // # Inspecting the graph

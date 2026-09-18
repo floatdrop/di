@@ -7,6 +7,44 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+Two lifecycle rules a comparison with `uber/fx` found missing. Both can break
+a caller: a binding that sets one hook twice now panics instead of keeping the
+last one, and a `Run` whose start takes more than 15 seconds now fails and
+rolls back.
+
+### Added
+
+- `StartTimeout` bounds `Run`'s start phase as `StopTimeout` bounds its stop,
+  and is 15 seconds by default: the context the `OnStart` hooks receive
+  expires after it, the start ends between steps once it has, and the rollback
+  runs. `StartTimeout(0)` takes the bound off, leaving the start bounded only
+  by the context passed to `Run`, as it was before.
+  A `Run` whose start legitimately takes longer than 15 seconds, such as one
+  that migrates a database in an `OnStart`, must now say so. An `OnStart` hook
+  that keeps its context for work outliving the start must take
+  `Scope.Context` instead: under `Run` the one it is given is cancelled when
+  the start ends.
+
+  The deadline belongs to the phase and to nothing else. A constructor reads
+  `Scope.Context`, which is still the context `Run` was called with, and a
+  worker's context lasts as long as its service. It is checked between the
+  steps `Start` drives, so it does not reach a service resolved from inside a
+  start hook: that one is built and started there and then, on the scope's
+  context, and a hook waiting on it is as unbounded as before.
+
+### Fixed
+
+- A second `OnStart`, `OnDrain`, `OnStop` or `Go` on one binding is rejected,
+  naming the registration and the site of the second call. It used to assign
+  over the first, so of two `OnStop` hooks only the last ran and nothing said
+  that the other release had been dropped. A binding still carries one hook of
+  each kind: combine them into one function, where the order within is the
+  caller's.
+- `Start` no longer starts anything once its context's deadline has passed.
+  Cancellation is unchanged: a cancelled context still finishes the start, so
+  the rollback has everything to undo, which is how `Run` has always treated a
+  signal during a slow start.
+
 ## [0.16.2] - 2026-09-13
 
 A faster warm path and four lifecycle fixes. `go doc -all` against 0.16.1 is
