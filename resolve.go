@@ -526,7 +526,7 @@ func (in *instance) startIfRunning(owner *state) {
 // Resolve/Start call and becomes an error; at top level it panics. In a
 // goroutine a constructor started, use Resolve instead: that panic has no
 // enclosing call to unwind to.
-func (s *Scope) Get[T any]() T { return as[T](s.get(key{t: reflect.TypeFor[T]()})) }
+func (s *Scope) Get[T any]() T { return as[T](s.get(s.key(reflect.TypeFor[T]()))) }
 
 // Maybe resolves T if it is provided anywhere in the scope chain.
 //
@@ -537,7 +537,7 @@ func (s *Scope) Get[T any]() T { return as[T](s.get(key{t: reflect.TypeFor[T]()}
 // wired too late shows up. A miss outside a constructor records nothing,
 // since no value was built on the answer.
 func (s *Scope) Maybe[T any]() (T, bool) {
-	v, ok := s.maybe(key{t: reflect.TypeFor[T]()})
+	v, ok := s.maybe(s.key(reflect.TypeFor[T]()))
 	return as[T](v), ok
 }
 
@@ -557,7 +557,7 @@ func (s *Scope) maybe(k key) (any, bool) {
 // have the same lifetimes and lifecycle as any other binding.
 func (s *Scope) All[T any]() []T {
 	var out []T // nil for a group with no members, as this has always returned
-	for _, v := range s.all(key{t: reflect.TypeFor[T]()}) {
+	for _, v := range s.all(s.key(reflect.TypeFor[T]())) {
 		out = append(out, as[T](v))
 	}
 	return out
@@ -606,7 +606,7 @@ func (s *Scope) Must[T any](v T, err error) T {
 // panic. It is the entry point for a goroutine a constructor started.
 func (s *Scope) Resolve[T any]() (v T, err error) {
 	defer recoverAbort(&err)
-	return as[T](s.enter().get(key{t: reflect.TypeFor[T]()})), nil
+	return as[T](s.enter().get(s.key(reflect.TypeFor[T]()))), nil
 }
 
 // unwrapAbort turns an abort into a panic carrying the plain error, which is

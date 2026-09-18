@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -103,12 +104,17 @@ type op struct {
 	// sequence reaches a miss recorded against the scopes that answered it.
 	// Another spare bit, for the same reason.
 	asks bool
+	// tag registers the shape through s.Tag[mtag](), under the key tagged
+	// mtag, where Resolve ops never look; on the wired dependency shape it
+	// instead declares the dependency as the tagged instance of the next
+	// key. The last spare bit.
+	tag bool
 }
 
 func (o op) String() string {
 	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Shutdown", "Run"}
 	if o.kind == opRegister {
-		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v, override=%v, wire=%v, asks=%v)", o.scope, keyNames[o.key], o.reg, o.eager, o.override, o.wire, o.asks)
+		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v, override=%v, wire=%v, asks=%v, tag=%v)", o.scope, keyNames[o.key], o.reg, o.eager, o.override, o.wire, o.asks, o.tag)
 	}
 	if o.kind == opStop && o.eager {
 		return fmt.Sprintf("Stop(s%d, impatient)", o.scope)
@@ -128,6 +134,7 @@ func decode(data []byte) []op {
 			override: data[i+4]&2 == 2,
 			wire:     data[i+4]&4 == 4,
 			asks:     data[i+4]&8 == 8,
+			tag:      data[i+4]&16 == 16,
 		})
 	}
 	return ops
@@ -558,7 +565,10 @@ func (m *machine) finish() {
 
 // regShape registers one of the shapes for T, chosen by op.reg, so a random
 // sequence exercises lifetimes, hooks, groups, failures and dependencies.
-func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T, wire, wireScoped, wireNeeds any, needs []di.Need) {
+func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T, wire, wireScoped, wireNeeds any, needs []di.Need, tagged di.Need) {
+	if o.tag && (o.reg != 6 || !o.wire) {
+		s = s.Tag[mtag]() // the wired dependency shape uses the bit for its Needs instead
+	}
 	var b di.Binding[T]
 	// Every modelled shape reports its own build and its own hooks, so the
 	// model knows which instance is which without predicting what serves a
@@ -595,7 +605,11 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 				ctor = wireNeeds
 			}
 			b = s.Wire[T](ctor).OnStart(hook("OnStart")).OnStop(hook("OnStop"))
-			if o.asks {
+			if o.asks && o.tag {
+				// A tag over a parameter already declared optional: the
+				// one Needs rejection a random sequence can reach.
+				b.Needs(append(slices.Clone(needs), tagged)...)
+			} else if o.asks {
 				b.Needs(needs...)
 			}
 		} else {
@@ -663,6 +677,11 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 		// the dependency is declared, so Validate has something to walk.
 		if o.wire {
 			b = s.Wire[T](wire)
+			if o.tag {
+				// The dependency is the next key's tagged instance, which
+				// only a tagged registration of that key provides.
+				b.Needs(tagged)
+			}
 		} else {
 			// The one shape where an optional ask meets a dependency of its
 			// own, so a decline is recorded under a chain rather than a leaf.
@@ -708,6 +727,9 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	}
 }
 
+// mtag is the one tag the machine registers under.
+type mtag struct{}
+
 // askOptional makes the two reads that leave a fact behind on the key after
 // this one: an optional resolution, whose miss is recorded against the scope
 // that answered, and a group read, whose members Explain compares with the
@@ -743,7 +765,8 @@ func (m *machine) register(s *di.Scope, o op) {
 			func(d *mk2) *mk1 { return &mk1{dep: d} },
 			func(sn scopeName, d *mk2) *mk1 { return reported(m, o, sn, &mk1{dep: d}) },
 			func(opt *mk2, group []*mk2) *mk1 { return reportedHere(m, o, &mk1{dep: opt}) },
-			[]di.Need{di.Optional[*mk2](), di.AllOf[*mk2]()})
+			[]di.Need{di.Optional[*mk2](), di.AllOf[*mk2]()},
+			di.Tagged[*mk2, mtag]())
 	case 1:
 		regShape(m, s, o,
 			func() *mk2 { return &mk2{} },
@@ -751,7 +774,8 @@ func (m *machine) register(s *di.Scope, o op) {
 			func(d *mk3) *mk2 { return &mk2{dep: d} },
 			func(sn scopeName, d *mk3) *mk2 { return reported(m, o, sn, &mk2{dep: d}) },
 			func(opt *mk3, group []*mk3) *mk2 { return reportedHere(m, o, &mk2{dep: opt}) },
-			[]di.Need{di.Optional[*mk3](), di.AllOf[*mk3]()})
+			[]di.Need{di.Optional[*mk3](), di.AllOf[*mk3]()},
+			di.Tagged[*mk3, mtag]())
 	case 2:
 		regShape(m, s, o,
 			func() *mk3 { return &mk3{} },
@@ -759,7 +783,8 @@ func (m *machine) register(s *di.Scope, o op) {
 			func(d *mk1) *mk3 { return &mk3{dep: d} },
 			func(sn scopeName, d *mk1) *mk3 { return reported(m, o, sn, &mk3{dep: d}) },
 			func(opt *mk1, group []*mk1) *mk3 { return reportedHere(m, o, &mk3{dep: opt}) },
-			[]di.Need{di.Optional[*mk1](), di.AllOf[*mk1]()})
+			[]di.Need{di.Optional[*mk1](), di.AllOf[*mk1]()},
+			di.Tagged[*mk1, mtag]())
 	default:
 		regShape(m, s, o,
 			func() mkI { return &mk1{} },
@@ -767,7 +792,8 @@ func (m *machine) register(s *di.Scope, o op) {
 			func(*mk2) mkI { return &mk1{} },
 			func(sn scopeName, _ *mk2) mkI { return reported(m, o, sn, mkI(&mk1{})) },
 			func(opt *mk1, group []*mk1) mkI { return reportedHere(m, o, mkI(&mk1{})) },
-			[]di.Need{di.Optional[*mk1](), di.AllOf[*mk1]()})
+			[]di.Need{di.Optional[*mk1](), di.AllOf[*mk1]()},
+			di.Tagged[*mk2, mtag]())
 	}
 }
 
@@ -862,6 +888,13 @@ func FuzzMachine(f *testing.F) {
 	f.Add([]byte{0, 0, 0, 6, 0, 1, 0, 0, 0, 0, 6, 0, 0, 0, 0})                // a dependency on an unprovided key, then stop
 	f.Add([]byte{0, 0, 0, 6, 0, 0, 0, 1, 6, 0, 0, 0, 2, 6, 0, 1, 0, 0, 0, 0}) // a dependency cycle
 	f.Add([]byte{0, 0, 0, 5, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0})                // failing constructor, eager
+	// Tagged: an eager registration under the tag, started and stopped; a
+	// wired dependency on the next key's tagged instance, provided and not.
+	f.Add([]byte{0, 0, 0, 0, 17, 5, 0, 0, 0, 0, 6, 0, 0, 0, 0})
+	f.Add([]byte{0, 0, 1, 0, 16, 0, 0, 0, 6, 20, 2, 0, 0, 0, 0, 5, 0, 0, 0, 0, 6, 0, 0, 0, 0})
+	f.Add([]byte{0, 0, 1, 0, 0, 0, 0, 0, 6, 20, 1, 0, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 1, 20, 0, 0, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 0, 28, 0, 0, 0, 0, 0}) // a tag over an optional parameter, rejected
 	// The wired shapes a random sequence rarely combines: a cycle of three
 	// Wire singletons; a Scoped Wire binding whose dependency the root cannot
 	// provide; a singleton that would build such a binding in its own scope;

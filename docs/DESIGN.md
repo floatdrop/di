@@ -45,7 +45,7 @@ container knows who asked for what.
 ```
 app.Get[*Repo]()
  │
- │ 1  key ← *Repo                    the Go type is the key. no names, no tags
+ │ 1  key ← *Repo                    the Go type is the key, and a tag is a type too
  │ 2  begin a resolution             a root path node, and a recover for the abort
  │ 3  find the registration          this scope, then its parents, one at a time
  │      └─ found in app             (pending registrations commit on the way)
@@ -369,12 +369,14 @@ never left half done.
   draw it; nothing in the build, start or stop machinery reads it.
 - **Declared parameters, at registration.** A `Wire` constructor reports its
   parameter types, so `Validate` can walk the graph before anything is built
-  and `Explain` can draw a service that does not exist yet. Two parameters
-  cannot be read off a type alone — a group and one that may go unprovided —
-  so `Needs` says which they are, matching `di.AllOf[T]()` to a `[]T` and
-  `di.Optional[T]()` to a `T`. They fill exactly as `All` and `Maybe` do; what
-  the marker buys is that the parameter stays in the declared graph, where a
-  closure calling `All` or `Maybe` takes the whole constructor out of it.
+  and `Explain` can draw a service that does not exist yet. Three parameters
+  cannot be read off a type alone — a group, one that may go unprovided, and
+  one of several instances of a type — so `Needs` says which they are,
+  matching `di.AllOf[T]()` to a `[]T` and `di.Optional[T]()` or
+  `di.Tagged[T, N]()` to the one `T`. They fill exactly as
+  `All`, `Maybe` and `Tagged` do; what the marker buys is that the parameter
+  stays in the declared graph, where a closure calling one of those takes the
+  whole constructor out of it.
 - **Events, as things happen.** Observers see a `build`, `start`, `drain` and
   `stop` event per instance, with site, duration and error, and a `shutdown`
   event with its cause.

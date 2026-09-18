@@ -7,6 +7,20 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Added
+
+- `Scope.Tag[N]()` is a view of the scope through which a type `T` names the
+  key `T` tagged with `N`, a second key for the type, so two instances of one
+  type coexist without a defined type for each. Every method that names a
+  key applies the tag: `Provide`, `Value`, `Wire` and `Wrap` register under
+  it, and `Get`, `Resolve`, `Maybe`, `All` and `Explain` read it.
+  `di.Tagged[T, N]()` is the `Need` that gives a `Wire` constructor's plain
+  `T` parameter the tagged instance, matched by type like every other need,
+  and `Provided[T]().Tag[N]()` stubs one for `Validate`. A tagged key prints
+  as `*app.DB tagged app.Primary` in errors, `Explain`, `Modules` and events.
+  An upgrade cannot break a caller: nothing changes for a registration that
+  is not made through a view.
+
 ## [0.17.0] - 2026-09-18
 
 What a comparison with `uber/fx` turned up: a group or optional parameter can

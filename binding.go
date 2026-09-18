@@ -116,12 +116,12 @@ func (s *Scope) register(k key, build func(*Scope) any, init func(*binding)) *bi
 // Provide registers a lazily built singleton. T is inferred from the
 // constructor's return type; dependencies are pulled with s.Get[...]().
 func (s *Scope) Provide[T any](ctor func(*Scope) T) Binding[T] {
-	return Binding[T]{s, s.register(key{t: reflect.TypeFor[T]()}, func(s *Scope) any { return ctor(s) }, nil)}
+	return Binding[T]{s, s.register(s.key(reflect.TypeFor[T]()), func(s *Scope) any { return ctor(s) }, nil)}
 }
 
 // Value registers an already-built instance.
 func (s *Scope) Value[T any](v T) Binding[T] {
-	b := s.register(key{t: reflect.TypeFor[T]()}, func(*Scope) any { return v }, func(b *binding) { b.isValue = true })
+	b := s.register(s.key(reflect.TypeFor[T]()), func(*Scope) any { return v }, func(b *binding) { b.isValue = true })
 	return Binding[T]{s, b}
 }
 
@@ -151,7 +151,7 @@ func (s *Scope) Wire[T any](ctor any) Binding[T] {
 	served := reflect.TypeFor[T]()
 	fv, ft, fails := function("Wire["+typeName(served)+"]", "constructor", ctor, served)
 	wants := params(ft, 0)
-	b := s.register(key{t: served}, func(s *Scope) any {
+	b := s.register(s.key(served), func(s *Scope) any {
 		args := make([]reflect.Value, len(wants))
 		s.arguments(wants, args)
 		return call(fv, args, fails, served)
@@ -183,7 +183,7 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 	if ft.NumIn() == 0 || !served.AssignableTo(ft.In(0)) {
 		panic(fmt.Sprintf("di: %s: wrapper %s must take the %s it wraps as its first parameter", name, ft, typeName(served)))
 	}
-	k := key{t: served}
+	k := s.key(served)
 	// This scope is read pending batch included, without committing it:
 	// committing here would end the batch for every registration so far.
 	// Ancestors are looked up as a resolution would look them up.
@@ -514,7 +514,7 @@ func (b Binding[T]) Override() Binding[T] {
 }
 
 // Need says how one parameter of a Wire constructor is resolved, for
-// Binding.Needs. Make one with Optional or AllOf.
+// Binding.Needs. Make one with Optional, AllOf or Tagged.
 type Need struct {
 	k    key
 	kind wantKind
@@ -527,8 +527,16 @@ func (n Need) String() string {
 		return "the zero Need"
 	case n.kind == wantGroup:
 		return "AllOf[" + n.k.String() + "]"
+	case n.k.tag != nil:
+		return "Tagged[" + typeName(n.k.t) + ", " + typeName(n.k.tag) + "]"
 	}
 	return "Optional[" + n.k.String() + "]"
+}
+
+// Tagged is a Need for the parameter of type T, which takes the instance
+// registered through Scope.Tag under Tag rather than the one under T.
+func Tagged[T any, Tag any]() Need {
+	return Need{k: key{t: reflect.TypeFor[T](), tag: reflect.TypeFor[Tag]()}}
 }
 
 // Optional is a Need for a parameter of type T that may go unprovided: the
@@ -552,11 +560,12 @@ func AllOf[T any]() Need {
 //	s.Wire[*Router](NewRouter).Needs(di.AllOf[Route](), di.Optional[*Tracer]())
 //
 // Each Need is matched to the parameter it describes by type — Optional[T] to
-// a T, AllOf[T] to a []T — so the order of the parameters is the
-// constructor's business and only the type has to agree. A Need matching no
-// parameter is rejected here, as is a second Need for one parameter, and so
-// is Needs on anything but a Wire or Wrap registration: a closure resolves
-// what it needs itself.
+// a T, AllOf[T] to a []T, Tagged[T, Tag] to a T — so the order of the
+// parameters is the constructor's business and only the type has to agree.
+// A Need matching no parameter is rejected here, as is one matching two,
+// which type cannot tell apart, a second Need for one parameter, and Needs
+// on anything but a Wire or Wrap registration: a closure resolves what it
+// needs itself.
 //
 // What this buys over Scope.Maybe and Scope.All is that the dependency stays
 // declared: Scope.Validate checks it, Scope.Explain draws it before anything
@@ -582,7 +591,7 @@ func (b *binding) need(n Need, at string) {
 		panic(fmt.Sprintf("di: %s (provided at %s): Needs at %s %s", b.key, b.where(), at, fmt.Sprintf(why, args...)))
 	}
 	if n.k.t == nil {
-		bad("was given the zero Need; make one with Optional or AllOf")
+		bad("was given the zero Need; make one with Optional, AllOf or Tagged")
 	}
 	param := n.k.t
 	if n.kind == wantGroup {
@@ -601,10 +610,18 @@ func (b *binding) need(n Need, at string) {
 	case matches > 1:
 		bad("(%s) matches %d %s parameters, which type cannot tell apart; a key has one value, so take it once",
 			n, matches, typeName(param))
-	case b.wants[i].kind != wantValue:
-		bad("(%s) would change the %s parameter, already resolved as %s", n, typeName(param), b.wants[i].kind)
+	case b.wants[i].kind != wantValue || b.wants[i].k.tag != nil:
+		bad("(%s) would change the %s parameter, already resolved as %s", n, typeName(param), b.wants[i].how())
 	}
 	b.wants[i] = want{k: n.k, param: param, kind: n.kind}
+}
+
+// how names the Need that set a want, for a message.
+func (w want) how() string {
+	if w.k.tag != nil {
+		return "Tagged"
+	}
+	return w.kind.String()
 }
 
 // String names a kind the way the Need that set it was written.

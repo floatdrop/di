@@ -200,6 +200,16 @@ func TestShort(t *testing.T) {
 			"github.com/acme/app.Cache[github.com/acme/app.Key]", "github.com/acme/app",
 			"app.Cache[github.com/acme/app.Key]",
 		},
+		// A tagged key: both halves when the tag is from the same package,
+		// the tag whole when it is not.
+		{
+			"*github.com/acme/app.DB tagged github.com/acme/app.Primary", "github.com/acme/app",
+			"*app.DB tagged app.Primary",
+		},
+		{
+			"*github.com/acme/app.DB tagged example.com/tags.Primary", "github.com/acme/app",
+			"*app.DB tagged example.com/tags.Primary",
+		},
 		// No package to take off: an unnamed type, a builtin, a shutdown.
 		{"[]github.com/acme/app.DB", "", "[]github.com/acme/app.DB"},
 		{"map[string]app.DB", "", "map[string]app.DB"},

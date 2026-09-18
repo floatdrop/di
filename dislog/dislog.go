@@ -82,6 +82,11 @@ func short(service, pkg string) string {
 	if pkg == "" {
 		return service
 	}
+	// A tagged key names two types; the tag is shortened when it comes from
+	// the same package and reported whole otherwise.
+	if t, tag, ok := strings.Cut(service, " tagged "); ok {
+		return short(t, pkg) + " tagged " + short(tag, pkg)
+	}
 	stars := 0
 	for stars < len(service) && service[stars] == '*' {
 		stars++

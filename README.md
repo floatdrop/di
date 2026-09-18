@@ -114,13 +114,14 @@ the scope is first resolved.
 | `s.Wrap[T](fn)` | A wrapper over what serves `T`: `fn` takes that value first, then its dependencies; see [Wrapping a service](#wrapping-a-service). |
 | `s.Value(v)` | An instance you already have. |
 | `s.Use(mods...)` | What the modules register, attributed to them by name. |
+| `s.Tag[N]()` | A view through which `T` names `T` tagged `N`, a second key for the type, for registering and resolving alike. See [More than one instance of a type](#more-than-one-instance-of-a-type). |
 
 | Method | Effect |
 |---|---|
 | `.Scoped()` | One instance per resolving scope, built and stopped there. |
 | `.Group()` | A member of the group for `T`, read back with `s.All[T]()`. |
 | `.Eager()` | Build during `Start`, in registration order. |
-| `.Needs(...)` | How to fill a `Wire` parameter that is not a plain dependency: `di.AllOf[T]()` for a `[]T` holding the group, `di.Optional[T]()` for one that may go unprovided. |
+| `.Needs(...)` | How to fill a `Wire` parameter that is not a plain dependency: `di.AllOf[T]()` for a `[]T` holding the group, `di.Optional[T]()` for one that may go unprovided, `di.Tagged[T, N]()` for the instance tagged `N`. |
 | `.Override()` | Replace an earlier registration of `T` in this scope; a second one without it is rejected. |
 | `.OnStart(f)`, `.OnStop(f)` | Lifecycle hooks, `f` is `func(context.Context, T) error`. |
 | `.OnDrain(f)` | Runs before anything is stopped, while the scope still resolves. |
@@ -635,19 +636,25 @@ missed by: *app.Router in root
 
 #### More than one instance of a type
 
-A key is a Go type, so two live instances of one type need two types. While
-the set is fixed, a defined type names each one and embedding keeps the
-methods: `type Primary struct{ *DB }`. The surrogate appears in constructor
-signatures and nowhere else; `Wire` resolves it like any parameter, and
-`Validate` and `Explain` see two services.
+A key is a Go type, so two live instances of one type need two keys. While
+the set is fixed, a tag names each one: `s.Tag[Primary]()` is a view of the
+scope through which `*DB` names `*DB` tagged `Primary`, where `Primary` is
+any type, an empty struct will do. Registering through it registers under
+the tagged key, and `Get`, `Resolve`, `Explain` and `Wrap` through it name
+the same key. A `Wire` constructor takes a plain `*DB`, and
+`Needs(di.Tagged[*DB, Primary]())` says which instance fills it, matched by
+type like any other need. A constructor that takes both is the one case a
+type cannot settle, so one of the two takes a defined type, filled from its
+tag by a one-line constructor. `Validate` and `Explain` see two services,
+and an unexported tag keeps the instance private to its package.
 
 <details>
-<summary><code>examples/instances/main.go</code>, a primary and a replica told apart by type</summary>
+<summary><code>examples/instances/main.go</code>, a primary and a replica told apart by tag</summary>
 
 [embedmd]:# (examples/instances/main.go go)
 ```go
-// More than one instance of a type: while the set is fixed, a defined type
-// names each one.
+// More than one instance of a type: while the set is fixed, a tag names each
+// one, and constructors take plain parameters.
 package main
 
 import (
@@ -661,28 +668,44 @@ type DB struct{ dsn string }
 
 func (d *DB) Query() string { return "query " + d.dsn }
 
-// One defined type per instance. Embedding promotes the methods, so only the
-// constructor below mentions the surrogate.
-type Primary struct{ *DB }
-type Replica struct{ *DB }
+// One tag per instance. A tag is a type, so it is checked where it is used
+// and appears in no signature.
+type Primary struct{}
+type Replica struct{}
 
-type Repo struct{ read, write *DB }
+// Most consumers want one of the instances, and say which with Needs.
+type Report struct{ db *DB }
 
-func NewRepo(p Primary, r Replica) *Repo { return &Repo{write: p.DB, read: r.DB} }
+func NewReport(db *DB) *Report { return &Report{db} }
+
+// A consumer of both cannot be told apart by type, so one side takes a
+// defined type, filled from its tag by a one-line constructor.
+type ReadDB struct{ *DB }
+
+type Repo struct{ write, read *DB }
+
+func NewRepo(w *DB, r ReadDB) *Repo { return &Repo{write: w, read: r.DB} }
 
 func main() {
 	app := di.New()
 
-	// Two databases, told apart by type. Each keeps its own hooks.
-	app.Value(Primary{&DB{dsn: "primary"}}).
-		OnStop(func(context.Context, Primary) error { fmt.Println("primary closed"); return nil })
-	app.Value(Replica{&DB{dsn: "replica"}}).
-		OnStop(func(context.Context, Replica) error { fmt.Println("replica closed"); return nil })
-	app.Wire[*Repo](NewRepo)
+	// Two databases, registered through a tag view. Each keeps its own hooks.
+	app.Tag[Primary]().Value(&DB{dsn: "primary"}).
+		OnStop(func(context.Context, *DB) error { fmt.Println("primary closed"); return nil })
+	app.Tag[Replica]().Value(&DB{dsn: "replica"}).
+		OnStop(func(context.Context, *DB) error { fmt.Println("replica closed"); return nil })
+
+	app.Wire[*Report](NewReport).Needs(di.Tagged[*DB, Replica]())
+	app.Wire[ReadDB](func(db *DB) ReadDB { return ReadDB{db} }).Needs(di.Tagged[*DB, Replica]())
+	app.Wire[*Repo](NewRepo).Needs(di.Tagged[*DB, Primary]())
 
 	repo := app.Get[*Repo]()
 	fmt.Println("writes:", repo.write.Query())
 	fmt.Println("reads: ", repo.read.Query())
+	fmt.Println("report:", app.Get[*Report]().db.Query())
+
+	// The same view reads an instance back.
+	fmt.Println("primary:", app.Tag[Primary]().Get[*DB]().Query())
 
 	_ = app.Stop(context.Background())
 }

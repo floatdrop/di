@@ -300,7 +300,29 @@ those two; `arguments` is the only other caller. `Needs` matches a `Need` to a
 parameter **by type** — `Optional[T]` to a `T`, `AllOf[T]` to a `[]T` — so
 parameter order stays the constructor's business, and it rejects a `Need` that
 matches nothing, a parameter described twice, and `Needs` on a binding with no
-`wants` at all. A result merely assignable to `T` is accepted. Every
+`wants` at all. A result merely assignable to `T` is accepted.
+
+**A tag is part of the key, and the view is how a key gets one.** `key` is
+the type plus an optional tag type, and `Scope.tag` is what a `Scope.Tag[N]()`
+view carries; `Scope.key` is the one place a type becomes a key, so every
+registration and resolution method applies the view's tag by going through
+it. Nothing else changes: the instance stays a plain `T`, hooks stay typed on
+`T`, and lookup, freeze, override, groups, `Wrap`, `Validate` and the
+renderers work unchanged because keys compare by struct equality. `view`,
+`Child` and `Use` build a fresh `Scope` without the tag, which is what stops
+a kept view tagging what a constructor or a child resolves.
+`Needs(di.Tagged[T, N]())` rewrites one `want`'s key and is matched by type
+like every other `Need`, so a constructor with two `T` parameters is rejected
+for it as it is for `Optional`: one of them takes a defined type, filled from
+the tag by an adapter constructor. Matching tagged needs in order of
+appearance was tried and dropped, and so was an explicit index, because both
+bind to a position that a reordered or inserted parameter silently changes;
+the type is the only identity reflection can check. Two earlier shapes were
+dropped too: a generic value type, `Tagged[T, N]{V}`, that constructors had
+to take, because a constructor must stay a plain function and a method
+returning `Binding[Tagged[T, N]]` is an instantiation cycle in Go; and a
+`Binding.Tag` handle method with a `Tagged` twin per resolution method,
+because that doubles the surface where one view covers it. Every
 registration method calls `register` directly, because `callsite` skips the two
 frames `register` tells it to — `TestRegistrationSiteNamesTheCaller` guards that
 count.
@@ -466,7 +488,13 @@ through `built`, the dependency shape, and the failing constructor, whose ask
 must reach no report at all. On the *wire* path, where there is no scope to ask
 from, the same bit declares the two reads instead: shape 0 registers
 `wireNeeds`, a constructor taking the next key's optional and group, with the
-matching `Needs`. Three `FuzzMachine` seeds carry what no random sequence in the
+matching `Needs`. The *tag* bit registers the shape through `s.Tag[mtag]()`,
+where no `Resolve` op looks, so a tagged registration is built only when
+eager; on the wired dependency shape it declares the dependency as the next
+key's tagged instance instead, and with *asks* on shape 0 it adds a tag over
+the optional parameter, which is the one `Needs` rejection a random sequence
+can reach.
+Three `FuzzMachine` seeds carry what no random sequence in the
 corpus reached — `optional-miss-then-registered` and
 `group-member-read-too-late`, one per source of Explain's "missed by" line, and
 `needs-a-group-with-members`, since a declared group parameter with anything in

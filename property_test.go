@@ -17,6 +17,8 @@ package di_test
 //	Override with nothing to override. Group members accumulate instead and
 //	never override anything. A wrapper composes over what serves the key,
 //	takes its lifetime, and builds it first; nothing to wrap is rejected.
+//	A registration through a Tag view is a registration of another key, the
+//	type tagged, and the rules apply to that key.
 //
 // The generator starts from a fresh scope each iteration and never touches
 // one again after a rejection, so freeze's error paths are left to the
@@ -52,13 +54,20 @@ type propStep struct {
 	kind     string
 	eager    bool
 	override bool
+	tag      bool // registered through s.Tag[pTag](), under the key tagged pTag
 }
+
+// pTag is the one tag the generator registers under.
+type pTag struct{}
 
 func (st propStep) String() string {
-	return fmt.Sprintf("%s/%s/eager=%v/override=%v", propNames[st.key], st.kind, st.eager, st.override)
+	return fmt.Sprintf("%s/%s/eager=%v/override=%v/tag=%v", propNames[st.key], st.kind, st.eager, st.override, st.tag)
 }
 
-func regKind[T any](s *di.Scope, mk func() T, kind string, eager, override bool) {
+func regKind[T any](s *di.Scope, mk func() T, kind string, eager, override, tag bool) {
+	if tag {
+		s = s.Tag[pTag]()
+	}
 	var b di.Binding[T]
 	switch kind {
 	case "provide":
@@ -85,13 +94,13 @@ func regKind[T any](s *di.Scope, mk func() T, kind string, eager, override bool)
 func applyStep(s *di.Scope, st propStep) {
 	switch st.key {
 	case 0:
-		regKind(s, func() *pk1 { return &pk1{} }, st.kind, st.eager, st.override)
+		regKind(s, func() *pk1 { return &pk1{} }, st.kind, st.eager, st.override, st.tag)
 	case 1:
-		regKind(s, func() *pk2 { return &pk2{} }, st.kind, st.eager, st.override)
+		regKind(s, func() *pk2 { return &pk2{} }, st.kind, st.eager, st.override, st.tag)
 	case 2:
-		regKind(s, func() *pk3 { return &pk3{} }, st.kind, st.eager, st.override)
+		regKind(s, func() *pk3 { return &pk3{} }, st.kind, st.eager, st.override, st.tag)
 	case 3:
-		regKind(s, func() pkI { return &pk1{} }, st.kind, st.eager, st.override)
+		regKind(s, func() pkI { return &pk1{} }, st.kind, st.eager, st.override, st.tag)
 	}
 }
 
@@ -102,6 +111,14 @@ type propWant struct {
 
 // wantEager derives what the container must do with a sequence.
 func wantEager(steps []propStep) propWant {
+	// A tagged registration is one of another key, so it is modelled as the
+	// key four along; propNames is read modulo the plain keys.
+	steps = slices.Clone(steps)
+	for i, st := range steps {
+		if st.tag {
+			steps[i].key += len(propNames)
+		}
+	}
 	winner := map[int]string{} // the registration that serves the key
 	scoped := map[int]bool{}   // whether that registration is per-scope
 	chain := map[int]int{}     // how many registrations build for the key: the winner and what it wraps
@@ -173,7 +190,7 @@ func wantEager(steps []propStep) propWant {
 			n = chain[st.key] // a wrapper builds what it wraps first, under the same key
 		}
 		for range n {
-			want.builds = append(want.builds, propNames[st.key])
+			want.builds = append(want.builds, propNames[st.key%len(propNames)])
 		}
 	}
 	return want
@@ -185,7 +202,8 @@ func runSteps(steps []propStep) (got []string, panicked bool, err error) {
 	s := di.New()
 	s.Observe(func(ev di.Event) {
 		if ev.Kind == di.EventBuild {
-			got = append(got, ev.Service[strings.LastIndex(ev.Service, ".")+1:])
+			name, _, _ := strings.Cut(ev.Service, " tagged ")
+			got = append(got, name[strings.LastIndex(name, ".")+1:])
 		}
 	})
 	defer func() {
@@ -210,6 +228,7 @@ func TestPropertyEagerSet(t *testing.T) {
 				kind:     propKinds[rng.IntN(len(propKinds))],
 				eager:    rng.IntN(2) == 0,
 				override: rng.IntN(3) == 0,
+				tag:      rng.IntN(4) == 0,
 			}
 		}
 		want := wantEager(steps)

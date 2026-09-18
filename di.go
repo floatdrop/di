@@ -40,7 +40,10 @@
 // go unprovided — so a constructor that takes either is still a plain function
 // and its dependencies are still declared. An interface is served by a
 // constructor that returns the implementation, since Wire accepts any result
-// assignable to the key: s.Wire[Reader](NewRepo).
+// assignable to the key: s.Wire[Reader](NewRepo). Two instances of one type
+// are two keys: [Scope.Tag] is a view through which a type names the key
+// tagged with another type, for registering and resolving alike, and
+// [Tagged] says which parameter of a Wire constructor takes it.
 //
 // # Scopes
 //
@@ -115,13 +118,27 @@ import (
 	"time"
 )
 
-// key identifies a service: its Go type. Keys compare by reflect.Type
-// identity, so same-named types in different packages never collide. There
-// is no name alongside the type: a second binding of one type is declared as
-// a distinct type instead, which makes a mistaken reference a compile error.
-type key struct{ t reflect.Type }
+// key identifies a service: its Go type, and the tag Binding.Tag registered
+// it under, if any. Keys compare by reflect.Type identity, so same-named
+// types in different packages never collide. There is no string name: a
+// second binding of one type is declared under a distinct type, or through
+// Scope.Tag under a tag, which is a type too, so a mistaken reference is a
+// compile error.
+type key struct {
+	t   reflect.Type
+	tag reflect.Type // nil for a plain registration
+}
 
-func (k key) String() string { return typeName(k.t) }
+func (k key) String() string { return k.name(typeName) }
+
+// name renders the key with f naming each type, "*app.DB tagged app.Primary"
+// for a tagged one.
+func (k key) name(f func(reflect.Type) string) string {
+	if k.tag == nil {
+		return f(k.t)
+	}
+	return f(k.t) + " tagged " + f(k.tag)
+}
 
 // pkgPath is the import path of the named type k stands for, walking through
 // pointers as typeName does, since a pointer type is unnamed. It is empty for
@@ -183,8 +200,37 @@ type Event struct {
 type Scope struct {
 	st     *state // what this handle is a view over
 	r      *resolver
-	module string // the Module registering through this handle, or ""
+	module string       // the Module registering through this handle, or ""
+	tag    reflect.Type // what a Tag view adds to the keys named through it; nil otherwise
 }
+
+// Tag is a view of the scope through which T names the key T tagged with
+// Tag, a second key for the type, so several instances of one type coexist,
+// each named by a type:
+//
+//	type Primary struct{}
+//	s.Tag[Primary]().Wire[*DB](newPrimary)
+//	s.Tag[Replica]().Wire[*DB](newReplica)
+//	s.Wire[*Report](NewReport).Needs(di.Tagged[*DB, Replica]()) // func NewReport(db *DB) *Report
+//	db := s.Tag[Primary]().Get[*DB]()
+//
+// Every method that names a key applies the tag: the registration methods
+// and Wrap on their way in, Get, Resolve, Maybe, All and Explain on their way
+// out. A Wire constructor takes a plain *DB and says which instance fills it
+// with [Binding.Needs]; a constructor that takes two *DB is not told apart by
+// type, so one of them takes a defined type, filled from the tag by a
+// one-line constructor. The tag is a compile-time name, and an unexported
+// one keeps the instance private to its package.
+//
+// The view is for the calls made through it: Child, Use and the Scope a
+// constructor is handed carry no tag, so a kept view cannot tag what a child
+// or a constructor resolves.
+func (s *Scope) Tag[Tag any]() *Scope {
+	return &Scope{st: s.st, r: s.r, module: s.module, tag: reflect.TypeFor[Tag]()}
+}
+
+// key is the key t names through this handle: tagged through a Tag view.
+func (s *Scope) key(t reflect.Type) key { return key{t: t, tag: s.tag} }
 
 // New creates a root scope: a container with no parent.
 func New() *Scope { return &Scope{st: newState("root", nil)} }

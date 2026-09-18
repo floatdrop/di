@@ -120,6 +120,12 @@ type Stub struct{ k key }
 // scope holds an *http.Request.
 func Provided[T any]() Stub { return Stub{k: key{t: reflect.TypeFor[T]()}} }
 
+// Tag makes the stub name the key tagged with Tag, as Scope.Tag names it.
+func (st Stub) Tag[Tag any]() Stub {
+	st.k.tag = reflect.TypeFor[Tag]()
+	return st
+}
+
 // visit is a node of the declared graph: a binding in the scope it would be
 // built in. The same binding under another holder is another node, since a
 // Scoped binding looks its dependencies up from where it is built.

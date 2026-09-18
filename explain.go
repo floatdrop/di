@@ -34,7 +34,7 @@ import (
 // from this scope would, so a configuration this scope would reject is
 // reported here by the same panic.
 func (s *Scope) Explain[T any]() string {
-	k := key{t: reflect.TypeFor[T]()}
+	k := s.key(reflect.TypeFor[T]())
 	b, owner := s.lookup(k)
 	members := s.groupMembers(k)
 	if b == nil && len(members) == 0 {
@@ -540,15 +540,15 @@ func (s *Scope) Modules() string {
 		for _, b := range st.live() {
 			m := get(moduleLabel(b))
 			if b.inner != nil {
-				add(m, &m.wraps, shortName(b.key.t)+" ← "+moduleLabel(b.inner))
+				add(m, &m.wraps, b.key.name(shortName)+" ← "+moduleLabel(b.inner))
 			} else {
-				add(m, &m.provides, shortName(b.key.t))
+				add(m, &m.provides, b.key.name(shortName))
 			}
 			switch {
 			case b.isValue:
 				continue
 			case b.wants == nil:
-				add(m, &m.unchecked, shortName(b.key.t))
+				add(m, &m.unchecked, b.key.name(shortName))
 				continue
 			}
 			holder := st
@@ -559,7 +559,7 @@ func (s *Scope) Modules() string {
 				if w.kind == wantGroup {
 					// A group is a set, not one registration, and every member
 					// names its own module under "provides".
-					add(m, &m.needs, "all of "+shortName(w.k.t))
+					add(m, &m.needs, "all of "+w.k.name(shortName))
 					continue
 				}
 				dep, _ := (&Scope{st: holder}).lookup(w.k)
@@ -576,7 +576,7 @@ func (s *Scope) Modules() string {
 				default:
 					from = moduleLabel(dep)
 				}
-				add(m, &m.needs, shortName(w.k.t)+" ← "+from)
+				add(m, &m.needs, w.k.name(shortName)+" ← "+from)
 			}
 		}
 	}
