@@ -74,15 +74,15 @@ export const en: Content = {
 		},
 		{
 			id: 'main',
-			title: 'Where it starts: main',
+			title: 'Composing the application',
 			body: (f) => (
 				<>
 					<p>
-						So this is where to start reading. <C>main</C> builds the logger, registers it as
-						a service so any constructor can take one, checks the graph and runs. The
-						application itself is the list of modules it applies: a module is a function a
-						package exports that registers that package's services into a scope. Every step
-						after this one opens one of those modules, in the order <C>Use</C> applies them.
+						<C>main</C> does four things: it builds the logger and registers it as a service,
+						so any constructor can take one; applies the modules; checks the graph; and runs.
+						A module is a function a package exports that registers that package's services
+						into a scope, and the list of them is the application. The steps that follow open
+						one module each, in this order.
 					</p>
 					{f.main}
 					<p>
@@ -107,10 +107,10 @@ export const en: Content = {
 			body: (f) => (
 				<>
 					<p>
-						The first module registers a value you already have, with <C>Value</C>. It is a key
-						like any other: the store's constructor in the next step receives it as a
-						parameter, and a test replaces it with <C>Override()</C> and every service
-						downstream follows.
+						Configuration is a value the application already has, so <C>Value</C> registers it
+						rather than a constructor building it. It is a key like any other: the store's
+						constructor takes it as a parameter, and a test replaces it with{' '}
+						<C>Override()</C> and every service downstream follows.
 					</p>
 					{f.config}
 				</>
@@ -123,9 +123,10 @@ export const en: Content = {
 				<>
 					<p>
 						<C>newDB</C> and <C>newPGStore</C> take what they need as parameters and return
-						what they make; <C>newDB</C> can fail. Neither imports the container. Nothing in
-						this application needs the general form, <C>Provide</C>, which takes a closure
-						over the scope; the two mix freely when something does.
+						what they make; <C>newDB</C> can fail. Neither imports the container. A
+						constructor that needs the scope itself is registered with <C>Provide</C>, which
+						takes a closure instead; nothing in this application does, but the two forms mix
+						freely.
 					</p>
 					<p>
 						<C>Module</C> hands them over with <C>Wire</C>. The type argument is the key the
@@ -155,10 +156,10 @@ export const en: Content = {
 						and its other dependencies after it. The store keeps its registration and its
 						hooks, is built first, and is stopped after the wrapper, and the wrapper forwards
 						what it does not change. The one thing to get right is module order: the cache's
-						module comes after storage's, which is the order <C>main</C> applies them in. A
-						wrapper registered in a child scope applies to that scope and its descendants
-						only. Like storage, this package exports only its <C>Module</C>: a cross-cutting
-						concern composes over an exported contract, never over a package's internals.
+						module comes after storage's. A wrapper registered in a child scope applies to
+						that scope and its descendants only. Like storage, this package exports only its{' '}
+						<C>Module</C>: a cross-cutting concern composes over an exported contract, never
+						over a package's internals.
 					</p>
 					{f.cache}
 				</>
