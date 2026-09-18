@@ -799,16 +799,35 @@ in order and records which made each registration:
 
 ```go
 func Storage(s *di.Scope) {
-    s.Provide(func(*di.Scope) *DB { return open(storageDSN) })
-    s.Wire[*Repo](NewRepo)
+    s.Wire[*DB](NewDB)     // func NewDB(Config) (*DB, error)
+    s.Wire[*Repo](NewRepo) // func NewRepo(*DB) *Repo
 }
 
 func Caching(s *di.Scope) {
-    s.Provide(func(*di.Scope) *DB { return open(cacheDSN) }) // also a *DB
-    s.Wire[*Cache](NewCache)
+    s.Wire[*Cache](NewCache) // func NewCache(*Repo) *Cache
 }
 
 app := di.New()
+app.Value(Config{DSN: dsn})
+app.Use(Storage, Caching)
+
+cache := app.Get[*Cache]() // Config, then *DB, then *Repo, then *Cache
+```
+
+A module may depend on what a later one provides, since nothing is built
+until it is asked for. What the order does decide is the build order of
+`Eager` bindings, the order `All` returns a group in, and what a `Wrap` or
+an `Override()` finds to act on.
+
+The attribution is what makes a mistake legible. Two modules registering one
+key is a mistake rather than last-wins:
+
+```go
+func Caching(s *di.Scope) {
+    s.Wire[*DB](NewCacheDB) // a second *DB
+    s.Wire[*Cache](NewCache)
+}
+
 app.Use(Storage, Caching)
 app.Get[*Repo]()
 // di: *app.DB is provided at app.Storage (storage.go:12) and again at
@@ -834,7 +853,8 @@ func Module(s *di.Scope) {
 ```
 
 `Explain`, `Graph` and `Validate` still see private services. A test
-overrides what is exported.
+overrides what is exported. [`examples/guide`](examples/guide) is an
+application wired this way, one module per package.
 
 #### Wrapping a service
 
