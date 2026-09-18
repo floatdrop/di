@@ -711,3 +711,58 @@ func TestExplainDeclaredEdgesBuildNothing(t *testing.T) {
 		t.Fatalf("Explain ran a Wire constructor %d times", builds.Load())
 	}
 }
+
+// A Needs parameter is part of the declared graph, so Explain draws it
+// before anything is built: a group member by member, and an optional as
+// what it is. (fx review)
+
+type xRoute struct{}
+type xTracer struct{}
+type xRouter struct{}
+
+func newXRouter([]xRoute, *xTracer) *xRouter { return &xRouter{} }
+
+func TestExplainDrawsNeeds(t *testing.T) {
+	s := di.New()
+	s.Wire[xRoute](func() xRoute { return xRoute{} }).Group()
+	s.Wire[xRoute](func(*xD) xRoute { return xRoute{} }).Group()
+	s.Wire[*xD](func() *xD { return &xD{} })
+	s.Wire[*xRouter](newXRouter).Needs(di.AllOf[xRoute](), di.Optional[*xTracer]())
+
+	wantExplain(t, s.Explain[*xRouter](), `*xRouter: singleton in root, not built
+├╌╌ xRoute: singleton group member in root, not built
+├╌╌ xRoute: singleton group member in root, not built
+│   └╌╌ *xD: singleton in root, not built
+└╌╌ *xTracer: not provided, optional
+`)
+}
+
+// Built, the recorded tree shows what it actually resolved, and the group
+// member is a dependency like any other. (fx review)
+func TestExplainNeedsOnceBuilt(t *testing.T) {
+	s := di.New()
+	s.Wire[xRoute](func() xRoute { return xRoute{} }).Group()
+	s.Wire[*xRouter](newXRouter).Needs(di.AllOf[xRoute](), di.Optional[*xTracer]())
+	_ = s.Get[*xRouter]()
+
+	wantExplain(t, s.Explain[*xRouter](), `*xRouter: singleton in root, built
+└── xRoute: singleton group member in root, built
+`)
+}
+
+// A key and the group for that key are different bindings, so a declared
+// AllOf reaches the members and not what the index serves. Getting that wrong
+// put "declared by" on a registration the consumer never resolves, and left
+// the members with none. (fx review)
+func TestExplainDeclaredGroupReachesTheMembers(t *testing.T) {
+	s := di.New()
+	s.Wire[xRoute](func() xRoute { return xRoute{} })         // plain: not a member
+	s.Wire[xRoute](func() xRoute { return xRoute{} }).Group() // the member
+	s.Wire[*xRouter](newXRouter).Needs(di.AllOf[xRoute](), di.Optional[*xTracer]())
+
+	wantExplain(t, s.Explain[xRoute](), `xRoute: singleton in root, not built
+
+xRoute: singleton group member in root, not built
+declared by: *xRouter in root
+`)
+}

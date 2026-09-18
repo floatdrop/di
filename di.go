@@ -34,9 +34,13 @@
 // it. [Binding.Scoped] makes it one instance per resolving scope, built there
 // so it can see that scope's values, which is how request-scoped services are
 // declared once in the root. [Binding.Group] and [Scope.All] handle groups,
-// and [Scope.Maybe] resolves optional dependencies. An interface is served by
-// a constructor that returns the implementation, since Wire accepts any
-// result assignable to the key: s.Wire[Reader](NewRepo).
+// and [Scope.Maybe] resolves an optional dependency from inside a closure.
+// [Binding.Needs] says that a parameter of a Wire constructor is one of those
+// two — [AllOf] for a []T holding the group for T, [Optional] for a T that may
+// go unprovided — so a constructor that takes either is still a plain function
+// and its dependencies are still declared. An interface is served by a
+// constructor that returns the implementation, since Wire accepts any result
+// assignable to the key: s.Wire[Reader](NewRepo).
 //
 // # Scopes
 //

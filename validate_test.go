@@ -324,3 +324,68 @@ func TestValidateTellsScopedInstancesApartByHolder(t *testing.T) {
 		t.Fatal("a real cycle among scoped bindings must still be reported")
 	}
 }
+
+// Needs brings the two parameters a closure used to hide into the declared
+// graph: an optional one is no failure when nothing provides it, and a group
+// parameter is walked member by member. (fx review)
+
+type valRoute struct{}
+type valTracer struct{}
+type valRouter struct {
+	routes []valRoute
+	tracer *valTracer
+}
+
+func newValRouter(rs []valRoute, t *valTracer) *valRouter { return &valRouter{rs, t} }
+
+func TestValidateOptionalIsNoFailure(t *testing.T) {
+	s := di.New()
+	s.Wire[*valRouter](newValRouter).Needs(di.AllOf[valRoute](), di.Optional[*valTracer]())
+	v := s.Validate()
+	if v.Err() != nil {
+		t.Fatalf("an optional nothing provides is not an error: %v", v.Err())
+	}
+	if len(v.Unchecked) != 0 {
+		t.Fatalf("the constructor is declared, so nothing is unchecked: %v", v.Unchecked)
+	}
+}
+
+// A group parameter is checked through its members, so a member that cannot
+// be built is reported even though the group itself is fine. (fx review)
+func TestValidateWalksAGroupParameter(t *testing.T) {
+	s := di.New()
+	s.Wire[valRoute](func(*valDB) valRoute { return valRoute{} }).Group() // *valDB is missing
+	s.Wire[*valRouter](newValRouter).Needs(di.AllOf[valRoute](), di.Optional[*valTracer]())
+
+	v := s.Validate()
+	if len(v.Errors) != 1 || !errors.Is(v.Err(), di.ErrNotProvided) {
+		t.Fatalf("the member's own missing dependency should be reported: %v", v.Errors)
+	}
+	if !strings.Contains(v.Err().Error(), "valDB") {
+		t.Fatalf("the report should name what is missing: %v", v.Err())
+	}
+}
+
+// A cycle through a group parameter is still a cycle. (fx review)
+func TestValidateFindsACycleThroughAGroup(t *testing.T) {
+	s := di.New()
+	s.Wire[valRoute](func(*valRouter) valRoute { return valRoute{} }).Group()
+	s.Wire[*valRouter](newValRouter).Needs(di.AllOf[valRoute](), di.Optional[*valTracer]())
+
+	v := s.Validate()
+	if !errors.Is(v.Err(), di.ErrCycle) {
+		t.Fatalf("want a cycle, got %v", v.Err())
+	}
+}
+
+// An optional that something does provide is walked like any dependency, so
+// what it needs is still checked. (fx review)
+func TestValidateWalksAProvidedOptional(t *testing.T) {
+	s := di.New()
+	s.Wire[*valTracer](func(*valDB) *valTracer { return nil }) // *valDB is missing
+	s.Wire[*valRouter](newValRouter).Needs(di.AllOf[valRoute](), di.Optional[*valTracer]())
+
+	if v := s.Validate(); !errors.Is(v.Err(), di.ErrNotProvided) {
+		t.Fatalf("the optional's own dependency should be checked: %v", v.Err())
+	}
+}

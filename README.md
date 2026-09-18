@@ -172,22 +172,31 @@ Three rules, checked when the scope is next resolved:
 
 #### Optional dependencies
 
-There is no `optional` marker: a dependency nothing provides is an error. A
-service that can do without something provides the absence instead.
+A dependency nothing provides is an error unless the registration says
+otherwise. `Needs` says so, and the constructor stays a function anyone can
+call:
+
+```go
+// func NewReport(s *Store, t *Tracer) *Report
+app.Wire[*Report](NewReport).Needs(di.Optional[*Tracer]())
+```
+
+`*Tracer` is passed if anything provides it and nil if nothing does. The
+marker is on the registration rather than on the parameter, so it is fx's
+`optional:"true"` without a struct tag — and because it is declared,
+`Validate` checks the rest of that constructor, `Explain` draws the
+parameter as `not provided, optional`, and `Modules` lists it.
+
+Two alternatives are often better than optionality at all:
 
 ```go
 app.Value[*Cache](nil)           // a nil default: provided, checked, overridden where there is one
 app.Wire[Metrics](NewNopMetrics) // a null object: nothing downstream has a branch
-app.Provide(func(s *di.Scope) *Report {
-    _, traced := s.Maybe[*Tracer]() // presence, for a key nothing registers at all
-    return NewReport(s.Get[*Store](), traced)
-})
 ```
 
-A nil default makes the key present, so `Maybe` reports it provided, with
-nil in it. Only a closure can ask, so `Validate` lists it as unchecked. A
-pointer parameter is not optional on its own; that is fx's `optional:"true"`
-tag, registered rather than tagged.
+`Scope.Maybe` asks the same question from inside a closure, for a key
+nothing registers at all. It is the escape hatch: a closure declares
+nothing, so `Validate` lists it as unchecked.
 
 Whether a key is provided is a question about the chain as it stands — a
 child scope may answer it differently — so registering it later is never
@@ -588,6 +597,19 @@ mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 `All` builds members not built yet. Members keep their own lifetimes and
 hooks. A plain registration of the same type is neither shadowed by the
 group nor part of it.
+
+A constructor takes the group as a plain slice, and `Needs` says which
+parameter it is:
+
+```go
+// func NewRouter(rs []Route) *Router
+app.Wire[*Router](NewRouter).Needs(di.AllOf[Route]())
+```
+
+That is `All[Route]()` called where the constructor runs, so a `Scoped`
+consumer sees the members its own scope adds, and an empty group is the nil
+slice rather than an error. The dependency stays declared, so `Validate`
+walks every member and `Explain` draws them.
 
 Membership is read when you ask, so a group may grow and adding a member is
 never rejected. A value already built from the group keeps the members it

@@ -164,6 +164,8 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 			next.holder = holder
 		}
 		switch {
+		case dep == nil && e.optional:
+			// Nothing provides it and the constructor said it can do without.
 		case dep == nil && md == lenient && v.stubs[k]:
 			// A stub is honoured on the Scoped path only: a singleton builds
 			// in its own scope, where the resolving scope's values are not.
@@ -226,24 +228,34 @@ func (v *validator) owed(line string) {
 }
 
 // edge is one declared dependency: the key, and the binding it resolves to
-// from the holder with the scope that registered it, or nil.
+// from the holder with the scope that registered it, or nil. optional marks a
+// parameter Needs made optional, whose nil binding is not a failure.
 type edge struct {
-	k     key
-	b     *binding
-	owner *state
+	k        key
+	b        *binding
+	owner    *state
+	optional bool
 }
 
 // declared lists what b declares, in build order: the registration a wrapper
-// composes over, bound rather than looked up, then the parameter types, each
-// looked up from holder as the build would.
+// composes over, bound rather than looked up, then its parameters, each looked
+// up from holder as the build would. A group parameter is one edge per member,
+// since that is what the build resolves; an empty group declares nothing, as
+// an empty group is no failure.
 func declared(b *binding, holder *state) []edge {
 	out := make([]edge, 0, len(b.wants)+1)
 	if b.inner != nil {
-		out = append(out, edge{b.key, b.inner, b.innerAt})
+		out = append(out, edge{k: b.key, b: b.inner, owner: b.innerAt})
 	}
-	for _, k := range b.wants {
-		dep, owner := (&Scope{st: holder}).lookup(k)
-		out = append(out, edge{k, dep, owner})
+	for _, w := range b.wants {
+		if w.kind == wantGroup {
+			for _, m := range (&Scope{st: holder}).groupMembers(w.k) {
+				out = append(out, edge{k: w.k, b: m.b, owner: m.owner})
+			}
+			continue
+		}
+		dep, owner := (&Scope{st: holder}).lookup(w.k)
+		out = append(out, edge{k: w.k, b: dep, owner: owner, optional: w.kind == wantOptional})
 	}
 	return out
 }

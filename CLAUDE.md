@@ -289,9 +289,18 @@ instance's holder mutex. A resolution through a kept `Scope` records nothing, an
 so does a failed one. Only `Explain` and `Graph` read `deps`.
 
 **`Wire` declares what `Provide` reveals.** `Wire[T](ctor any)` reflects over the
-signature once at registration and stores the parameter types as `wants`; the
-build calls `s.get` for each, then `reflect.Call`, so everything below `register`
-is shared with `Provide`. A result merely assignable to `T` is accepted. Every
+signature once at registration and stores the parameters as `wants`; the build
+calls `s.get` for each, then `reflect.Call`, so everything below `register`
+is shared with `Provide`. A `want` carries the dependency key, the parameter's
+own type and a `wantKind`, because two parameters are not plain dependencies:
+`Needs(di.Optional[T]())` fills a `T` through `s.maybe`, and
+`Needs(di.AllOf[T]())` fills a `[]T` through `s.all` (the nil slice when the
+group is empty, as `All` returns). `Maybe`/`All` are the generic wrappers over
+those two; `arguments` is the only other caller. `Needs` matches a `Need` to a
+parameter **by type** — `Optional[T]` to a `T`, `AllOf[T]` to a `[]T` — so
+parameter order stays the constructor's business, and it rejects a `Need` that
+matches nothing, a parameter described twice, and `Needs` on a binding with no
+`wants` at all. A result merely assignable to `T` is accepted. Every
 registration method calls `register` directly, because `callsite` skips the two
 frames `register` tells it to — `TestRegistrationSiteNamesTheCaller` guards that
 count.
@@ -328,7 +337,12 @@ it would order two scopes' commits, which no two state mutexes ever are.
 `validate.go`'s `live` follows `inner` chains so the wrapped registration gets
 its own turn; `declared` puts the inner edge first, bound rather than looked up.
 
-**`Validate` walks `wants`.** Its node is a binding *in the scope it would be
+**`Validate` walks `wants`.** A group parameter is one `edge` per member, since
+that is what the build resolves, so an empty group declares nothing and a
+member's own dependencies and cycles are checked; an optional parameter is one
+edge with `optional` set, which `walk` skips when nothing provides it rather
+than reporting it missing — and walks normally when something does, so what the
+optional needs is still checked. Its node is a binding *in the scope it would be
 built in*, so one `Scoped` binding under two holders is two nodes — the memo
 (`done`) and the cycle path (`step`) are keyed by both (#35). Three modes say
 what a missing dependency means: `strict` for a singleton on its own turn;
@@ -449,10 +463,14 @@ a shape with a scope handle makes the two reads that leave a fact behind on the
 That is the only way a generated sequence records a miss or a group read, which
 the end-of-sequence render then reports. It covers the shapes that report
 through `built`, the dependency shape, and the failing constructor, whose ask
-must reach no report at all; the `Wire` and `Value` shapes have no scope to ask
-from. Two `FuzzMachine` seeds carry what no random sequence in the corpus
-reached, one per source of Explain's "missed by" line:
-`optional-miss-then-registered` and `group-member-read-too-late`. `Validate`
+must reach no report at all. On the *wire* path, where there is no scope to ask
+from, the same bit declares the two reads instead: shape 0 registers
+`wireNeeds`, a constructor taking the next key's optional and group, with the
+matching `Needs`. Three `FuzzMachine` seeds carry what no random sequence in the
+corpus reached — `optional-miss-then-registered` and
+`group-member-read-too-late`, one per source of Explain's "missed by" line, and
+`needs-a-group-with-members`, since a declared group parameter with anything in
+it needs two registrations and a resolution to line up. `Validate`
 runs at the end of every sequence (I8: builds nothing, repeatable); what it
 *says* is pinned by `validate_test.go`.
 

@@ -21,9 +21,9 @@ type binding struct {
 	group    bool
 	scoped   bool
 	eager    bool
-	override bool  // declared to replace an earlier registration of the key
-	isValue  bool  // registered with Value: lifetimes do not apply
-	wants    []key // the parameter types of a Wire constructor; nil for a Provide closure
+	override bool   // declared to replace an earlier registration of the key
+	isValue  bool   // registered with Value: lifetimes do not apply
+	wants    []want // the parameters of a Wire constructor; nil for a Provide closure
 	build    func(*Scope) any
 
 	// inner is the registration a Wrap composes over, bound when Wrap is
@@ -148,13 +148,13 @@ func callsite(skip int) string {
 // result merely assignable to T is accepted, so a concrete constructor may
 // serve an interface key: s.Wire[Repository](NewPGRepo).
 func (s *Scope) Wire[T any](ctor any) Binding[T] {
-	want := reflect.TypeFor[T]()
-	fv, ft, fails := function("Wire["+typeName(want)+"]", "constructor", ctor, want)
+	served := reflect.TypeFor[T]()
+	fv, ft, fails := function("Wire["+typeName(served)+"]", "constructor", ctor, served)
 	wants := params(ft, 0)
-	b := s.register(key{t: want}, func(s *Scope) any {
+	b := s.register(key{t: served}, func(s *Scope) any {
 		args := make([]reflect.Value, len(wants))
 		s.arguments(wants, args)
-		return call(fv, args, fails, want)
+		return call(fv, args, fails, served)
 	}, func(b *binding) { b.wants = wants })
 	return Binding[T]{s, b}
 }
@@ -177,13 +177,13 @@ func (s *Scope) Wire[T any](ctor any) Binding[T] {
 // here, and a group cannot be wrapped. A key this scope has already resolved
 // is rejected at the next resolution, as an Override is.
 func (s *Scope) Wrap[T any](fn any) Binding[T] {
-	want := reflect.TypeFor[T]()
-	name := "Wrap[" + typeName(want) + "]"
-	fv, ft, fails := function(name, "wrapper", fn, want)
-	if ft.NumIn() == 0 || !want.AssignableTo(ft.In(0)) {
-		panic(fmt.Sprintf("di: %s: wrapper %s must take the %s it wraps as its first parameter", name, ft, typeName(want)))
+	served := reflect.TypeFor[T]()
+	name := "Wrap[" + typeName(served) + "]"
+	fv, ft, fails := function(name, "wrapper", fn, served)
+	if ft.NumIn() == 0 || !served.AssignableTo(ft.In(0)) {
+		panic(fmt.Sprintf("di: %s: wrapper %s must take the %s it wraps as its first parameter", name, ft, typeName(served)))
 	}
-	k := key{t: want}
+	k := key{t: served}
 	// This scope is read pending batch included, without committing it:
 	// committing here would end the batch for every registration so far.
 	// Ancestors are looked up as a resolution would look them up.
@@ -202,7 +202,7 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 		args[0] = argument(s.resolve(inner, at), ft.In(0))
 		s.markServed(at, k)
 		s.arguments(wants, args[1:])
-		return call(fv, args, fails, want)
+		return call(fv, args, fails, served)
 	}, func(b *binding) {
 		b.inner, b.innerAt, b.wants, b.scoped = inner, at, wants, inner.scoped
 		inner.addWrapper(b)
@@ -357,11 +357,11 @@ func (g *guard) wrapper() *binding {
 
 var errorType = reflect.TypeFor[error]()
 
-// function checks that fn is a non-variadic function returning want, or want
-// and an error, and returns it with its type and whether it declares the
-// error. name and role label the message: "di: Wire[*app.Server]: constructor
+// function checks that fn is a non-variadic function returning served, or
+// served and an error, and returns it with its type and whether it declares
+// the error. name and role label the message: "di: Wire[*app.Server]: constructor
 // must be a function".
-func function(name, role string, fn any, want reflect.Type) (fv reflect.Value, ft reflect.Type, fails bool) {
+func function(name, role string, fn any, served reflect.Type) (fv reflect.Value, ft reflect.Type, fails bool) {
 	fv = reflect.ValueOf(fn)
 	if !fv.IsValid() || fv.Kind() != reflect.Func {
 		panic(fmt.Sprintf("di: %s: %s must be a function, got %T", name, role, fn))
@@ -372,7 +372,7 @@ func function(name, role string, fn any, want reflect.Type) (fv reflect.Value, f
 		panic(fmt.Sprintf("di: %s: %s %s is variadic", name, role, ft))
 	case ft.NumOut() == 0 || ft.NumOut() > 2:
 		panic(fmt.Sprintf("di: %s: %s %s must return T or (T, error)", name, role, ft))
-	case !ft.Out(0).AssignableTo(want):
+	case !ft.Out(0).AssignableTo(served):
 		panic(fmt.Sprintf("di: %s: %s %s returns %s", name, role, ft, typeName(ft.Out(0))))
 	case ft.NumOut() == 2 && ft.Out(1) != errorType:
 		panic(fmt.Sprintf("di: %s: %s %s must return T or (T, error)", name, role, ft))
@@ -380,20 +380,57 @@ func function(name, role string, fn any, want reflect.Type) (fv reflect.Value, f
 	return fv, ft, ft.NumOut() == 2
 }
 
-// params lists the parameter types of ft from index from on, as keys.
-func params(ft reflect.Type, from int) []key {
-	wants := make([]key, ft.NumIn()-from)
+// want is one parameter of a Wire constructor: the key it resolves, the
+// parameter's own type, and how the parameter is filled. Binding.Needs is the
+// only thing that changes a kind.
+type want struct {
+	k     key          // the dependency; for a group, the member type
+	param reflect.Type // the parameter's type, which for a group is a slice of k.t
+	kind  wantKind
+}
+
+// wantKind says how a parameter is resolved: as Get, as Maybe, or as All.
+type wantKind uint8
+
+const (
+	wantValue wantKind = iota
+	wantOptional
+	wantGroup
+)
+
+// params lists the parameter types of ft from index from on, each resolved by
+// key until Needs says otherwise.
+func params(ft reflect.Type, from int) []want {
+	wants := make([]want, ft.NumIn()-from)
 	for i := range wants {
-		wants[i] = key{t: ft.In(i + from)}
+		t := ft.In(i + from)
+		wants[i] = want{k: key{t: t}, param: t}
 	}
 	return wants
 }
 
 // arguments resolves each of wants from s into the corresponding slot of
-// args.
-func (s *Scope) arguments(wants []key, args []reflect.Value) {
-	for i, k := range wants {
-		args[i] = argument(s.get(k), k.t)
+// args, by the kind Needs left on it.
+func (s *Scope) arguments(wants []want, args []reflect.Value) {
+	for i, w := range wants {
+		switch w.kind {
+		case wantOptional:
+			v, _ := s.maybe(w.k)
+			args[i] = argument(v, w.param)
+		case wantGroup:
+			members := s.all(w.k)
+			if len(members) == 0 {
+				args[i] = reflect.Zero(w.param) // the nil slice All returns
+				continue
+			}
+			slice := reflect.MakeSlice(w.param, len(members), len(members))
+			for j, v := range members {
+				slice.Index(j).Set(argument(v, w.param.Elem()))
+			}
+			args[i] = slice
+		default:
+			args[i] = argument(s.get(w.k), w.param)
+		}
 	}
 }
 
@@ -428,14 +465,14 @@ func argument(v any, t reflect.Type) reflect.Value {
 // registered type, not the result type: registration accepted any assignable
 // result, and a chan int stored for a <-chan int key would pass every check
 // until Get asserted it. An interface key needs no conversion.
-func call(fv reflect.Value, args []reflect.Value, fails bool, want reflect.Type) any {
+func call(fv reflect.Value, args []reflect.Value, fails bool, served reflect.Type) any {
 	out := fv.Call(args)
 	if fails && !out[1].IsNil() {
 		panic(abort{out[1].Interface().(error)})
 	}
 	v := out[0]
-	if v.Type() != want && want.Kind() != reflect.Interface {
-		v = v.Convert(want)
+	if v.Type() != served && served.Kind() != reflect.Interface {
+		v = v.Convert(served)
 	}
 	return v.Interface()
 }
@@ -474,6 +511,111 @@ func (b Binding[T]) Group() Binding[T] {
 // already served a value cannot be overridden at all.
 func (b Binding[T]) Override() Binding[T] {
 	return b.edit(func(b *binding) { b.override = true })
+}
+
+// Need says how one parameter of a Wire constructor is resolved, for
+// Binding.Needs. Make one with Optional or AllOf.
+type Need struct {
+	k    key
+	kind wantKind
+}
+
+// String names the need the way it was written, for a message.
+func (n Need) String() string {
+	switch {
+	case n.k.t == nil:
+		return "the zero Need"
+	case n.kind == wantGroup:
+		return "AllOf[" + n.k.String() + "]"
+	}
+	return "Optional[" + n.k.String() + "]"
+}
+
+// Optional is a Need for a parameter of type T that may go unprovided: the
+// constructor is given T if anything provides it and the zero value if
+// nothing does, as Scope.Maybe resolves it.
+func Optional[T any]() Need {
+	return Need{k: key{t: reflect.TypeFor[T]()}, kind: wantOptional}
+}
+
+// AllOf is a Need for a []T parameter holding the group for T, as Scope.All
+// resolves it: every member across the scope chain, in build order, and
+// nothing at all when the group is empty.
+func AllOf[T any]() Need {
+	return Need{k: key{t: reflect.TypeFor[T]()}, kind: wantGroup}
+}
+
+// Needs says how to fill the parameters that are not plain dependencies, so
+// that a constructor stays a function anyone can call:
+//
+//	// func NewRouter(rs []Route, t *Tracer) *Router
+//	s.Wire[*Router](NewRouter).Needs(di.AllOf[Route](), di.Optional[*Tracer]())
+//
+// Each Need is matched to the parameter it describes by type — Optional[T] to
+// a T, AllOf[T] to a []T — so the order of the parameters is the
+// constructor's business and only the type has to agree. A Need matching no
+// parameter is rejected here, as is a second Need for one parameter, and so
+// is Needs on anything but a Wire or Wrap registration: a closure resolves
+// what it needs itself.
+//
+// What this buys over Scope.Maybe and Scope.All is that the dependency stays
+// declared: Scope.Validate checks it, Scope.Explain draws it before anything
+// is built, and Scope.Modules lists it.
+func (b Binding[T]) Needs(needs ...Need) Binding[T] {
+	at := callsite(1)
+	return b.edit(func(b *binding) {
+		if b.wants == nil {
+			panic(fmt.Sprintf("di: %s (provided at %s): Needs at %s applies to a Wire or Wrap constructor, whose parameters are known; a closure resolves what it needs itself",
+				b.key, b.where(), at))
+		}
+		for _, n := range needs {
+			b.need(n, at)
+		}
+	})
+}
+
+// need applies one Need to the parameter it describes. A Need is matched by
+// type, so it must match exactly one: two parameters of one type cannot be
+// told apart here, and they would get one value anyway.
+func (b *binding) need(n Need, at string) {
+	bad := func(why string, args ...any) {
+		panic(fmt.Sprintf("di: %s (provided at %s): Needs at %s %s", b.key, b.where(), at, fmt.Sprintf(why, args...)))
+	}
+	if n.k.t == nil {
+		bad("was given the zero Need; make one with Optional or AllOf")
+	}
+	param := n.k.t
+	if n.kind == wantGroup {
+		param = reflect.SliceOf(param)
+	}
+	matches := 0
+	for _, w := range b.wants {
+		if w.param == param {
+			matches++
+		}
+	}
+	i := slices.IndexFunc(b.wants, func(w want) bool { return w.param == param })
+	switch {
+	case i < 0:
+		bad("(%s) matches no %s parameter of the constructor", n, typeName(param))
+	case matches > 1:
+		bad("(%s) matches %d %s parameters, which type cannot tell apart; a key has one value, so take it once",
+			n, matches, typeName(param))
+	case b.wants[i].kind != wantValue:
+		bad("(%s) would change the %s parameter, already resolved as %s", n, typeName(param), b.wants[i].kind)
+	}
+	b.wants[i] = want{k: n.k, param: param, kind: n.kind}
+}
+
+// String names a kind the way the Need that set it was written.
+func (k wantKind) String() string {
+	switch k {
+	case wantOptional:
+		return "Optional"
+	case wantGroup:
+		return "AllOf"
+	}
+	return "a dependency"
 }
 
 // Scoped makes the binding one-per-scope: each scope that resolves it gets

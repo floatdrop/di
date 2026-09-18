@@ -221,6 +221,13 @@ func reported[T any](m *machine, o op, sn scopeName, v T) T {
 	return v
 }
 
+// reportedHere is reported for a Wire constructor, which has no scope handle:
+// a singleton is built in the scope that registered it.
+func reportedHere[T any](m *machine, o op, v T) T {
+	m.lc.built(int(o.scope), o.reg, any(v))
+	return v
+}
+
 // outcome classifies what an operation did.
 type outcome struct {
 	value    any
@@ -551,7 +558,7 @@ func (m *machine) finish() {
 
 // regShape registers one of the shapes for T, chosen by op.reg, so a random
 // sequence exercises lifetimes, hooks, groups, failures and dependencies.
-func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T, wire, wireScoped any) {
+func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di.Scope) T, wire, wireScoped, wireNeeds any, needs []di.Need) {
 	var b di.Binding[T]
 	// Every modelled shape reports its own build and its own hooks, so the
 	// model knows which instance is which without predicting what serves a
@@ -580,9 +587,17 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	case 0:
 		if o.wire {
 			// A Wire constructor has no scope handle; a singleton is built in
-			// the scope that registered it.
-			b = s.Wire[T](func() T { return builtIn(int(o.scope), plain()) }).
-				OnStart(hook("OnStart")).OnStop(hook("OnStop"))
+			// the scope that registered it. With asks it declares the two
+			// reads with Needs rather than making them from a scope it has
+			// not got, which is the only way the wire path reaches them.
+			ctor := any(func() T { return builtIn(int(o.scope), plain()) })
+			if o.asks {
+				ctor = wireNeeds
+			}
+			b = s.Wire[T](ctor).OnStart(hook("OnStart")).OnStop(hook("OnStop"))
+			if o.asks {
+				b.Needs(needs...)
+			}
 		} else {
 			b = s.Provide(func(sc *di.Scope) T { return built(sc, plain()) }).
 				OnStart(hook("OnStart")).OnStop(hook("OnStop"))
@@ -716,31 +731,43 @@ func askOptional(sc *di.Scope, key uint8) {
 }
 
 func (m *machine) register(s *di.Scope, o op) {
+	// The declared pair, for op.asks on the wire path: a constructor whose
+	// parameters are the optional and the group for the next key, and the
+	// Needs that say so. Both parameters name one key and two types, which is
+	// how Needs matches them.
 	switch o.key {
 	case 0:
 		regShape(m, s, o,
 			func() *mk1 { return &mk1{} },
 			func(sc *di.Scope) *mk1 { return &mk1{dep: sc.Get[*mk2]()} },
 			func(d *mk2) *mk1 { return &mk1{dep: d} },
-			func(sn scopeName, d *mk2) *mk1 { return reported(m, o, sn, &mk1{dep: d}) })
+			func(sn scopeName, d *mk2) *mk1 { return reported(m, o, sn, &mk1{dep: d}) },
+			func(opt *mk2, group []*mk2) *mk1 { return reportedHere(m, o, &mk1{dep: opt}) },
+			[]di.Need{di.Optional[*mk2](), di.AllOf[*mk2]()})
 	case 1:
 		regShape(m, s, o,
 			func() *mk2 { return &mk2{} },
 			func(sc *di.Scope) *mk2 { return &mk2{dep: sc.Get[*mk3]()} },
 			func(d *mk3) *mk2 { return &mk2{dep: d} },
-			func(sn scopeName, d *mk3) *mk2 { return reported(m, o, sn, &mk2{dep: d}) })
+			func(sn scopeName, d *mk3) *mk2 { return reported(m, o, sn, &mk2{dep: d}) },
+			func(opt *mk3, group []*mk3) *mk2 { return reportedHere(m, o, &mk2{dep: opt}) },
+			[]di.Need{di.Optional[*mk3](), di.AllOf[*mk3]()})
 	case 2:
 		regShape(m, s, o,
 			func() *mk3 { return &mk3{} },
 			func(sc *di.Scope) *mk3 { return &mk3{dep: sc.Get[*mk1]()} },
 			func(d *mk1) *mk3 { return &mk3{dep: d} },
-			func(sn scopeName, d *mk1) *mk3 { return reported(m, o, sn, &mk3{dep: d}) })
+			func(sn scopeName, d *mk1) *mk3 { return reported(m, o, sn, &mk3{dep: d}) },
+			func(opt *mk1, group []*mk1) *mk3 { return reportedHere(m, o, &mk3{dep: opt}) },
+			[]di.Need{di.Optional[*mk1](), di.AllOf[*mk1]()})
 	default:
 		regShape(m, s, o,
 			func() mkI { return &mk1{} },
 			func(sc *di.Scope) mkI { _ = sc.Get[*mk2](); return &mk1{} },
 			func(*mk2) mkI { return &mk1{} },
-			func(sn scopeName, _ *mk2) mkI { return reported(m, o, sn, mkI(&mk1{})) })
+			func(sn scopeName, _ *mk2) mkI { return reported(m, o, sn, mkI(&mk1{})) },
+			func(opt *mk1, group []*mk1) mkI { return reportedHere(m, o, mkI(&mk1{})) },
+			[]di.Need{di.Optional[*mk1](), di.AllOf[*mk1]()})
 	}
 }
 

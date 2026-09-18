@@ -369,7 +369,12 @@ never left half done.
   draw it; nothing in the build, start or stop machinery reads it.
 - **Declared parameters, at registration.** A `Wire` constructor reports its
   parameter types, so `Validate` can walk the graph before anything is built
-  and `Explain` can draw a service that does not exist yet.
+  and `Explain` can draw a service that does not exist yet. Two parameters
+  cannot be read off a type alone — a group and one that may go unprovided —
+  so `Needs` says which they are, matching `di.AllOf[T]()` to a `[]T` and
+  `di.Optional[T]()` to a `T`. They fill exactly as `All` and `Maybe` do; what
+  the marker buys is that the parameter stays in the declared graph, where a
+  closure calling `All` or `Maybe` takes the whole constructor out of it.
 - **Events, as things happen.** Observers see a `build`, `start`, `drain` and
   `stop` event per instance, with site, duration and error, and a `shutdown`
   event with its cause.
@@ -377,6 +382,12 @@ never left half done.
   with its module. Error messages name it when two modules collide, and
   `Modules` groups by it. It is derived from the declarations above, so there
   is no manifest to keep in step.
+
+A declared group parameter is one edge per member, since that is what the build
+resolves: an empty group declares nothing, because an empty group is no
+failure, and each member's own dependencies and cycles are checked. A declared
+optional is one edge that may be unmet — walked like any other when something
+provides it, so what *it* needs is still checked.
 
 `Validate` follows the holder rule. A singleton is checked against the scope
 that registered it. A `Scoped` registration is checked as the calling scope

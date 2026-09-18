@@ -21,7 +21,11 @@ func TestWireRecordsDependencies(t *testing.T) {
 	none := s.Wire[*wiDB](func() *wiDB { return &wiDB{} }).b
 	closure := s.Provide(func(*Scope) *wiCfg { return &wiCfg{} }).b
 
-	want := []key{{t: reflect.TypeFor[wiCfg]()}, {t: reflect.TypeFor[*wiDB]()}}
+	cfg, db := reflect.TypeFor[wiCfg](), reflect.TypeFor[*wiDB]()
+	want := []want{
+		{k: key{t: cfg}, param: cfg, kind: wantValue},
+		{k: key{t: db}, param: db, kind: wantValue},
+	}
 	if !reflect.DeepEqual(wired.wants, want) {
 		t.Errorf("wants %v, want %v", wired.wants, want)
 	}
