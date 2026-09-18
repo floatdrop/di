@@ -16,14 +16,14 @@ func TestStoppedChildIsDetached(t *testing.T) {
 		c := root.Child("request")
 		c.Value(&DB{}).OnStop(func(context.Context, *DB) error { stops++; return nil })
 		c.Get[*DB]()
-		if err := c.Stop(context.Background()); err != nil {
+		if err := c.Stop(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if stops != 100 {
 		t.Fatalf("child stops = %d", stops)
 	}
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if stops != 100 {
@@ -41,7 +41,7 @@ func TestLateBuiltServiceStarts(t *testing.T) {
 		OnStart(func(context.Context, *Repo) error { log = append(log, "start repo"); return nil }).
 		OnStop(func(context.Context, *Repo) error { log = append(log, "stop repo"); return nil })
 
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(log) != 0 {
@@ -49,7 +49,7 @@ func TestLateBuiltServiceStarts(t *testing.T) {
 	}
 	s.Get[*Repo]() // built after Start: dependencies start before dependents
 	s.Get[*Repo]() // cached: hooks must not run again
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	want := "start db,start repo,stop repo,stop db"
@@ -65,7 +65,7 @@ func TestLateStartFailureIsAnError(t *testing.T) {
 	s.Provide(func(*di.Scope) *DB { return &DB{} }).
 		OnStart(func(context.Context, *DB) error { return boom }).
 		OnStop(func(context.Context, *DB) error { stopped = true; return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Resolve[*DB](); !errors.Is(err, boom) {
@@ -74,7 +74,7 @@ func TestLateStartFailureIsAnError(t *testing.T) {
 	if _, err := s.Resolve[*DB](); !errors.Is(err, boom) {
 		t.Fatalf("failure must stick: %v", err)
 	}
-	if err := s.Stop(context.Background()); err != nil || stopped {
+	if err := s.Stop(t.Context()); err != nil || stopped {
 		t.Fatalf("a service that failed to start must not be stopped (stopped=%v err=%v)", stopped, err)
 	}
 }
@@ -82,7 +82,7 @@ func TestLateStartFailureIsAnError(t *testing.T) {
 func TestChildOfRunningAppStartsLateServices(t *testing.T) {
 	started := false
 	root := di.New()
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	req := root.Child("request")
@@ -96,10 +96,10 @@ func TestChildOfRunningAppStartsLateServices(t *testing.T) {
 
 func TestStartTwice(t *testing.T) {
 	s := di.New()
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Start(context.Background()); err == nil {
+	if err := s.Start(t.Context()); err == nil {
 		t.Fatal("second Start must fail")
 	}
 }
@@ -141,7 +141,7 @@ func TestContextInConstructor(t *testing.T) {
 	}
 	var seen any
 	s.Provide(func(s *di.Scope) *DB { seen = s.Context().Value(ctxKey{}); return &DB{} }).Eager()
-	ctx := context.WithValue(context.Background(), ctxKey{}, "from-start")
+	ctx := context.WithValue(t.Context(), ctxKey{}, "from-start")
 	if err := s.Start(ctx); err != nil {
 		t.Fatal(err)
 	}

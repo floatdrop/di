@@ -320,6 +320,13 @@ of that predicate, shared by the drain and stop steps.
 
 ## Testing strategy
 
+Tests take their context from `t.Context()`. Two exceptions, both deliberate:
+`Test`'s `tb.Cleanup` in `di.go` uses `context.Background()`, because
+`t.Context()` is cancelled *before* cleanups run and a dead context turns every
+test teardown into the impatient path that defers releases; and
+`lifecycle_test.go` compares `s.Context()` against `context.Background()` by
+identity, which is the documented pre-`Start` default.
+
 Five layers, each catching a different class.
 
 **Regression files** — one test per historical defect, grouped by the part of the

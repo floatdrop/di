@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"context"
 	"testing"
 
 	"github.com/floatdrop/di"
@@ -15,7 +14,7 @@ func TestSecondLookupIsAHit(t *testing.T) {
 	s := di.Test(t, config.Module, storage.Module, Module)
 	store := s.Get[storage.Store]()
 	for range 2 {
-		if _, err := store.Find(context.Background(), "42"); err != nil {
+		if _, err := store.Find(t.Context(), "42"); err != nil {
 			t.Fatal(err)
 		}
 	}

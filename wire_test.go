@@ -125,7 +125,7 @@ func TestWireHooksCompose(t *testing.T) {
 		started = v.repo != nil
 		return nil
 	})
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !started {

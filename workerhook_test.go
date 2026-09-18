@@ -25,11 +25,11 @@ func TestWorkerHookLifecycle(t *testing.T) {
 		}).
 		OnStop(func(context.Context, *Worker) error { log = append(log, "stop"); return nil })
 
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -48,7 +48,7 @@ func TestWorkerHookFailureStopsApplication(t *testing.T) {
 	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).Eager().
 		Go(func(ctx context.Context, w *Worker) error { return boom })
 	done := make(chan error, 1)
-	go func() { done <- s.Run(context.Background()) }()
+	go func() { done <- s.Run(t.Context()) }()
 	select {
 	case err := <-done:
 		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "di_test.Worker") {
@@ -63,10 +63,10 @@ func TestWorkerHookErrorAfterCancelIsReportedByStop(t *testing.T) {
 	flushFailed := errors.New("flush failed")
 	s := di.New()
 	s.Value(&Worker{}).Eager().Go(func(ctx context.Context, w *Worker) error { <-ctx.Done(); return flushFailed })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Stop(context.Background()); !errors.Is(err, flushFailed) {
+	if err := s.Stop(t.Context()); !errors.Is(err, flushFailed) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -77,10 +77,10 @@ func TestWorkerHookIgnoringCancelHitsStopTimeout(t *testing.T) {
 		time.Sleep(2 * time.Second)
 		return nil
 	})
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	err := s.Stop(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not return") {
@@ -93,7 +93,7 @@ func TestWorkerHookStartsForLateBuiltService(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *Worker { return &Worker{} }).
 		Go(func(ctx context.Context, w *Worker) error { close(running); <-ctx.Done(); return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	s.Get[*Worker]()
@@ -102,7 +102,7 @@ func TestWorkerHookStartsForLateBuiltService(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Go hook not started for a service built after Start")
 	}
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -125,12 +125,12 @@ func TestWorkerHookFailureDecidedBeforeCancelReachesRun(t *testing.T) {
 		})
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- root.Run(context.Background(), di.StopTimeout(time.Second)) }()
-	if err := child.Start(context.Background()); err != nil {
+	go func() { runDone <- root.Run(t.Context(), di.StopTimeout(time.Second)) }()
+	if err := child.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	<-failed
-	_ = child.Stop(context.Background()) // detaches, and discards what it reports
+	_ = child.Stop(t.Context()) // detaches, and discards what it reports
 
 	select {
 	case err := <-runDone:
@@ -148,10 +148,10 @@ func TestWorkerHookCancellationIsNotAFailure(t *testing.T) {
 	root := di.New()
 	root.Value(&Worker{}).Eager().
 		Go(func(ctx context.Context, _ *Worker) error { <-ctx.Done(); return ctx.Err() })
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := root.Stop(context.Background()); err != nil {
+	if err := root.Stop(t.Context()); err != nil {
 		t.Fatalf("a cancelled worker was reported as a failure: %v", err)
 	}
 }

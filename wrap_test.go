@@ -65,7 +65,7 @@ func TestWrapKeepsTheWrappedLifecycle(t *testing.T) {
 	s := di.New()
 	s.Wire[wStore](newWPG).OnStart(note("start pg")).OnStop(note("stop pg"))
 	s.Wrap[wStore](newWTracing).Eager().OnStart(note("start tracing")).OnStop(note("stop tracing"))
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := s.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestWrapInAStoppedChildNoLongerPinsTheParent(t *testing.T) {
 	root.Wire[wStore](newWPG)
 	child := root.Child("request")
 	child.Wrap[wStore](newWTracing)
-	if err := child.Stop(context.Background()); err != nil {
+	if err := child.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	root.Wire[wStore](func() wStore { return &wPG{} }).Override()
@@ -307,7 +307,7 @@ func TestWrapInALiveSiblingStillPinsTheParent(t *testing.T) {
 	a.Wrap[wStore](newWTracing)
 	b := root.Child("b")
 	b.Wrap[wStore](newWTracing)
-	if err := b.Stop(context.Background()); err != nil {
+	if err := b.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	root.Wire[wStore](func() wStore { return &wPG{} }).Override()
@@ -324,7 +324,7 @@ func TestWrapRacingStopLeavesNoMark(t *testing.T) {
 		child := root.Child("child")
 		var wg sync.WaitGroup
 		wg.Go(func() { child.Wrap[wStore](newWTracing) })
-		wg.Go(func() { _ = child.Stop(context.Background()) })
+		wg.Go(func() { _ = child.Stop(t.Context()) })
 		wg.Wait()
 		root.Wire[wStore](func() wStore { return &wPG{} }).Override()
 		func() {
@@ -379,7 +379,7 @@ func TestOverriddenChainStillPinnedByADescendant(t *testing.T) {
 	root.Wire[wStore](func() wStore { return &wPG{} }).Override()
 	rejected(t, "it is wrapped at", func() { _, _ = root.Resolve[wStore]() })
 
-	if err := leaf.Stop(context.Background()); err != nil {
+	if err := leaf.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := root.Get[wStore]().Kind(); got != "pg" {

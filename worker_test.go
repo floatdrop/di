@@ -21,11 +21,11 @@ func TestRegressionWorkerHookErrorReachesStop(t *testing.T) {
 	boom := errors.New("queue disconnected")
 	s := di.New()
 	s.Value(&Worker{}).Eager().Go(func(context.Context, *Worker) error { return boom })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
-	if err := s.Stop(context.Background()); !errors.Is(err, boom) {
+	if err := s.Stop(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("Stop must report the dead worker, got %v", err)
 	}
 }
@@ -38,7 +38,7 @@ func TestRegressionRunErrorWrappingCanceled(t *testing.T) {
 	s.Value(&Worker{}).Eager().
 		Go(func(ctx context.Context, _ *Worker) error { return fmt.Errorf("upstream dial: %w", context.Canceled) })
 	done := make(chan error, 1)
-	go func() { done <- s.Run(context.Background()) }()
+	go func() { done <- s.Run(t.Context()) }()
 	select {
 	case err := <-done:
 		if err == nil || !strings.Contains(err.Error(), "upstream dial") {
@@ -60,12 +60,12 @@ func TestReviewDetachedChildWorkerFailureReachesRun(t *testing.T) {
 		Go(func(context.Context, *Worker) error { defer close(failed); return errors.New("worker died") })
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- root.Run(context.Background(), di.StopTimeout(time.Second)) }()
-	if err := child.Start(context.Background()); err != nil {
+	go func() { runDone <- root.Run(t.Context(), di.StopTimeout(time.Second)) }()
+	if err := child.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	<-failed
-	_ = child.Stop(context.Background()) // detaches before the root gets there
+	_ = child.Stop(t.Context()) // detaches before the root gets there
 
 	select {
 	case err := <-runDone:
@@ -85,7 +85,7 @@ func TestReviewWorkerFailureIsNotDuplicated(t *testing.T) {
 	boom := errors.New("queue disconnected")
 	s := di.New()
 	s.Value(&Worker{}).Eager().Go(func(context.Context, *Worker) error { return boom })
-	err := s.Run(context.Background())
+	err := s.Run(t.Context())
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
@@ -116,12 +116,12 @@ func TestReview2OnStopWaitsForALiveWorkerHook(t *testing.T) {
 			close(stopped)
 			return nil
 		})
-	if err := root.Start(context.Background()); err != nil {
+	if err := root.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	<-runLive
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	err := root.Stop(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not return") {
@@ -169,7 +169,7 @@ func TestReview3RunReportsAShutdownPublishedDuringStop(t *testing.T) {
 			return nil
 		})
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
 	if err := root.Run(ctx, di.StopTimeout(5*time.Second)); !errors.Is(err, fail) {
 		t.Errorf("Run: want the published worker failure, got %v", err)
@@ -193,7 +193,7 @@ func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
 	if _, err := child.Resolve[*Worker](); err != nil {
 		t.Fatal(err)
 	}
-	if err := child.Start(context.Background()); err != nil {
+	if err := child.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	// The hook handles the child's error itself, so the failure reaches Run
@@ -203,7 +203,7 @@ func TestReview4RunReportsACausePublishedDuringRollback(t *testing.T) {
 	root.Value(&Repo{}).Eager().
 		OnStart(func(context.Context, *Repo) error { return boom })
 
-	err := root.Run(context.Background(), di.StopTimeout(5*time.Second))
+	err := root.Run(t.Context(), di.StopTimeout(5*time.Second))
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run: want the start failure, got %v", err)
 	}
@@ -222,10 +222,10 @@ func TestWorkerFailureJoinedWithCancellationIsReported(t *testing.T) {
 		<-ctx.Done()
 		return errors.Join(ctx.Err(), failure)
 	})
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := s.Stop(ctx); !errors.Is(err, failure) {
 		t.Fatalf("Stop dropped the worker's own failure: %v", err)
@@ -237,7 +237,7 @@ func TestWorkerFailureJoinedWithCancellationIsReported(t *testing.T) {
 		<-ctx.Done()
 		return fmt.Errorf("loop: %w", ctx.Err())
 	})
-	if err := quiet.Start(context.Background()); err != nil {
+	if err := quiet.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if err := quiet.Stop(ctx); err != nil {
@@ -261,7 +261,7 @@ func TestPanickingWorkerIsAFailure(t *testing.T) {
 		Go(func(context.Context, *Worker) error { panic("consumer exploded") }).
 		OnStop(func(context.Context, *Worker) error { stops.Add(1); return nil })
 	done := make(chan error, 1)
-	go func() { done <- s.Run(context.Background()) }()
+	go func() { done <- s.Run(t.Context()) }()
 	var err error
 	select {
 	case err = <-done:

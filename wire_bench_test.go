@@ -1,7 +1,6 @@
 package di_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/floatdrop/di"
@@ -78,7 +77,7 @@ func BenchmarkWireScopedBuild(b *testing.B) {
 			st.graph(s)
 			st.handler(s)
 			_ = s.Get[*bSvc]()
-			ctx := context.Background()
+			ctx := b.Context()
 			b.ReportAllocs()
 			for b.Loop() {
 				c := s.Child("req")
@@ -95,7 +94,7 @@ func BenchmarkWireScopedBaseline(b *testing.B) {
 	s := di.New()
 	benchStyles[0].graph(s)
 	_ = s.Get[*bSvc]()
-	ctx := context.Background()
+	ctx := b.Context()
 	b.ReportAllocs()
 	for b.Loop() {
 		c := s.Child("req")

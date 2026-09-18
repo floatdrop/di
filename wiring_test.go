@@ -24,7 +24,7 @@ func TestRegressionEagerGroupMember(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) Handler { builds.Add(1); return Handler{} }).Group().Eager().
 		OnStart(func(context.Context, Handler) error { starts.Add(1); return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if builds.Load() != 1 || starts.Load() != 1 {
@@ -55,7 +55,7 @@ func TestRegressionInvalidCombinations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := di.New()
 			tc.wire(s)
-			mustPanic(t, tc.want, func() { _ = s.Start(context.Background()) })
+			mustPanic(t, tc.want, func() { _ = s.Start(t.Context()) })
 		})
 	}
 }
@@ -69,7 +69,7 @@ func TestRegressionEagerOrderIsDeterministic(t *testing.T) {
 		s.Provide(func(*di.Scope) *rB { log = append(log, "B"); return &rB{} }).Eager()
 		s.Provide(func(*di.Scope) *rC { log = append(log, "C"); return &rC{} }).Eager()
 		s.Provide(func(*di.Scope) *rD { log = append(log, "D"); return &rD{} }).Eager()
-		if err := s.Start(context.Background()); err != nil {
+		if err := s.Start(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.Join(log, ""); got != "ABCD" {
@@ -104,7 +104,7 @@ func TestRegressionShadowedEagerNotBuilt(t *testing.T) {
 		OnStart(func(context.Context, *DB) error { log = append(log, "startReal"); return nil })
 	s.Provide(func(*di.Scope) *DB { log = append(log, "fake"); return &DB{dsn: "fake"} }).Eager().Override().
 		OnStart(func(context.Context, *DB) error { log = append(log, "startFake"); return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(log, ","); got != "fake,startFake" {
@@ -125,7 +125,7 @@ func TestRegressionOverrideKeepsKeyEager(t *testing.T) {
 		OnStart(func(context.Context, *DB) error { log = append(log, "startReal"); return nil })
 	s.Value(&DB{dsn: "fake"}).Override().
 		OnStart(func(context.Context, *DB) error { log = append(log, "startFake"); return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(log, ","); got != "startFake" {
@@ -151,7 +151,7 @@ func TestRegressionEagerCannotTransferToPerScopeLifetime(t *testing.T) {
 			s := di.New()
 			s.Provide(func(*di.Scope) *DB { return &DB{dsn: "real"} }).Eager()
 			tc.apply(s.Provide(func(*di.Scope) *DB { built = true; return &DB{dsn: "fake"} }).Override())
-			mustPanic(t, "eagerness cannot transfer", func() { _ = s.Start(context.Background()) })
+			mustPanic(t, "eagerness cannot transfer", func() { _ = s.Start(t.Context()) })
 			if built {
 				t.Fatalf("a %s binding was built at Start", tc.name)
 			}
@@ -175,7 +175,7 @@ func TestRegressionRejectionIsRepeatable(t *testing.T) {
 					t.Fatalf("attempt %d: Start was accepted, the invalid config was dropped", attempt)
 				}
 			}()
-			_ = s.Start(context.Background())
+			_ = s.Start(t.Context())
 		}()
 	}
 }
@@ -309,7 +309,7 @@ func TestReviewNilInterfaceReachesHooks(t *testing.T) {
 		return nil
 	})
 	_ = s.Get[error]()
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !ran {

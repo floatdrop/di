@@ -20,7 +20,7 @@ func TestGroupMembersHaveLifecycle(t *testing.T) {
 	s.Provide(func(*di.Scope) Handler { builds.Add(1); return Handler{"orders"} }).Group().
 		OnStop(func(context.Context, Handler) error { log = append(log, "stop orders"); return nil })
 
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	s.All[Handler]()
@@ -28,7 +28,7 @@ func TestGroupMembersHaveLifecycle(t *testing.T) {
 	if builds.Load() != 2 {
 		t.Fatalf("group members rebuilt: %d builds", builds.Load())
 	}
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(log, ","); got != "start users,stop orders,stop users" {
@@ -52,7 +52,7 @@ func TestGetAfterStopFails(t *testing.T) {
 	s.Value(&DB{})
 	child := s.Child("child")
 	s.Get[*DB]()
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Resolve[*DB](); !errors.Is(err, di.ErrStopped) {
@@ -61,7 +61,7 @@ func TestGetAfterStopFails(t *testing.T) {
 	if _, err := child.Resolve[*DB](); !errors.Is(err, di.ErrStopped) {
 		t.Fatalf("child of a stopped scope: %v", err)
 	}
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatalf("Stop must stay idempotent: %v", err)
 	}
 }
@@ -69,7 +69,7 @@ func TestGetAfterStopFails(t *testing.T) {
 func TestGetAfterFailedStartFails(t *testing.T) {
 	s := di.New()
 	s.Value(&DB{}).Eager().OnStart(func(context.Context, *DB) error { return errors.New("boom") })
-	if err := s.Start(context.Background()); err == nil {
+	if err := s.Start(t.Context()); err == nil {
 		t.Fatal("expected start failure")
 	}
 	if _, err := s.Resolve[*DB](); !errors.Is(err, di.ErrStopped) {

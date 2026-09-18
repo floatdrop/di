@@ -37,7 +37,7 @@ func TestSealDecidesAClaimedStart(t *testing.T) {
 			before := st.drainGen.Load()
 
 			done := make(chan error, 1)
-			go func() { done <- s.Start(context.Background()) }()
+			go func() { done <- s.Start(t.Context()) }()
 			for deadline := time.Now().Add(5 * time.Second); st.drainGen.Load() == before; time.Sleep(time.Millisecond) {
 				if time.Now().After(deadline) {
 					t.Fatal("Start never announced its start claim")
@@ -88,7 +88,7 @@ func TestSealDecidesAClaimedStart(t *testing.T) {
 			if err != nil || !started.Load() || ph != phaseStarted {
 				t.Fatalf("Start: %v, started=%v, phase=%v; want nil, started, started", err, started.Load(), ph)
 			}
-			if err := s.Stop(context.Background()); err != nil {
+			if err := s.Stop(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 		})

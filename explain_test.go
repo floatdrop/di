@@ -116,7 +116,7 @@ func TestExplainReportsEagerAndStarted(t *testing.T) {
 	s := di.New()
 	s.Provide(func(*di.Scope) *xA { return &xA{} }).Eager().
 		OnStart(func(context.Context, *xA) error { return nil })
-	if err := s.Start(context.Background()); err != nil {
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	wantExplain(t, s.Explain[*xA](), "*xA: singleton in root, eager, started\n")
@@ -337,7 +337,7 @@ func TestGraphAfterStop(t *testing.T) {
 	if !strings.Contains(s.Graph(), "xD") {
 		t.Fatal("the built instance is missing before Stop")
 	}
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(s.Graph(), "xD") {
@@ -369,7 +369,7 @@ func TestExplainAndGraphFromInsideAHook(t *testing.T) {
 			return nil
 		})
 	s.Get[*xA]()
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(seen, "*xA: singleton in root, stopped") {

@@ -4,7 +4,6 @@
 package guide
 
 import (
-	"context"
 	"flag"
 	"net/http"
 	"os"
@@ -83,7 +82,7 @@ func TestStartAndStop(t *testing.T) {
 	t.Setenv("ADDR", "127.0.0.1:0")
 	app := di.New()
 	wire(app)
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := app.Start(ctx); err != nil {
 		t.Fatal(err)
 	}

@@ -17,7 +17,7 @@ func TestRunStopsOnSIGTERM(t *testing.T) {
 	s := di.New()
 	s.Value(&DB{}).Eager().OnStart(func(context.Context, *DB) error { close(started); return nil })
 	done := make(chan error, 1)
-	go func() { done <- s.Run(context.Background()) }()
+	go func() { done <- s.Run(t.Context()) }()
 	<-started // the handler is registered before Start, so the signal is safe to send now
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatal(err)
