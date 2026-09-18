@@ -1010,6 +1010,8 @@ built:
 
 [embedmd]:# (examples/guide/testdata/modules.txt)
 ```txt
+registered directly
+  provides   *slog.Logger
 config.Module
   provides   config.Config
 storage.Module
@@ -1020,11 +1022,12 @@ cache.Module
   wraps      storage.Store ← storage.Module
 mail.Module
   provides   *mail.Mailer
+  needs      *slog.Logger ← registered directly
 dihttp.Module
   provides   dihttp.Middleware
   unchecked  dihttp.Middleware (closures: needs known when they run)
 api.Module
-  provides   *api.Caller, *api.Users, *api.Health, *http.Server
+  provides   *api.caller, *api.users, *api.health, *http.Server
   needs      *http.Request ← owed to a resolving scope
              storage.Store ← cache.Module
              *mail.Mailer ← mail.Module

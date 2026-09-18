@@ -1,10 +1,10 @@
-// Package guide is the application the step-by-step guide walks through.
-// This test pins two things the guide shows: that the wiring validates, and
+// These tests pin two things the guide shows: that the wiring validates, and
 // what Explain says about it before anything is built.
 package guide
 
 import (
 	"flag"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,18 +14,17 @@ import (
 	"testing"
 
 	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
-	"github.com/floatdrop/di/examples/guide/internal/api"
-	"github.com/floatdrop/di/examples/guide/internal/cache"
-	"github.com/floatdrop/di/examples/guide/internal/config"
-	"github.com/floatdrop/di/examples/guide/internal/mail"
 	"github.com/floatdrop/di/examples/guide/internal/storage"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/explain.txt from the current wiring")
 
+// wire is cmd/api's composition minus the process: the same Modules, so this
+// cannot pin a graph the application does not have, and a logger that says
+// nothing instead of the one main builds.
 func wire(app *di.Scope) {
-	app.Use(config.Module, storage.Module, cache.Module, mail.Module, dihttp.Module, api.Module)
+	app.Value(slog.New(slog.DiscardHandler))
+	app.Use(Modules...)
 }
 
 func TestWiringValidates(t *testing.T) {

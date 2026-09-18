@@ -4,6 +4,7 @@
 import { codeToHtml } from 'shiki';
 
 import main from '../../examples/guide/cmd/api/main.go?raw';
+import wiring from '../../examples/guide/modules.go?raw';
 import config from '../../examples/guide/internal/config/config.go?raw';
 import storage from '../../examples/guide/internal/storage/storage.go?raw';
 import storageTest from '../../examples/guide/internal/storage/storage_test.go?raw';
@@ -28,7 +29,7 @@ const highlight = (code: string, lang = 'go') =>
 	});
 
 export interface Code {
-	html: Record<'main' | 'config' | 'storage' | 'storageTest' | 'cache' | 'cacheTest' | 'mail' | 'api' | 'run', string>;
+	html: Record<'main' | 'wiring' | 'config' | 'storage' | 'storageTest' | 'cache' | 'cacheTest' | 'mail' | 'api' | 'run', string>;
 	explain: string;
 	modules: string;
 }
@@ -37,6 +38,7 @@ export async function loadCode(): Promise<Code> {
 	return {
 		html: {
 			main: await highlight(main),
+			wiring: await highlight(wiring),
 			config: await highlight(config),
 			storage: await highlight(storage),
 			storageTest: await highlight(storageTest),

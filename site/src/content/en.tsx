@@ -73,6 +73,57 @@ export const en: Content = {
 			)
 		},
 		{
+			id: 'main',
+			title: 'Where it starts: main',
+			body: (f) => (
+				<>
+					<p>
+						So this is where to start reading. <C>main</C> builds the logger, registers it as
+						a service so any constructor can take one, checks the graph and runs. The
+						application itself is the list of modules beside it: a module is a function a
+						package exports that registers that package's services into a scope. Every step
+						after this one opens one of those modules, in the order <C>Use</C> applies them.
+					</p>
+					{f.main}
+					<p>
+						The list is its own file because the tests that pin the graph read the same one.
+						Written out in <C>main</C> it would be a second copy, and a module added to only
+						one of them would leave the graph on this page describing a program that is not
+						the one that runs.
+					</p>
+					{f.wiring}
+					<p>
+						<C>Use</C> applies the modules in order and attributes each registration to the
+						module that made it, which is what an error names when two modules collide. A
+						second registration of a key without <C>Override()</C> is rejected, naming both, so
+						one module cannot rewire another unnoticed.
+					</p>
+					<p>
+						<C>Validate</C> walks the declared graph without building anything, told what a
+						request scope will hold. A dependency nothing provides, a cycle, or a
+						request-scoped service captured by a singleton fails here, at startup, rather than
+						on the first request. Then <C>Run</C> starts the eager services, waits for a
+						signal, and stops everything in reverse order within the timeout.
+					</p>
+				</>
+			)
+		},
+		{
+			id: 'config',
+			title: 'Configuration is a value',
+			body: (f) => (
+				<>
+					<p>
+						The first module registers a value you already have, with <C>Value</C>. It is a key
+						like any other: the store's constructor in the next step receives it as a
+						parameter, and a test replaces it with <C>Override()</C> and every service
+						downstream follows.
+					</p>
+					{f.config}
+				</>
+			)
+		},
+		{
 			id: 'constructors',
 			title: 'Constructors and a module',
 			body: (f) => (
@@ -102,38 +153,21 @@ export const en: Content = {
 			)
 		},
 		{
-			id: 'config',
-			title: 'Configuration is a value',
+			id: 'wrap',
+			title: 'Wrapping without replacing',
 			body: (f) => (
 				<>
 					<p>
-						A value you already have is registered with <C>Value</C>. It is a key like any
-						other: <C>NewDB</C> receives it as a parameter, and a test replaces it with{' '}
-						<C>Override()</C> and every service downstream follows.
+						<C>Wrap</C> composes over whatever serves a key. The wrapper takes that value first
+						and its other dependencies after it. The store keeps its registration and its
+						hooks, is built first, and is stopped after the wrapper, and the wrapper forwards
+						what it does not change. The one thing to get right is module order: the cache's
+						module comes after storage's, which is the order <C>main</C> lists them in. A
+						wrapper registered in a child scope applies to that scope and its descendants
+						only. Like storage, this package exports only its <C>Module</C>: a cross-cutting
+						concern composes over an exported contract, never over a package's internals.
 					</p>
-					{f.config}
-				</>
-			)
-		},
-		{
-			id: 'main',
-			title: 'Composition in main',
-			body: (f) => (
-				<>
-					<p>
-						<C>Use</C> applies the modules in order and attributes each registration to the
-						module that made it, which is what an error names when two modules collide. A
-						second registration of a key without <C>Override()</C> is rejected, naming both, so
-						one module cannot rewire another unnoticed.
-					</p>
-					<p>
-						<C>Validate</C> walks the declared graph without building anything, told what a
-						request scope will hold. A dependency nothing provides, a cycle, or a
-						request-scoped service captured by a singleton fails here, at startup, rather than
-						on the first request. Then <C>Run</C> starts the eager services, waits for a
-						signal, and stops everything in reverse order within the timeout.
-					</p>
-					{f.main}
+					{f.cache}
 				</>
 			)
 		},
@@ -167,11 +201,13 @@ export const en: Content = {
 					</p>
 					<p>
 						A handler type covers one resource, with a method per route, so its dependencies
-						are declared once. <C>dihttp.Handle((*Users).Show)</C> resolves the type from the
+						are declared once. <C>dihttp.Handle((*users).show)</C> resolves the type from the
 						request scope and calls the method; a method expression names both, so no type
-						argument is needed. <C>Users</C> is <C>Scoped</C> because it needs the caller;{' '}
-						<C>Health</C> needs nothing from the request and is an ordinary singleton, and{' '}
-						<C>Handle</C> follows either lifetime.
+						argument is needed. <C>users</C> is <C>Scoped</C> because it needs the caller;{' '}
+						<C>health</C> needs nothing from the request and is an ordinary singleton, and{' '}
+						<C>Handle</C> follows either lifetime. Nothing in this package is exported but{' '}
+						<C>Module</C>: keys are types, so a handler nobody else can name is a service
+						nobody else can resolve.
 					</p>
 					<p>
 						The middleware needs the scope itself, to open a child per request, so{' '}
@@ -181,25 +217,6 @@ export const en: Content = {
 						them.
 					</p>
 					{f.api}
-				</>
-			)
-		},
-		{
-			id: 'wrap',
-			title: 'Wrapping without replacing',
-			body: (f) => (
-				<>
-					<p>
-						<C>Wrap</C> composes over whatever serves a key. The wrapper takes that value first
-						and its other dependencies after it. The store keeps its registration and its
-						hooks, is built first, and is stopped after the wrapper, and the wrapper forwards
-						what it does not change. The one thing to get right is module order: the cache's
-						module comes after storage's. A wrapper registered in a child scope applies to that
-						scope and its descendants only. Like storage, this package exports only its{' '}
-						<C>Module</C>: a cross-cutting concern composes over an exported contract, never
-						over a package's internals.
-					</p>
-					{f.cache}
 				</>
 			)
 		},

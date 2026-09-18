@@ -92,6 +92,13 @@ Add its id to `StepId`, then add the step to `steps` in **every** locale;
 `tsc` will not let you forget one. If it shows a new file, add the id
 to `FigureId`, the import to `src/code.ts`, and the figure to `buildFigures`.
 
+The order is the guide's argument, not a list: `main` first, then its modules
+as `Use` names them in `cmd/api/main.go`, so the page is read the way the
+application is. `StepId` is written in that order and every locale's `steps`
+array follows it. Nothing checks that they agree -- `App.tsx` renders whatever
+order the array has -- so put a new step in the same place in all four files,
+and prefer a position the prose can justify over the end of the list.
+
 ## Eight things worth knowing
 
 `src/inline-script.ts` is inlined by calling `Function.prototype.toString` on
