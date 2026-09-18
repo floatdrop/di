@@ -25,6 +25,11 @@ import (
 // explained member by member, and a dependency reached twice is expanded once
 // and named on later visits.
 //
+// A registration that came too late for somebody lists what it missed: a key
+// a constructor was told nothing provides, or a group member registered after
+// something read the group. Both answers were about the scope chain as it
+// stood, so neither is rejected, and the values built on them do not have it.
+//
 // Explain builds nothing. It commits pending registrations as a resolution
 // from this scope would, so a configuration this scope would reject is
 // reported here by the same panic.
@@ -95,15 +100,24 @@ func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen m
 		by = dependentsOf(s.st.root(), in)
 	}
 	if len(by) > 0 {
-		names := make([]string, len(by))
-		for i, d := range by {
-			names[i] = d.in.b.key.String() + " in " + d.holder.name
-		}
-		sb.WriteString("needed by: " + strings.Join(names, ", ") + "\n")
+		sb.WriteString("needed by: " + strings.Join(namesOf(by), ", ") + "\n")
 	}
 	if declared := s.declaredBy(b, by); len(declared) > 0 {
 		sb.WriteString("declared by: " + strings.Join(declared, ", ") + "\n")
 	}
+	if missed := missersOf(s.st.root(), found{b, owner}); len(missed) > 0 {
+		sb.WriteString("missed by: " + strings.Join(namesOf(missed), ", ") + "\n")
+	}
+}
+
+// namesOf renders instances as "key in scope", the way a dependency list
+// names them.
+func namesOf(deps []dep) []string {
+	names := make([]string, len(deps))
+	for i, d := range deps {
+		names[i] = d.in.b.key.String() + " in " + d.holder.name
+	}
+	return names
 }
 
 // declaredInto draws the dependencies b declares under an unbuilt node, with
@@ -346,6 +360,52 @@ func dependentsOf(from *state, target *instance) []dep {
 		st.mu.Lock()
 		for _, in := range st.started {
 			if slices.ContainsFunc(in.deps, func(d dep) bool { return d.in == target }) {
+				out = append(out, dep{in: in, holder: st})
+			}
+		}
+		st.mu.Unlock()
+	}
+	return out
+}
+
+// missersOf finds the built instances that asked about target's key and were
+// answered before it was registered, so their values do not have it: a
+// constructor told nothing provides the key, or one that read the group
+// without this member. Both answers are about the chain as it stood, which is
+// why they are reported and not rejected.
+//
+// It searches from the container root, as dependentsOf does, and counts only
+// an asker whose chain reached the scope target was registered in: one that
+// asked from a sibling branch was never going to see it.
+func missersOf(from *state, target found) []dep {
+	missed := func(in *instance) bool {
+		if target.b.group {
+			// Reported only when no read that reached the scope had the member:
+			// a constructor may read a group twice, and the later read decides.
+			reached, had := false, false
+			for _, r := range in.reads {
+				if r.k == target.b.key && r.from.descendsFrom(target.owner) {
+					reached = true
+					had = had || slices.Contains(r.seen, target.b)
+				}
+			}
+			return reached && !had
+		}
+		// A miss means nothing on the chain served the key when it was asked,
+		// so the registration came later. Unless the constructor went on to
+		// resolve the key anyway — registering the default itself, say — in
+		// which case its value has one and it missed nothing.
+		return slices.ContainsFunc(in.declines, func(d decline) bool {
+			return d.k == target.b.key && d.from.descendsFrom(target.owner)
+		}) && !slices.ContainsFunc(in.deps, func(d dep) bool {
+			return d.in.b.key == target.b.key
+		})
+	}
+	var out []dep
+	for _, st := range walkScopes(from) {
+		st.mu.Lock()
+		for _, in := range st.started {
+			if missed(in) {
 				out = append(out, dep{in: in, holder: st})
 			}
 		}

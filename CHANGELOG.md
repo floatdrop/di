@@ -7,10 +7,11 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
-Two lifecycle rules a comparison with `uber/fx` found missing. Both can break
-a caller: a binding that sets one hook twice now panics instead of keeping the
-last one, and a `Run` whose start takes more than 15 seconds now fails and
-rolls back.
+What a comparison with `uber/fx` turned up. Two of these can break a caller: a
+binding that sets one hook twice now panics instead of keeping the last one,
+and a `Run` whose start takes more than 15 seconds now fails and rolls back.
+The third adds no rule and rejects nothing — it reports what wiring something
+late cost.
 
 ### Added
 
@@ -24,13 +25,22 @@ rolls back.
   that keeps its context for work outliving the start must take
   `Scope.Context` instead: under `Run` the one it is given is cancelled when
   the start ends.
-
   The deadline belongs to the phase and to nothing else. A constructor reads
   `Scope.Context`, which is still the context `Run` was called with, and a
   worker's context lasts as long as its service. It is checked between the
   steps `Start` drives, so it does not reach a service resolved from inside a
   start hook: that one is built and started there and then, on the scope's
   context, and a hook waiting on it is as unbounded as before.
+- `Explain` reports the values that were built on an answer that has since
+  changed: `missed by: *app.Router in root`. Two questions get that treatment,
+  `Maybe[T]`, when T was registered afterwards, and `All[T]`, when a member
+  was. Both ask about the scope chain as it stands — a child scope may answer
+  either differently — so registering late is not rejected, and it used to be
+  silent instead. It is the answer to why a dependency or a group member that
+  looks registered is not reaching the service that wanted it. Only an asker
+  whose chain reached the scope the registration landed in is listed; one that
+  asked from a sibling branch was never going to see it, and an ask made
+  outside a constructor is not recorded at all, since no value was built on it.
 
 ### Fixed
 

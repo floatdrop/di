@@ -68,6 +68,14 @@ type instance struct {
 	// resolve from several goroutines. Only Explain and Graph read them.
 	deps []dep
 
+	// declines are the optional keys the constructor asked for and did not
+	// find; reads are the groups it read, with the members each read returned.
+	// Both are guarded by the same mutex as deps and for the same reason, and
+	// neither guards anything: they are how Explain can say which values were
+	// built on an answer that has since changed.
+	declines []decline
+	reads    []groupRead
+
 	// Each step another goroutine may have to wait for has a channel closed
 	// when the step is done. The first goroutine that has to wait makes it
 	// (waitOn); the owner of the step closes it if it exists (wake). Both

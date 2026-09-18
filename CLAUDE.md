@@ -235,6 +235,33 @@ the scope because it is a fact about the scope that handed the key down. The
 nothing-to-override check is same-scope only: no two state mutexes are ever
 ordered against each other.
 
+**`Maybe` and `All` are reported, never guarded.** Both ask about the chain *as
+it stands* — a scope below may answer either differently, and `All` re-reads
+membership per call — so neither has one answer per scope to defend, and a key
+or member registered afterwards is not rejected. The guards above stop two live
+values, which breaks ownership and teardown; stale presence only surprises, and
+it used to surprise silently.
+
+So a miss and a group read are recorded on the asking instance
+(`resolver.declined` and `resolver.readGroup`, under the holder's mutex like
+`deps`, since a constructor may ask from several goroutines), and `Explain` of
+what arrived late names the values built without it. `missersOf` is the one
+reader of both: for a plain key it looks for a miss, for a group member a read
+whose `seen` lacks it, and either way counts only an asker whose `from` descends
+from the scope the registration landed in — a sibling branch was never going to
+see it. It searches from the root as `dependentsOf` does. Nothing is gated by
+`publish`: a failed build is not in `started`, so the search never finds it. An
+ask outside a constructor records nothing (`inFlight`), which is what leaves
+register-a-default-if-absent working, and a read through a kept `Scope` records
+nothing either, as the graph records nothing then.
+
+This was a guard first, and the guard was wrong twice over: it rejected
+registering a key some unrelated constructor had asked about, which is an
+ordering rule arising from a *negative* and invisible to whoever registers
+later; and the lookup that decides a miss is not the moment it would be
+recorded, so a scope could end up both serving a key and refusing it. Do not
+reintroduce it without answering both.
+
 **Two levels of registration semantics.** Lifetime and hooks belong to one
 registration. Eagerness belongs to the *key* — it means the service exists by
 the time `Start` returns, so an `Override()` inherits it. `deriveEager` is the
@@ -416,8 +443,18 @@ for aliased keys hid a scope handing out two live values for one interface, so
 do not reintroduce one lightly. `op.wire` is a spare bit in the fifth byte (so
 the corpus kept its meaning): when set, shapes with a constructor register it
 through `Wire`, putting `reflect.Call` under `-race` and giving `Validate`
-declared edges. `Validate` runs at the end of every sequence (I8: builds
-nothing, repeatable); what it *says* is pinned by `validate_test.go`.
+declared edges. `op.asks` is the next spare bit, for the same reason: when set,
+a shape with a scope handle makes the two reads that leave a fact behind on the
+*next* key — `Maybe` and `All` — its own key being a cycle rather than a miss.
+That is the only way a generated sequence records a miss or a group read, which
+the end-of-sequence render then reports. It covers the shapes that report
+through `built`, the dependency shape, and the failing constructor, whose ask
+must reach no report at all; the `Wire` and `Value` shapes have no scope to ask
+from. Two `FuzzMachine` seeds carry what no random sequence in the corpus
+reached, one per source of Explain's "missed by" line:
+`optional-miss-then-registered` and `group-member-read-too-late`. `Validate`
+runs at the end of every sequence (I8: builds nothing, repeatable); what it
+*says* is pinned by `validate_test.go`.
 
 **`lifecyclemodel_test.go`** — the one place that *does* predict, because what
 happens to an instance once it exists is a small documented state machine. Builds

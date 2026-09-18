@@ -158,6 +158,44 @@ Two things are not guarded. A child shadows its parent's key without
 nothing in the same scope to override is rejected, since a fake for a renamed
 service would otherwise be a registration nobody resolves.
 
+`served` is the one fact in that table a resolution leaves behind rather than a
+registration: the scope handed the key down, so registering it here now would
+give it two live values. It is recorded from the resolving scope as far as the
+owner, taking each mutex in turn.
+
+## Two questions a build can ask that time changes
+
+`Maybe[T]` asks whether anything provides T; `All[T]` asks who is in the group
+for T. Neither is the kind of question the guards above defend, because neither
+has one answer per scope. Both are about the chain *as it stands*: a scope below
+may answer them differently, `All` re-reads membership on every call, and a
+member registered in a child is invisible to a parent's reader by design. So a
+key or a member that arrives later is not a contradiction, and registering it is
+never rejected — the guards protect against two live values, which breaks
+ownership and teardown, and nothing here does that. Stale presence only
+surprises.
+
+It surprised silently, though: a service built before an optional dependency
+was wired holds "absent" for ever, and a member registered after a singleton
+read the group never reaches that value. So both answers are recorded on the
+asking instance, and `Explain` of what arrived late names the values that were
+built without it:
+
+```
+*app.Tracer: value in root, not built (provided at tracing.go:8)
+missed by: *app.Router in root
+
+app.Route: singleton group member in root, not built (provided at routes.go:44)
+missed by: *app.Router in root
+```
+
+One rule, two sources: `missersOf` reads the misses for a plain key and the
+group reads for a member. It searches from the container root, as the "needed
+by" list does, and counts only an asker whose chain reached the scope the
+registration landed in — one that asked from a sibling branch was never going
+to see it. An ask outside a constructor records nothing, since no value was
+built on the answer, which is what leaves register-a-default-if-absent working.
+
 Eagerness belongs to the key: `Override()` inherits it, and a replacement
 with a per-scope lifetime is rejected at the same commit.
 

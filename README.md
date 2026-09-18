@@ -185,11 +185,28 @@ app.Provide(func(s *di.Scope) *Report {
 ```
 
 A nil default makes the key present, so `Maybe` reports it provided, with
-nil in it. `Maybe` records nothing when the key is absent, so a later
-registration is not rejected and a constructor that already ran will not
-see it; only a closure can ask, so `Validate` lists it as unchecked. A
+nil in it. Only a closure can ask, so `Validate` lists it as unchecked. A
 pointer parameter is not optional on its own; that is fx's `optional:"true"`
 tag, registered rather than tagged.
+
+Whether a key is provided is a question about the chain as it stands — a
+child scope may answer it differently — so registering it later is never
+rejected, and asking then providing a default works:
+
+```go
+if _, ok := app.Maybe[*Cache](); !ok {
+    app.Value(newCache())
+}
+```
+
+A service built before the key was registered keeps the answer it got,
+though, and `Explain` names it, which is where a dependency wired too late
+shows up:
+
+```
+*app.Tracer: value in root, not built (provided at tracing.go:8)
+missed by: *app.Router in root
+```
 
 ### Lifecycle
 
@@ -571,6 +588,17 @@ mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 `All` builds members not built yet. Members keep their own lifetimes and
 hooks. A plain registration of the same type is neither shadowed by the
 group nor part of it.
+
+Membership is read when you ask, so a group may grow and adding a member is
+never rejected. A value already built from the group keeps the members it
+got, though, and `Explain` says so, as it does for an optional key wired
+late — which is the answer to why a member that looks registered is not
+serving:
+
+```
+app.Route: singleton group member in root, not built (provided at routes.go:44)
+missed by: *app.Router in root
+```
 
 #### More than one instance of a type
 
