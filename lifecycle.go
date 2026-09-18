@@ -495,19 +495,29 @@ func onlyCancellation(err error) bool {
 // did start, child scopes included; a service built but never started is not
 // stopped, so acquire resources in OnStart when the binding declares one.
 //
+// A ctx whose deadline passes ends the start between steps and rolls back;
+// Run bounds it with StartTimeout. The rollback detaches ctx, so Start itself
+// can outlast the deadline waiting for what it has to undo.
+//
 // After Start returns, a service built later starts as part of being built.
 // Start may be called once, and builds only this scope's own Eager bindings.
 func (s *Scope) Start(ctx context.Context) error {
 	// The rollback detaches the caller's context: an already-cancelled ctx
 	// must not skip the teardown.
-	return s.start(ctx, func() (context.Context, func()) {
+	return s.start(ctx, ctx, func() (context.Context, func()) {
 		return context.WithoutCancel(ctx), func() {}
 	})
 }
 
-// start is Start with the rollback context supplied by the caller: Start
-// detaches the caller's context, Run applies its StopTimeout and signals.
-func (s *Scope) start(ctx context.Context, rollbackCtx func() (context.Context, func())) (err error) {
+// start is Start with the phase and the rollback bounded by the caller: Start
+// uses its own context for both, detaching it for the rollback, and Run
+// applies StartTimeout, StopTimeout and signals.
+//
+// ctx is the scope's context for as long as it runs, so it is what constructors
+// read and what starts a service built after this returns; phase bounds only
+// the eager builds and start hooks this call drives. A worker's context is
+// detached from phase, as instance.start says.
+func (s *Scope) start(ctx, phase context.Context, rollbackCtx func() (context.Context, func())) (err error) {
 	defer recoverAbort(&err)
 	s.st.freeze()
 	if !s.st.startCtx.CompareAndSwap(nil, &ctx) {
@@ -515,7 +525,7 @@ func (s *Scope) start(ctx context.Context, rollbackCtx func() (context.Context, 
 	}
 	eager := s.st.reg.Load().eager // a registry is never written to; a later freeze stores a new one
 
-	if err := s.buildEager(eager); err != nil {
+	if err := s.buildEager(phase, eager); err != nil {
 		return errors.Join(err, s.rollback(rollbackCtx))
 	}
 
@@ -524,6 +534,9 @@ func (s *Scope) start(ctx context.Context, rollbackCtx func() (context.Context, 
 	// Anything built before the flag was set is still waiting here, and
 	// starting one service may build more.
 	for {
+		if err := expired(phase); err != nil {
+			return errors.Join(err, s.rollback(rollbackCtx))
+		}
 		in, owner := s.st.claimNext()
 		if in == nil {
 			if s.st.isStopped() {
@@ -534,7 +547,7 @@ func (s *Scope) start(ctx context.Context, rollbackCtx func() (context.Context, 
 		if !in.gateStart(owner) {
 			continue // the scope sealed and stopped first; claimNext now says so
 		}
-		if err := in.startClaimed(ctx, owner); err != nil {
+		if err := in.startClaimed(phase, owner); err != nil {
 			err = fmt.Errorf("di: starting %s: %w", in.b.key, err)
 			return errors.Join(err, s.rollback(rollbackCtx))
 		}
@@ -547,11 +560,27 @@ func (s *Scope) rollback(mk func() (context.Context, func())) error {
 	return s.Stop(ctx)
 }
 
+// expired reports the start phase's deadline having passed, which ends the
+// start where it stands. A cancelled context is not that: cancellation is how
+// Run is asked to exit, and it finishes the start first, as it does for a
+// signal, so that the rollback has everything to undo.
+func expired(phase context.Context) error {
+	if err := phase.Err(); errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("di: Start: %w", err)
+	}
+	return nil
+}
+
 // buildEager builds the eager bindings, turning a constructor failure into an
-// error rather than letting it unwind past Start's rollback.
-func (s *Scope) buildEager(eager []*binding) (err error) {
+// error rather than letting it unwind past Start's rollback. A constructor
+// takes its context from the scope rather than from here, so the phase bounds
+// how many are built, not how long one may take.
+func (s *Scope) buildEager(phase context.Context, eager []*binding) (err error) {
 	defer recoverAbort(&err)
 	for _, b := range eager {
+		if err := expired(phase); err != nil {
+			return err
+		}
 		if b.group {
 			// A group member is not reachable by key.
 			s.enter().resolve(b, s.st)

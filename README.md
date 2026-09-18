@@ -210,6 +210,11 @@ ancestor; it calls `Shutdown`, which never blocks.
 `OnStart` returns when the service is ready. A server binds its listener in
 the hook, so a busy port fails `Start`, and serves in a goroutine.
 
+A binding carries one hook of each kind. A second `OnStart`, `OnDrain`,
+`OnStop` or `Go` is rejected, naming the registration and the second call,
+rather than replacing the first: put the whole step in one function, where
+its order is yours.
+
 #### Draining
 
 `OnDrain` runs before anything is stopped, innermost scope first, while
@@ -246,6 +251,17 @@ function within its deadline. A worker that returns an error calls
 `Run` is the helper for `main`: start, block until the context is cancelled,
 `SIGINT` or `SIGTERM` arrives, or `Shutdown` is called, then stop with a
 bounded context. A second signal cancels that context.
+
+Both phases are bounded, 15 seconds each by default. `StartTimeout` expires
+the context the `OnStart` hooks receive and ends the start between steps, so
+a hook waiting on something that never arrives fails and rolls back instead
+of hanging the process; `StartTimeout(0)` takes the bound off.
+
+It bounds that phase and no more. A constructor reads `Scope.Context`, which
+is the context `Run` was called with, and a worker runs for as long as its
+service. A service resolved from *inside* a start hook is started there and
+then, on the scope's context, so a hook that waits on such a service is not
+bounded either — the deadline is checked between the steps `Start` drives.
 
 <details>
 <summary><code>examples/server/main.go</code>, an HTTP server with OnStart, OnDrain and OnStop, run with a stop timeout</summary>

@@ -188,6 +188,11 @@ reports the same error instead of retrying and producing a second value.
 plain destructor. The one instance not torn down is the one whose `OnStart`
 was owed and did not succeed: its value was never handed out.
 
+Each step is one hook, so a second `OnStart`, `OnDrain`, `OnStop` or `Go` on a
+binding is rejected rather than assigned over the first. That rejection is
+made where the field is written, at the builder method, since by freeze there
+would be nothing left to see.
+
 ## Two goroutines, one value
 
 ```mermaid
@@ -276,10 +281,22 @@ on somebody else's build. A build that completes after its scope stopped is
 undone rather than handed out.
 
 ```
-Run(ctx) ── Start ──► running ──┬── SIGINT / SIGTERM ──┐
-                                ├── s.Shutdown(cause) ─┼──► Stop(timeout) ──► return cause
-                                └── a worker returned ─┘         and every stop error
+Run(ctx) ── Start(timeout) ──► running ──┬── SIGINT / SIGTERM ──┐
+                                         ├── s.Shutdown(cause) ─┼──► Stop(timeout) ──► return cause
+                                         └── a worker returned ─┘         and every stop error
 ```
+
+Both of `Run`'s phases are bounded, and the two bounds mean different things.
+`StopTimeout` bounds how long `Stop` *waits*, never whether a release is owed.
+`StartTimeout` expires the context the start hooks get and ends the start
+between steps, so the start fails and rolls back; it bounds that phase and
+nothing else, since a constructor reads the scope's own context and a worker's
+is detached from the phase. "Between steps" is the whole of the guarantee: a
+service resolved from inside a start hook is started by `startIfRunning` on
+the scope's context, within that hook, so a hook that waits on one is not
+bounded. A cancelled context is not a deadline: it is how
+`Run` is asked to exit, and the start finishes first — as it does for a signal
+during a slow start — so that the rollback has everything to undo.
 
 `Shutdown(cause)` never blocks, may be called from any goroutine, and
 propagates to ancestor scopes, so a service in a child can stop the

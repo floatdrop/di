@@ -50,6 +50,16 @@ func (b *binding) where() string {
 	return b.module + " (" + b.site + ")"
 }
 
+// once rejects a second registration of a hook the binding already carries:
+// a binding has one of each, so assigning over the first would drop work the
+// caller asked for. Unlike validate this cannot wait for freeze — the field
+// is written here — so it names the site of the second call.
+func (b *binding) once(what string, cur func(context.Context, any) error, at string) {
+	if cur != nil {
+		panic(fmt.Sprintf("di: %s (provided at %s): a second %s is registered at %s; one binding has one %s", b.key, b.where(), what, at, what))
+	}
+}
+
 // validate rejects lifetime and hook combinations that cannot be honoured. It
 // runs at freeze, so the order the builder methods were called in does not
 // matter.
@@ -75,7 +85,7 @@ func (b *binding) validate() {
 
 // Binding is the typed handle returned by Provide, Value, Wire and Wrap. Its
 // methods refine the registration; they must be called before the first
-// resolution from this scope.
+// resolution from this scope, and each hook at most once.
 type Binding[T any] struct {
 	s *Scope
 	b *binding
@@ -485,8 +495,19 @@ func (b Binding[T]) Eager() Binding[T] { return b.edit(func(b *binding) { b.eage
 // OnStart runs once the service is built. Only a hook that returns normally
 // starts it: one that panics fails the start step, like a panicking
 // constructor, and the service is never served.
+//
+// The hook's context bounds the start: under Run it expires with
+// StartTimeout, so a hook that keeps a context for work outliving the start
+// should take Scope.Context instead.
+//
+// A binding has one OnStart, and a second is rejected: put the whole start in
+// one hook.
 func (b Binding[T]) OnStart(f func(context.Context, T) error) Binding[T] {
-	return b.edit(func(b *binding) { b.onStart = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
+	at := callsite(1)
+	return b.edit(func(b *binding) {
+		b.once("OnStart hook", b.onStart, at)
+		b.onStart = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) }
+	})
 }
 
 // OnDrain runs before anything is stopped: Stop drains the whole tree, from
@@ -496,16 +517,29 @@ func (b Binding[T]) OnStart(f func(context.Context, T) error) Binding[T] {
 // requests whose handlers still need their request scope. Anything those
 // handlers build, including a request scope, is drained before the phase
 // ends. Use OnStop for the release that follows.
+//
+// A binding has one OnDrain, and a second is rejected.
 func (b Binding[T]) OnDrain(f func(context.Context, T) error) Binding[T] {
-	return b.edit(func(b *binding) { b.onDrain = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
+	at := callsite(1)
+	return b.edit(func(b *binding) {
+		b.once("OnDrain hook", b.onDrain, at)
+		b.onDrain = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) }
+	})
 }
 
 // OnStop releases the service, in reverse build order, once its drain step
 // and its child scopes are done. It runs when OnStart succeeded, or when there
 // is no OnStart to pair with, in which case it is a plain destructor; a
 // service whose start step failed is not stopped.
+//
+// A binding has one OnStop, and a second is rejected: release everything the
+// service holds in one hook, so the order within it is the caller's.
 func (b Binding[T]) OnStop(f func(context.Context, T) error) Binding[T] {
-	return b.edit(func(b *binding) { b.onStop = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
+	at := callsite(1)
+	return b.edit(func(b *binding) {
+		b.once("OnStop hook", b.onStop, at)
+		b.onStop = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) }
+	})
 }
 
 // Go registers a worker for T: a long-running function, such as a consumer
@@ -520,6 +554,14 @@ func (b Binding[T]) OnStop(f func(context.Context, T) error) Binding[T] {
 // even if the scope was already stopping. The exception is context.Canceled
 // from a worker that was already cancelled. A worker that wants to stay quiet
 // during shutdown should return nil.
+//
+// A binding has one worker, and a second Go is rejected: start the other
+// goroutines from within the one worker, which is where their lifetime is
+// already tied to the service's.
 func (b Binding[T]) Go(f func(context.Context, T) error) Binding[T] {
-	return b.edit(func(b *binding) { b.worker = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) } })
+	at := callsite(1)
+	return b.edit(func(b *binding) {
+		b.once("Go worker", b.worker, at)
+		b.worker = func(ctx context.Context, v any) error { return f(ctx, as[T](v)) }
+	})
 }
