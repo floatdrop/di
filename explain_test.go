@@ -27,6 +27,7 @@ type (
 	xD     struct{}
 	xCfg   struct{ dsn string }
 	xPlate struct{ n int }
+	xOpt   struct{} // asked for optionally, and provided late or not at all
 )
 
 var explainSite = regexp.MustCompile(` \(provided at [^)]*\)`)
@@ -172,6 +173,170 @@ func TestExplainGroupMembers(t *testing.T) {
 
 xPlate: singleton group member in root, built
 `)
+}
+
+// An optional dependency wired after its consumer was built is reported the
+// same way a late group member is: the value keeps the answer it got, and
+// Explain names it. (fx review)
+func TestExplainReportsAnOptionalWiredTooLate(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *xD { _, _ = sc.Maybe[*xOpt](); return &xD{} })
+	_ = s.Get[*xD]()
+
+	s.Value(&xOpt{})
+	wantExplain(t, s.Explain[*xOpt](), `*xOpt: value in root, not built
+missed by: *xD in root
+`)
+}
+
+// The report is about what a value holds, not about what was registered when,
+// so a key that arrived while the build ran is reported too: the constructor
+// had already been told there was none. (fx review)
+func TestExplainReportsAKeyThatArrivedDuringTheBuild(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *xD {
+		_, _ = sc.Maybe[*xOpt]() // the answer this value keeps
+		sc.Value(&xOpt{})
+		return &xD{}
+	})
+	_ = s.Get[*xD]()
+
+	if got := compact(s.Explain[*xOpt]()); !strings.Contains(got, "missed by: *xD in root") {
+		t.Fatalf("the value that missed it is not reported:\n%s", got)
+	}
+}
+
+// A constructor that registers the default itself has a value for the key, so
+// it missed nothing: "needed by" and "missed by" must never name one instance
+// for one key. (fx review)
+func TestExplainReportsNoMissWhenTheAskerGotItAnyway(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *xD {
+		if _, ok := sc.Maybe[*xOpt](); !ok {
+			sc.Value(&xOpt{}) // register-a-default-if-absent, inside a build
+		}
+		_ = sc.Get[*xOpt]()
+		return &xD{}
+	})
+	_ = s.Get[*xD]()
+
+	wantExplain(t, s.Explain[*xOpt](), `*xOpt: value in root, built
+needed by: *xD in root
+`)
+}
+
+// Likewise for a group read twice: the later read decides, so a member the
+// constructor did get is not reported against it. (fx review)
+func TestExplainReportsNoMissWhenALaterReadSawIt(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) xPlate { return xPlate{1} }).Group()
+	s.Provide(func(sc *di.Scope) *xD {
+		_ = sc.All[xPlate]() // sees one member
+		sc.Provide(func(*di.Scope) xPlate { return xPlate{2} }).Group()
+		if got := sc.All[xPlate](); len(got) != 2 {
+			t.Fatalf("the second read saw %d members", len(got))
+		}
+		return &xD{}
+	})
+	_ = s.Get[*xD]()
+
+	if got := compact(s.Explain[xPlate]()); strings.Contains(got, "missed by") {
+		t.Fatalf("a member the later read saw was reported as missed:\n%s", got)
+	}
+}
+
+// A build that failed holds nothing, so its miss is nobody's answer. (fx review)
+func TestExplainReportsNoMissForAFailedBuild(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *xD {
+		_, _ = sc.Maybe[*xOpt]()
+		_ = sc.Get[*xA]() // nothing provides *xA: the build fails
+		return &xD{}
+	})
+	if _, err := s.Resolve[*xD](); err == nil {
+		t.Fatal("expected the build to fail")
+	}
+
+	s.Value(&xOpt{})
+	if got := s.Explain[*xOpt](); strings.Contains(got, "missed by") {
+		t.Fatalf("a failed build was reported as missing it:\n%s", got)
+	}
+}
+
+// Only an asker whose chain reached the scope the key was registered in
+// missed it: a sibling branch was never going to see it, and an asker below
+// it was. (fx review)
+func TestExplainMissedOptionalFollowsTheChain(t *testing.T) {
+	root := di.New()
+	root.Provide(func(sc *di.Scope) *xD { _, _ = sc.Maybe[*xOpt](); return &xD{} }).Scoped()
+	sibling := root.Child("sibling")
+	_ = sibling.Get[*xD]() // asks from the sibling branch
+
+	other := root.Child("other")
+	other.Value(&xOpt{})
+	if got := compact(other.Explain[*xOpt]()); strings.Contains(got, "missed by") {
+		t.Fatalf("a sibling branch's ask was reported as a miss:\n%s", got)
+	}
+
+	root.Value(&xOpt{})
+	if got := compact(root.Explain[*xOpt]()); !strings.Contains(got, "missed by: *xD in sibling") {
+		t.Fatalf("the asker below the scope was not reported:\n%s", got)
+	}
+}
+
+// A group grows by design, so a member registered after something read the
+// group is not rejected. Explain says who missed it, which is the answer to
+// why a member that looks registered is not serving. (fx review)
+func TestExplainReportsAMemberReadTooLate(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) xPlate { return xPlate{1} }).Group()
+	s.Provide(func(sc *di.Scope) *xD { _ = sc.All[xPlate](); return &xD{} })
+	_ = s.Get[*xD]()
+
+	s.Provide(func(*di.Scope) xPlate { return xPlate{2} }).Group()
+
+	wantExplain(t, s.Explain[xPlate](), `xPlate: singleton group member in root, built
+needed by: *xD in root
+
+xPlate: singleton group member in root, not built
+missed by: *xD in root
+`)
+}
+
+// The member that was there when the group was read is not reported, and
+// neither is a reader that arrived after the member. (fx review)
+func TestExplainReportsNoMemberReadInTime(t *testing.T) {
+	s := di.New()
+	s.Provide(func(*di.Scope) xPlate { return xPlate{1} }).Group()
+	s.Provide(func(*di.Scope) xPlate { return xPlate{2} }).Group()
+	s.Provide(func(sc *di.Scope) *xD { _ = sc.All[xPlate](); return &xD{} })
+	_ = s.Get[*xD]()
+
+	if got := s.Explain[xPlate](); strings.Contains(got, "missed by") {
+		t.Fatalf("a member read in time was reported as missed:\n%s", got)
+	}
+}
+
+// A read from a sibling branch was never going to see the member, so it is
+// not a miss; a read from below the member's scope is. (fx review)
+func TestExplainMissersAreOnlyReadersThatReachedTheScope(t *testing.T) {
+	root := di.New()
+	root.Provide(func(sc *di.Scope) *xD { _ = sc.All[xPlate](); return &xD{} }).Scoped()
+	sibling := root.Child("sibling")
+	sibling.Provide(func(*di.Scope) xPlate { return xPlate{1} }).Group()
+	_ = sibling.Get[*xD]() // reads the group from the sibling branch
+
+	other := root.Child("other")
+	other.Provide(func(*di.Scope) xPlate { return xPlate{2} }).Group()
+	if got := compact(other.Explain[xPlate]()); strings.Contains(got, "missed by") {
+		t.Fatalf("a sibling branch's read was reported as a miss:\n%s", got)
+	}
+
+	// The same reader, against a member in the scope it read through.
+	root.Provide(func(*di.Scope) xPlate { return xPlate{3} }).Group()
+	if got := compact(root.Explain[xPlate]()); !strings.Contains(got, "missed by: *xD in sibling") {
+		t.Fatalf("the reader below the member's scope was not reported:\n%s", got)
+	}
 }
 
 // A plain registration and a group of the same type are different bindings.

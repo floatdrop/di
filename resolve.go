@@ -248,6 +248,61 @@ func (s *Scope) markServed(owner *state, k key) {
 	}
 }
 
+// decline is one optional key a build asked for and did not find, and the
+// scope it asked from, which is the holder or a descendant of it.
+type decline struct {
+	k    key
+	from *state
+}
+
+// declined records the miss on the instance whose constructor asked, as
+// dependOn records an edge and readGroup records a group read. It guards
+// nothing: whether a key is provided is a question about the chain as it
+// stands, which a child scope may answer differently anyway, so a key
+// registered afterwards is reported by Explain rather than rejected.
+func (r *resolver) declined(k key, from *state) {
+	r.holder.mu.Lock()
+	defer r.holder.mu.Unlock()
+	asker := r.holder.instanceAt(r.b)
+	if asker == nil || slices.Contains(asker.declines, decline{k, from}) {
+		return
+	}
+	asker.declines = append(asker.declines, decline{k, from})
+}
+
+// groupRead is one group a build read: the key, the scope it read from, and
+// the members it got. A member registered into that chain afterwards is not
+// in seen, and the value built from the read does not have it.
+type groupRead struct {
+	k    key
+	from *state
+	seen []*binding
+}
+
+// readGroup records the read on the instance whose constructor made it, as
+// declined records a miss. A group is read-time and scope-dependent by
+// contract too, so a later member is likewise reported rather than rejected.
+// A second read of the same group from the same scope merges into the first,
+// so a constructor that reads in a loop keeps one record, and a member any of
+// its reads saw is one it has.
+func (r *resolver) readGroup(k key, from *state, seen []*binding) {
+	r.holder.mu.Lock()
+	defer r.holder.mu.Unlock()
+	asker := r.holder.instanceAt(r.b)
+	if asker == nil {
+		return
+	}
+	if i := slices.IndexFunc(asker.reads, func(o groupRead) bool { return o.k == k && o.from == from }); i >= 0 {
+		for _, b := range seen {
+			if !slices.Contains(asker.reads[i].seen, b) {
+				asker.reads[i].seen = append(asker.reads[i].seen, b)
+			}
+		}
+		return
+	}
+	asker.reads = append(asker.reads, groupRead{k: k, from: from, seen: seen})
+}
+
 // resolve produces b's value for the resolving scope s, honouring the
 // binding's lifetime and starting the instance when the scope is running.
 func (s *Scope) resolve(b *binding, owner *state) any {
@@ -474,8 +529,19 @@ func (in *instance) startIfRunning(owner *state) {
 func (s *Scope) Get[T any]() T { return as[T](s.get(key{t: reflect.TypeFor[T]()})) }
 
 // Maybe resolves T if it is provided anywhere in the scope chain.
+//
+// Whether T is provided is a question about the chain as it stands, and a
+// scope below may answer it differently, so registering T afterwards is not
+// rejected. A constructor's miss is recorded, though: Scope.Explain of T
+// names the services that were built without it, which is where a dependency
+// wired too late shows up. A miss outside a constructor records nothing,
+// since no value was built on the answer.
 func (s *Scope) Maybe[T any]() (T, bool) {
-	if b, _ := s.lookup(key{t: reflect.TypeFor[T]()}); b == nil {
+	k := key{t: reflect.TypeFor[T]()}
+	if b, _ := s.lookup(k); b == nil {
+		if s.inFlight() && s.r.b != nil {
+			s.r.declined(k, s.st)
+		}
 		var zero T
 		return zero, false
 	}
@@ -491,11 +557,18 @@ func (s *Scope) All[T any]() []T {
 	}
 	k := key{t: reflect.TypeFor[T]()}
 	var out []T
+	var members []*binding
 	for st := s.st; st != nil; st = st.parent {
 		st.freeze()
 		for _, b := range st.reg.Load().groups[k] { // immutable: freeze appends to a copy
 			out = append(out, as[T](s.resolve(b, st)))
+			members = append(members, b)
 		}
+	}
+	if s.inFlight() && s.r.b != nil {
+		// Inside a build, so the value keeps these members however the group
+		// grows afterwards; Explain reports one that arrives too late.
+		s.r.readGroup(k, s.st, members)
 	}
 	return out
 }

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -93,6 +94,82 @@ func TestSecondHookNamesTheSecondCall(t *testing.T) {
 
 	line, second := at(func() { b.OnStop(noop) })
 	mustPanic(t, fmt.Sprintf("wiring_test.go:%d;", line), second)
+}
+
+// Wiring late is not rejected: whether a key is provided is a question about
+// the chain as it stands, and a scope below may answer it differently. What
+// the services built before it missed is reported by Explain. (fx review)
+func TestOptionalWiredLateIsAccepted(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *rA {
+		_, _ = sc.Maybe[*rC]()
+		return &rA{}
+	})
+	s.Get[*rA]()
+
+	s.Value(&rC{}) // nobody was promised there would never be one
+	if _, ok := s.Maybe[*rC](); !ok {
+		t.Fatal("the late registration did not take")
+	}
+	if got := s.Explain[*rC](); !strings.Contains(compact(got), "missed by: *rA in root") {
+		t.Fatalf("Explain does not report what missed it:\n%s", compact(got))
+	}
+}
+
+// A miss outside a constructor records nothing: no value was built on the
+// answer, so there is nobody to report. (fx review)
+func TestTopLevelMaybeMissRecordsNothing(t *testing.T) {
+	s := di.New()
+	if _, ok := s.Maybe[*rC](); ok {
+		t.Fatal("*rC is not provided")
+	}
+	s.Value(&rC{}) // the register-a-default-if-absent pattern
+	if _, ok := s.Maybe[*rC](); !ok {
+		t.Fatal("the default was not registered")
+	}
+	if got := s.Explain[*rC](); strings.Contains(got, "missed by") {
+		t.Fatalf("a top-level miss was reported:\n%s", got)
+	}
+}
+
+// A decline is about the key a lookup answers, and a group member answers
+// none: All reads the group, so a member is not what the asker missed.
+// (fx review)
+func TestDeclinedKeyAndAGroupMemberAreDifferentQuestions(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *rA {
+		_, _ = sc.Maybe[Handler]()
+		return &rA{}
+	})
+	s.Get[*rA]()
+
+	s.Provide(func(*di.Scope) Handler { return Handler{} }).Group()
+	if got := s.All[Handler](); len(got) != 1 {
+		t.Fatalf("All returned %d members", len(got))
+	}
+	if got := s.Explain[Handler](); strings.Contains(got, "missed by") {
+		t.Fatalf("a group member was reported as a missed optional:\n%s", got)
+	}
+}
+
+// A constructor may ask from goroutines of its own, so the record is written
+// under the holder's mutex. Meaningful under -race. (fx review)
+func TestDeclineFromAConstructorsGoroutines(t *testing.T) {
+	s := di.New()
+	s.Provide(func(sc *di.Scope) *rA {
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Go(func() { _, _ = sc.Maybe[*rC]() })
+		}
+		wg.Wait()
+		return &rA{}
+	})
+	s.Get[*rA]()
+
+	s.Value(&rC{})
+	if got := s.Explain[*rC](); !strings.Contains(compact(got), "missed by: *rA in root") {
+		t.Fatalf("Explain does not report what missed it:\n%s", compact(got))
+	}
 }
 
 // Eager services build in registration order, not map order.

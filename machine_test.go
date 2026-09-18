@@ -99,12 +99,16 @@ type op struct {
 	// shape has a constructor to hand over. The bit was spare, so every
 	// corpus entry keeps its meaning.
 	wire bool
+	// asks makes the constructor resolve the next key optionally, so a
+	// sequence reaches a miss recorded against the scopes that answered it.
+	// Another spare bit, for the same reason.
+	asks bool
 }
 
 func (o op) String() string {
 	names := []string{"Register", "Resolve", "Get", "Maybe", "All", "Start", "Stop", "Shutdown", "Run"}
 	if o.kind == opRegister {
-		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v, override=%v, wire=%v)", o.scope, keyNames[o.key], o.reg, o.eager, o.override, o.wire)
+		return fmt.Sprintf("Register(s%d, %s, shape%d, eager=%v, override=%v, wire=%v, asks=%v)", o.scope, keyNames[o.key], o.reg, o.eager, o.override, o.wire, o.asks)
 	}
 	if o.kind == opStop && o.eager {
 		return fmt.Sprintf("Stop(s%d, impatient)", o.scope)
@@ -123,6 +127,7 @@ func decode(data []byte) []op {
 			eager:    data[i+4]&1 == 1,
 			override: data[i+4]&2 == 2,
 			wire:     data[i+4]&4 == 4,
+			asks:     data[i+4]&8 == 8,
 		})
 	}
 	return ops
@@ -556,7 +561,14 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 		m.lc.built(scope, o.reg, any(v))
 		return v
 	}
-	built := func(sc *di.Scope, v T) T { return builtIn(m.scopeOf(sc), v) }
+	built := func(sc *di.Scope, v T) T {
+		if o.asks {
+			// Inside the build, so the miss is recorded and a later
+			// registration of that key in a scope that answered is rejected.
+			askOptional(sc, o.key)
+		}
+		return builtIn(m.scopeOf(sc), v)
+	}
 	hook := func(name string) func(context.Context, T) error {
 		return func(_ context.Context, v T) error {
 			m.lc.hookRan(any(v), name)
@@ -623,15 +635,28 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 			}
 			break
 		}
-		// A constructor that fails, which resolve turns into an error.
-		b = s.Provide(func(*di.Scope) T { panic("injected constructor failure") })
+		// A constructor that fails, which resolve turns into an error. With
+		// asks it is also the shape whose decline must not be recorded.
+		b = s.Provide(func(sc *di.Scope) T {
+			if o.asks {
+				askOptional(sc, o.key)
+			}
+			panic("injected constructor failure")
+		})
 	case 6:
 		// Depends on another key, so chains and cycles arise; through Wire
 		// the dependency is declared, so Validate has something to walk.
 		if o.wire {
 			b = s.Wire[T](wire)
 		} else {
-			b = s.Provide(dep)
+			// The one shape where an optional ask meets a dependency of its
+			// own, so a decline is recorded under a chain rather than a leaf.
+			b = s.Provide(func(sc *di.Scope) T {
+				if o.asks {
+					askOptional(sc, o.key)
+				}
+				return dep(sc)
+			})
 		}
 	case 7:
 		// Draining, where the phase's boundary is known.
@@ -665,6 +690,28 @@ func regShape[T any](m *machine, s *di.Scope, o op, plain func() T, dep func(*di
 	}
 	if o.override {
 		b.Override()
+	}
+}
+
+// askOptional makes the two reads that leave a fact behind on the key after
+// this one: an optional resolution, whose miss is recorded against the scope
+// that answered, and a group read, whose members Explain compares with the
+// group as it stands. The next key rather than its own, since a constructor
+// that resolves its own key is a cycle rather than a miss.
+func askOptional(sc *di.Scope, key uint8) {
+	switch (key + 1) % numKeys {
+	case 0:
+		_, _ = sc.Maybe[*mk1]()
+		_ = sc.All[*mk1]()
+	case 1:
+		_, _ = sc.Maybe[*mk2]()
+		_ = sc.All[*mk2]()
+	case 2:
+		_, _ = sc.Maybe[*mk3]()
+		_ = sc.All[*mk3]()
+	default:
+		_, _ = sc.Maybe[mkI]()
+		_ = sc.All[mkI]()
 	}
 }
 
