@@ -103,6 +103,11 @@ in the same critical section as every change to them; it is set exactly when
 for the same reason. `benchmarks/parallel_test.go` is the record of what this
 bought.
 
+What still takes a shared lock per request is `Child` and the detach at the end
+of `teardown`, both on the parent's mutex, and `claimBuild`/`settle` on
+`graph.mu` — one short acquisition each. The request benchmark at eight cores is
+where to look if that changes.
+
 **A waiter blocks on one step, not on the scope.** Each step another goroutine
 may finish has a channel closed when it is done: `settledCh`, `startingCh`,
 `drainedCh`, and a scope's `sealCh`. The first goroutine that must wait makes
@@ -117,21 +122,39 @@ across a `Stop`.
 branch, `resolver.onPath` walks the immutable path. Across branches,
 `resolver.wait` searches a `*graph` before blocking, matching whole paths
 (`descends`) in both directions; `graph.under` indexes each blocked resolution
-by its path's nodes so a search reads only the waits beneath one builder. Each
-wait is its own `waitEdge`, taken back by `unwait`. The check and the edge it
-adds are one critical section. Lock order is state mutex then `graph.mu`, never
-the reverse. One graph per container, made by `New` and passed through
-`newState` — a wait crosses scopes, never containers.
+by its path's nodes so a search reads only the waits beneath one builder. A node
+only ever becomes finished, so that index is a superset and `descends` still
+decides. That the finished node itself is indexed is pinned only by
+`TestWaitIndexIncludesTheFinishedNode`, an internal test: no test through the
+exported API reaches the shape, so it is the whole of that coverage. Each wait
+is its own `waitEdge`, taken back by `unwait`, so two waits by one resolution
+cannot overwrite each other. The check and the edge it adds are one critical
+section, or two branches closing a cycle at once would both decide to wait.
+Lock order is state mutex then `graph.mu`, never the reverse. One graph per
+container, made by `New` and passed through `newState` — a wait crosses scopes,
+never containers.
 
 **The resolution path is immutable, and finished nodes stop counting.**
 `resolver` is a linked-list node, identified by binding *and* holder, never by
 key. `resolver.done` is the only mutable part: `resolve` sets it as it returns,
 and `onPath`/`descends` *stop the walk* there, in both directions. That is what
 lets a constructor keep its `*Scope` and resolve later without meeting its own
-frame as a cycle. `Scope.Child` carries the resolver it was made from, so a
-child opened inside a constructor is part of that resolution. `inFlight` — a
-path whose last node has not returned — also decides whether `Get`/`All`/`Must`
-convert an `abort` into a plain error panic.
+frame as a cycle.
+
+Stopping rather than skipping is the other half, because the frames *above* a
+finished one are usually still building: A resolves B, B keeps its scope and
+returns, A carries on, and a later resolution through B's scope that needs A met
+an active A and was called a cycle when it had only to wait. The price is the
+one case that cannot be told apart without goroutine-local state: a constructor
+blocking on a resolution made through a finished descendant's scope that leads
+back to itself now deadlocks where it used to be reported. That takes a service
+reaching back into its own unfinished construction through an escaped scope; the
+late resolution the rule admits is the documented one.
+
+`Scope.Child` carries the resolver it was made from, so a child opened inside a
+constructor is part of that resolution. `inFlight` — a path whose last node has
+not returned — also decides whether `Get`/`All`/`Must` convert an `abort` into a
+plain error panic.
 
 **Scopes have a stop machine too.** `state.stopOnce` is claimed by the first
 `Stop` and settled when its teardown finishes; later or concurrent `Stop` calls
@@ -148,8 +171,15 @@ resolves during a drain and a hook may build or open a child. The sweep is a
 post-order walk that claims a descendant's phase immediately before descending,
 and a descendant's phase ends with its own sweep, not with the run: claiming
 ahead, or holding phases open, deadlocks a hook stopping a scope the walk has
-taken. `stopIfNeeded` waits out `draining` per instance for the same reason.
-`drainIfNeeded` skips an instance whose scope is already stopped.
+taken — an HTTP server draining in an outer scope waits for a handler, and that
+handler is stopping its request scope. A scope another `Stop` already owns is
+waited for and then left alone, subtree included: that `Stop`'s run drains it.
+The scope-level guard is not enough on its own, so `stopIfNeeded` also waits out
+`draining` per instance: one built after its scope's phase ended can be drained
+by a sweep still running above it exactly as its own `Stop` arrives.
+`drainIfNeeded` skips an instance whose scope is already stopped, because
+winding something down for work it can no longer take is the opposite of what
+the hook is for. `ctx` bounds the sweep as well as the hooks.
 
 **The end of the drain phase is sealed, not guessed.** A build published into
 the subtree or a start step claimed there can create drain work after a sweep
@@ -157,10 +187,24 @@ decided. `announce` bumps `drainGen` on the scope and every ancestor, then reads
 `sealed` up the chain; `seal` stores `sealed`, then reads `drainGen`, storing
 `stopped` only if it did not move. Neither side can miss the other: the sweep
 goes round again, or the announcer learns the scope stopped and undoes its work
-(`publish` undoes the build, `gateStart` undoes the claim and calls `refresh`).
-`claimNext` returns nil for a stopped scope. `drainGen` is per subtree, so an
-unrelated request cannot force a re-sweep — the price is that a subtree which
-never quiets holds the phase open until `ctx` expires.
+(`publish` undoes the build, `gateStart` undoes the claim). Undoing the claim
+calls `refresh`, which sets `ready` on a built instance that never started, in a
+scope that may otherwise look running; that is safe only because `gateStart`
+undoes the claim *after* `announce` has read `stopped` as set, so a reader that
+later sees `ready` sees `stopped` too, and both `resolve` and the warm path in
+`await` check it (`TestSealDecidesAClaimedStart`). `claimNext` returns nil for a
+stopped scope, or `Start`'s loop would find a refused instance for ever.
+Whoever owns the stop phase seals, whether or not it ran the sweep, since an
+ancestor's run may have settled this scope's drain phase and moved on.
+`drainGen` is per subtree, so an unrelated request cannot force a re-sweep — the
+price is that a subtree which never quiets holds the phase open until `ctx`
+expires.
+
+Two windows stay open, each cheaper to accept than to close: an instance built
+into a scope whose drain phase another `Stop` already ended is not drained by
+that `Stop`, and a hook running on such a late instance can find its scope
+stopped mid-hook. The second is why C7 below exercises resolution inside drain
+hooks without asserting that it succeeds.
 
 **Who hears a drain failure is decided by who owns the teardown**, not by who
 ran the hook. A sweep settles a descendant's failures into that descendant's
@@ -362,22 +406,31 @@ predicted, and marked in the file: whether a start step succeeded, and whether
 `Start` was ever called on a scope.
 
 **`concurrent_test.go`** — the same operations in parallel lanes under `-race`,
-in two phases (wire, then everything else), checking the ten oracles listed at
+in two phases (wire, then everything else), checking the eleven oracles listed at
 the top of the file: only a configuration rejection may panic (C1), every
 operation returns (C2), `Stop` respects scope order (C3), nothing is stopped more
 often than built (C4), one build however many resolutions race (C5), no stop hook
-begins while that instance's drain hook runs (C6), drain hooks resolve (C7), one
-graph gives one cycle verdict (C8), every instance owing a stop gets exactly one
-by quiescence (C9), and a resolution begun after `Stop` returned fails (C10).
-`settle` defines quiescence by polling until no hook runs and nothing owed is
-unreleased. Driver hooks can panic, so every piece of bookkeeping after a hook's
-first line must be deferred.
+begins while that instance's drain hook runs (C6), drain hooks resolve against a
+live registry — success deliberately *not* asserted, since another lane's `Stop`
+may legitimately stop the hook's scope mid-hook (C7), one graph gives one cycle
+verdict (C8), every instance owing a stop gets exactly one by quiescence (C9), a
+resolution begun after `Stop` returned fails (C10), and a `Stop` reports its own
+scope's drain-hook failure whether it ran the hook or waited for the `Stop` that
+owned the phase (C11). `settle` defines quiescence by polling until no hook runs
+and nothing owed is unreleased. Driver hooks can panic, so every piece of
+bookkeeping after a hook's first line must be deferred.
 
 **The exemptions these oracles need are the most dangerous part of them.** C3
 cannot order a release a missed deadline deferred, so it is off for such scopes —
 switching C6 off with it once silently disabled the drain/stop overlap check for
-the only shape that needs it. C6 holds however impatient the `Stop` was.
-Mutation-test an exemption before believing it.
+the only shape that needs it. C6 holds however impatient the `Stop` was. C11 is
+the one with three: only a *patient* `Stop` is held to it, a report that
+`errors.Is` `context.DeadlineExceeded` is skipped, and only an instance that
+existed before the teardown began is registered as an expected failure — a
+late-built one can be drained by a sweep above a scope whose own `Stop` is
+already past its drain, which has nowhere to put the error. Strengthening C11
+past any of those reintroduces the one-in-eight flaky ordering oracle the rule
+above exists to prevent. Mutation-test an exemption before believing it.
 
 `scheduler_test.go` makes the interleaving an input: hooks and operations park at
 scheduling points and a seed picks who goes next, so `TestMachineScheduled`
