@@ -22,6 +22,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -30,7 +31,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -90,11 +91,9 @@ func report(title string, byFunc map[string]int, top int) {
 		rows = append(rows, row{fn, n})
 		total += n
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].n != rows[j].n {
-			return rows[i].n > rows[j].n
-		}
-		return rows[i].fn < rows[j].fn
+	// Widest gap first, ties broken by name so the report is stable.
+	slices.SortFunc(rows, func(a, b row) int {
+		return cmp.Or(cmp.Compare(b.n, a.n), cmp.Compare(a.fn, b.fn))
 	})
 	fmt.Printf("%s: %d statements\n", title, total)
 	for i, r := range rows {
@@ -218,7 +217,7 @@ func newFuncIndex() funcIndex {
 			}
 			starts = append(starts, funcStart{fset.Position(fn.Pos()).Line, fname})
 		}
-		sort.Slice(starts, func(i, j int) bool { return starts[i].line < starts[j].line })
+		slices.SortFunc(starts, func(a, b funcStart) int { return cmp.Compare(a.line, b.line) })
 		idx.byFile[filepath.Base(name)] = starts
 	}
 	return idx

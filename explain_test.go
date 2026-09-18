@@ -245,10 +245,9 @@ func TestEdgesFromGoroutinesInsideAConstructor(t *testing.T) {
 	s.Provide(func(sc *di.Scope) *xA {
 		var wg sync.WaitGroup
 		for range 3 {
-			wg.Add(3)
-			go func() { defer wg.Done(); _, _ = sc.Resolve[*xB]() }()
-			go func() { defer wg.Done(); _, _ = sc.Resolve[*xC]() }()
-			go func() { defer wg.Done(); _, _ = sc.Resolve[*xD]() }()
+			wg.Go(func() { _, _ = sc.Resolve[*xB]() })
+			wg.Go(func() { _, _ = sc.Resolve[*xC]() })
+			wg.Go(func() { _, _ = sc.Resolve[*xD]() })
 		}
 		wg.Wait()
 		return &xA{}

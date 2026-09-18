@@ -2,6 +2,7 @@
 package config
 
 import (
+	"cmp"
 	"os"
 
 	"github.com/floatdrop/di"
@@ -19,12 +20,7 @@ func Load() Config {
 	}
 }
 
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
+func env(key, fallback string) string { return cmp.Or(os.Getenv(key), fallback) }
 
 // Module registers the configuration as a value. A test overrides it with
 // s.Value(config.Config{...}).Override() and everything downstream follows.
