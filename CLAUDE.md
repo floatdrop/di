@@ -564,7 +564,8 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   `digrpc/vX.Y.Z`; `release.yml` matches `v*` only, so those tags publish no
   GitHub release and need no CHANGELOG section. Its tests use grpc's own
   health service over `bufconn`, so nothing is generated from protobuf. The
-  coverage badge does not include it.
+  coverage badge does not include it. `examples/` reaches it through a second
+  `replace`, and `examples/grpc` is the lifecycle example the README embeds.
 - **`dislog/` is the slog bridge for `Observe`** and imports nothing but
   `log/slog` and the library. `dislog.New` returns the `func(di.Event)` that
   `Observe` takes, not a `slog.Handler`. Failed steps log at Error with the site
@@ -603,7 +604,8 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   types through `dihttp.Handle((*Users).Show)`. Packages export only their
   contract and `Module` — keys are types, so an unexported type is a private
   service, and that is the whole privacy model.
-- **`examples/server` and `examples/guide/cmd/api` block on signals.** Build and
+- **`examples/server`, `examples/grpc` and `examples/guide/cmd/api` block on
+  signals.** Build and
   run them with output going to the terminal, not redirected — this harness
   loses a backgrounded server's startup output when redirected, which once
   produced a false failure report.
