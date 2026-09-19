@@ -7,8 +7,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/examples/guide/internal/storage"
+	"golang.yandex/di"
+	"golang.yandex/di/examples/guide/internal/storage"
 )
 
 type cache struct {

@@ -23,7 +23,7 @@ export const ru: Content = {
 				запустит, остановит и проверит граф. Без кодогенерации и без зависимостей.
 			</>
 		),
-		install: 'go get github.com/floatdrop/di'
+		install: 'go get golang.yandex/di'
 	},
 
 	labels: {
@@ -291,7 +291,7 @@ export const ru: Content = {
 
 	footer: (
 		<>
-			<Link href={REPO}>github.com/floatdrop/di</Link> ·{' '}
+			<Link href={REPO}>golang.yandex/di</Link> ·{' '}
 			<Link href={PKG_DOC}>pkg.go.dev</Link> · Лицензия MIT · Эта страница собрана из каталога{' '}
 			<C>site/</C> в репозитории, а показанный на ней код — из <C>examples/guide/</C>.
 		</>

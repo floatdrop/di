@@ -21,7 +21,7 @@ export const zh: Content = {
 				注册服务，用<C>s.Get[T]()</C>解析它们，剩下的交给容器：创建、启动、停止，并检查依赖图。无需代码生成，没有第三方依赖。
 			</>
 		),
-		install: 'go get github.com/floatdrop/di'
+		install: 'go get golang.yandex/di'
 	},
 
 	labels: {
@@ -250,7 +250,7 @@ export const zh: Content = {
 
 	footer: (
 		<>
-			<Link href={REPO}>github.com/floatdrop/di</Link> · <Link href={PKG_DOC}>pkg.go.dev</Link> ·
+			<Link href={REPO}>golang.yandex/di</Link> · <Link href={PKG_DOC}>pkg.go.dev</Link> ·
 			MIT 许可证 · 这个页面由仓库的<C>site/</C>目录构建，页面上展示的代码来自
 			<C>examples/guide/</C>。
 		</>

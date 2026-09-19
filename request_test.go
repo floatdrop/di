@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
 )
 
 type User struct{ Name string }

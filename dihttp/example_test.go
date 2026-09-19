@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
 )
 
 type Caller struct{ Name string }

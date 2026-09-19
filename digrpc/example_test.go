@@ -6,8 +6,8 @@ import (
 	"net"
 	"strings"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/digrpc"
+	"golang.yandex/di"
+	"golang.yandex/di/digrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"

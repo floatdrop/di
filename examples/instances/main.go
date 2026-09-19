@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type DB struct{ dsn string }

@@ -8,8 +8,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/examples/guide/internal/config"
+	"golang.yandex/di"
+	"golang.yandex/di/examples/guide/internal/config"
 )
 
 // db is the database connection: private to the package, with a lifecycle

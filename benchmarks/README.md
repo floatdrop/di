@@ -1,7 +1,7 @@
 # benchmarks
 
 Separate module so the library itself stays dependency-free. Compares
-`github.com/floatdrop/di` against `samber/do` and `go.uber.org/dig` on the
+`golang.yandex/di` against `samber/do` and `go.uber.org/dig` on the
 same four-service graph, each wired the way that container is meant to be
 used.
 

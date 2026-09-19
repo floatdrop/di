@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 func TestStartRollsBackOnFailure(t *testing.T) {

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dislog"
+	"golang.yandex/di"
+	"golang.yandex/di/dislog"
 )
 
 // logger writes text lines into buf with the parts that move -- the
@@ -150,7 +150,7 @@ func TestNewOnARunningScope(t *testing.T) {
 
 	// The import path is lifted out of the name, so the service reads the way
 	// it is written in Go.
-	const svc = "service=*dislog_test.DB pkg=github.com/floatdrop/di/dislog_test"
+	const svc = "service=*dislog_test.DB pkg=golang.yandex/di/dislog_test"
 	want := []string{
 		`level=INFO msg=build ` + svc + ` scope=root duration=1ms`,
 		`level=INFO msg=start ` + svc + ` scope=root duration=1ms`,

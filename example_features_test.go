@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Session struct{ ID string }
@@ -69,6 +69,6 @@ func ExampleScope_Observe() {
 	app.Get[*Cache]()
 	_ = app.Stop(context.Background())
 	// Output:
-	// build *github.com/floatdrop/di_test.Cache <nil>
-	// stop *github.com/floatdrop/di_test.Cache di: stopping *github.com/floatdrop/di_test.Cache: flush failed
+	// build *golang.yandex/di_test.Cache <nil>
+	// stop *golang.yandex/di_test.Cache di: stopping *golang.yandex/di_test.Cache: flush failed
 }

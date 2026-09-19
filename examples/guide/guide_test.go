@@ -11,13 +11,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
-	"github.com/floatdrop/di/examples/guide/internal/api"
-	"github.com/floatdrop/di/examples/guide/internal/cache"
-	"github.com/floatdrop/di/examples/guide/internal/config"
-	"github.com/floatdrop/di/examples/guide/internal/mail"
-	"github.com/floatdrop/di/examples/guide/internal/storage"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
+	"golang.yandex/di/examples/guide/internal/api"
+	"golang.yandex/di/examples/guide/internal/cache"
+	"golang.yandex/di/examples/guide/internal/config"
+	"golang.yandex/di/examples/guide/internal/mail"
+	"golang.yandex/di/examples/guide/internal/storage"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/explain.txt from the current wiring")
@@ -98,7 +98,7 @@ func TestStartAndStop(t *testing.T) {
 	}
 }
 
-var modulePath = regexp.MustCompile(`github\.com/floatdrop/di/examples/guide/internal/`)
+var modulePath = regexp.MustCompile(`golang\.yandex/di/examples/guide/internal/`)
 
 // relative strips the machine-specific directory and the module path from
 // registration sites, leaving internal/storage/storage.go:41.

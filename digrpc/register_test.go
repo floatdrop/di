@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/digrpc"
+	"golang.yandex/di"
+	"golang.yandex/di/digrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

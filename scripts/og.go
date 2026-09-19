@@ -117,8 +117,8 @@ func compose(logo string) (string, error) {
 	p := func(format string, args ...any) { fmt.Fprintf(&sb, format+"\n", args...) }
 
 	p(`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img" aria-labelledby="title description">`, width, height, width, height)
-	p(`  <title id="title">floatdrop/di — dependency injection for Go</title>`)
-	p(`  <desc id="description">The di gopher joining two cable connectors, beside the words: di, dependency injection for Go, built on generic methods, and the command go get github.com/floatdrop/di.</desc>`)
+	p(`  <title id="title">golang.yandex/di — dependency injection for Go</title>`)
+	p(`  <desc id="description">The di gopher joining two cable connectors, beside the words: di, dependency injection for Go, built on generic methods, and the command go get golang.yandex/di.</desc>`)
 	p(`  <rect width="%d" height="%d" fill="%s"/>`, width, height, paper)
 
 	// The cable runs off the bottom of the card as a rule the width of the
@@ -138,7 +138,7 @@ func compose(logo string) (string, error) {
 
 	// The install line, in the box the site puts it in.
 	p(`  <rect x="%.0f" y="452" width="596" height="72" rx="14" fill="none" stroke="%s" stroke-width="2.5" opacity="0.28"/>`, textX, ink)
-	p(`  <text x="%.0f" y="497" font-family="%s" font-size="29" fill="%s" opacity="0.92">go get github.com/floatdrop/di</text>`, textX+28, mono, ink)
+	p(`  <text x="%.0f" y="497" font-family="%s" font-size="29" fill="%s" opacity="0.92">go get golang.yandex/di</text>`, textX+28, mono, ink)
 
 	p(`</svg>`)
 	return sb.String(), nil

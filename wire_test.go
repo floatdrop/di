@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // A four-service graph with one interface dependency, built from plain
@@ -284,7 +284,7 @@ func TestNeedsRejections(t *testing.T) {
 		want string
 		wire func(*di.Scope)
 	}{
-		{"no such parameter", "matches no *github.com/floatdrop/di_test.wTracer parameter", func(s *di.Scope) {
+		{"no such parameter", "matches no *golang.yandex/di_test.wTracer parameter", func(s *di.Scope) {
 			s.Wire[*wRepo](newWRepo).Needs(di.Optional[*wTracer]())
 		}},
 		{"group needs a slice parameter", "matches no []di_test.wRoute parameter", func(s *di.Scope) {

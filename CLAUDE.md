@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-`github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
+`golang.yandex/di` is a dependency-injection container for Go 1.27+ built
 on generic methods, with no dependency outside the standard library.
 [`docs/DESIGN.md`](docs/DESIGN.md) is the model — resolution, lifetimes, phases,
 cycles, teardown, with diagrams. This file is the working detail behind it; the
@@ -558,9 +558,13 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   the root module keeps zero requires. A root `go test ./...` does not cover the
   examples and `golangci-lint run ./...` does not lint them; CI runs them in
   their own step. `gofmt -l .` still walks both.
-- **`digrpc/` is a separate module too, but one that is imported**, so it has
-  no `replace`: it requires a released `di`, and bumping that requirement is
-  how it picks up a library change. Tag it as a nested module,
+- **`digrpc/` is a separate module too, but one that is imported**, so it
+  normally carries no `replace`: it requires a released `di`, and bumping that
+  requirement is how it picks up a library change. It carries one now, because
+  nothing is released under `golang.yandex/di` yet — drop the `replace` and
+  require the first release under the new path before tagging `digrpc`, or
+  whoever imports it gets a version that does not exist. Tag it as a nested
+  module,
   `digrpc/vX.Y.Z`; `release.yml` matches `v*` only, so those tags publish no
   GitHub release and need no CHANGELOG section. Its tests use grpc's own
   health service over `bufconn`, so nothing is generated from protobuf. The

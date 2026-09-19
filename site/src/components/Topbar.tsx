@@ -27,7 +27,7 @@ export function Topbar({ content, names }: TopbarProps) {
 			<div className="di-page di-topbar__inner">
 				<a className="di-topbar__brand" href={url(localePath[locale], depth)}>
 					<Logo frame="face" className="di-topbar__mark" />
-					floatdrop/di
+					golang.yandex/di
 				</a>
 
 				<div className="di-controls">

@@ -21,9 +21,9 @@ package bench
 import (
 	"testing"
 
-	"github.com/floatdrop/di"
 	"github.com/samber/do/v2"
 	"go.uber.org/dig"
+	"golang.yandex/di"
 )
 
 type Cfg struct{ dsn string }

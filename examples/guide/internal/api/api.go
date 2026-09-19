@@ -14,11 +14,11 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
-	"github.com/floatdrop/di/examples/guide/internal/config"
-	"github.com/floatdrop/di/examples/guide/internal/mail"
-	"github.com/floatdrop/di/examples/guide/internal/storage"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
+	"golang.yandex/di/examples/guide/internal/config"
+	"golang.yandex/di/examples/guide/internal/mail"
+	"golang.yandex/di/examples/guide/internal/storage"
 )
 
 // caller is who is making the request. It depends on the *http.Request, which

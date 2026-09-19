@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
 )
 
 // Eager on a group member builds it at Start.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // Fixtures for Validate: an application graph with a request-scoped service
@@ -93,7 +93,7 @@ func TestValidateMissingSingletonDependency(t *testing.T) {
 		t.Fatalf("want one ErrNotProvided, got %v", v.Errors)
 	}
 	msg := v.Err().Error()
-	if !strings.Contains(msg, "valDB") || !strings.Contains(msg, "needed by [*github.com/floatdrop/di_test.valRepo]") || !strings.Contains(msg, "validate_test.go") {
+	if !strings.Contains(msg, "valDB") || !strings.Contains(msg, "needed by [*golang.yandex/di_test.valRepo]") || !strings.Contains(msg, "validate_test.go") {
 		t.Fatalf("message should name the key, the path and the site: %s", msg)
 	}
 }

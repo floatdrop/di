@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 func TestRepo(t *testing.T) {

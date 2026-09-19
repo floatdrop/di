@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/digrpc"
+	"golang.yandex/di"
+	"golang.yandex/di/digrpc"
 	"google.golang.org/grpc"
 )
 

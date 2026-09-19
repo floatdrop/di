@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type fakeTB struct {

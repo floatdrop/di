@@ -10,13 +10,13 @@
 //
 // It is a separate module, so the library itself does not depend on grpc:
 //
-//	go get github.com/floatdrop/di/digrpc
+//	go get golang.yandex/di/digrpc
 package digrpc
 
 import (
 	"context"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 	"google.golang.org/grpc"
 )
 

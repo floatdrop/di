@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct{ DSN string }

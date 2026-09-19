@@ -5,7 +5,7 @@
 # di
 
 [![CI](https://github.com/floatdrop/di/actions/workflows/ci.yml/badge.svg)](https://github.com/floatdrop/di/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/floatdrop/di.svg)](https://pkg.go.dev/github.com/floatdrop/di)
+[![Go Reference](https://pkg.go.dev/badge/golang.yandex/di.svg)](https://pkg.go.dev/golang.yandex/di)
 [![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Ffloatdrop.github.io%2Fdi%2Fcoverage.json)](https://floatdrop.github.io/di/coverage.html)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Awesome Go](https://raw.githubusercontent.com/floatdrop/awesome-go/main/badges/floatdrop--di.svg)](https://floatdrop.github.io/awesome-go/#floatdrop--di)
@@ -36,7 +36,7 @@ file by file. [**How it works**](docs/DESIGN.md) explains what happens between
 ## Installation
 
 ```sh
-go get github.com/floatdrop/di
+go get golang.yandex/di
 ```
 
 Requires Go 1.27 or newer. Editor support for generic methods needs gopls
@@ -54,7 +54,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct{ DSN string }
@@ -313,7 +313,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type DB struct{ dsn string }
@@ -378,7 +378,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type DB struct{ dsn string }
@@ -418,7 +418,7 @@ handler returns. It has the `func(http.Handler) http.Handler` shape.
 `dihttp.Module` registers one:
 
 ```go
-import "github.com/floatdrop/di/dihttp"
+import "golang.yandex/di/dihttp"
 
 app.Use(dihttp.Module, api.Module)
 
@@ -453,7 +453,7 @@ srv := &http.Server{Handler: dihttp.NewMiddleware(app)(mux)}
 ```
 
 For gRPC, [`digrpc`](digrpc) is the same adapter as a separate module, so
-the library itself does not depend on grpc: `go get github.com/floatdrop/di/digrpc`.
+the library itself does not depend on grpc: `go get golang.yandex/di/digrpc`.
 Its `Interceptor` opens a scope per call holding a `*digrpc.Call`, the method
 and the incoming context, and `Module` provides it. `digrpc.Register[*Users](srv, &pb.Users_ServiceDesc)`
 serves a generated service with an implementation resolved from that scope,
@@ -487,8 +487,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/digrpc"
+	"golang.yandex/di"
+	"golang.yandex/di/digrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
@@ -629,7 +629,7 @@ import (
 	"log"
 	"sync/atomic"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct{ RateLimit int }
@@ -789,7 +789,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type DB struct{ dsn string }
@@ -845,7 +845,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type DB struct{ dsn string }
@@ -1014,7 +1014,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Store interface{ Get(key string) string }
@@ -1097,7 +1097,7 @@ package app
 import (
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 func TestRepo(t *testing.T) {
@@ -1134,7 +1134,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct{ DSN string }
@@ -1300,7 +1300,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct{ DSN string }
@@ -1386,9 +1386,9 @@ import (
 	"os"
 
 	charm "github.com/charmbracelet/log"
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dislog"
-	"github.com/floatdrop/di/examples/observe/internal/store"
+	"golang.yandex/di"
+	"golang.yandex/di/dislog"
+	"golang.yandex/di/examples/observe/internal/store"
 )
 
 type Repo struct{ db *store.DB }

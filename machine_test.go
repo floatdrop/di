@@ -40,7 +40,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // ---- the services under test ----------------------------------------------

@@ -19,6 +19,32 @@ below says plainly whether an upgrade can break a caller.
   `Scoped` when it takes the call, is built after the server's interceptors
   have run, and a constructor's status error fails the call with that status.
 
+### Changed
+
+- **The module path is now `golang.yandex/di`**, and `dihttp`, `dislog` and
+  `digrpc` move with it. This breaks every caller: change the `go.mod`
+  requirement and the imports together, since the old and new paths are two
+  modules as far as the toolchain is concerned and a build graph containing
+  both would link two copies of the container. No identifier, signature or
+  behaviour changed, so the edit is the path and nothing else:
+
+      go mod edit -droprequire github.com/floatdrop/di
+      go get golang.yandex/di@latest
+      grep -rl '"github.com/floatdrop/di' --include='*.go' . \
+        | xargs perl -pi -e 's{"github\.com/floatdrop/di}{"golang.yandex/di}g'
+      gofmt -w .   # the new path sorts elsewhere in a mixed import block
+
+  The rewrite is anchored on the opening quote so that it touches import
+  paths only, and leaves a `https://github.com/floatdrop/di/...` link in a
+  comment pointing where it still points.
+
+  A service's reported name carries its package path, so anything asserting on
+  `Explain`, `Graph`, `Modules` or an `Event.Service` of a type declared in
+  this module sees the new prefix.
+
+  The source stays on GitHub at <https://github.com/floatdrop/di>; only the
+  import path moved.
+
 ## [0.17.1] - 2026-09-19
 
 `go doc -all` against 0.17.0 adds `dihttp.HandleFunc` and changes nothing

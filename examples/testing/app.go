@@ -2,7 +2,7 @@
 // production graph into a fresh scope, then override before resolving.
 package app
 
-import "github.com/floatdrop/di"
+import "golang.yandex/di"
 
 type DB struct{ DSN string }
 type Repo struct{ DB *DB }

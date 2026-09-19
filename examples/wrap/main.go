@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Store interface{ Get(key string) string }

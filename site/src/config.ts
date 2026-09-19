@@ -1,5 +1,5 @@
 export const REPO = 'https://github.com/floatdrop/di';
-export const PKG_DOC = 'https://pkg.go.dev/github.com/floatdrop/di';
+export const PKG_DOC = 'https://pkg.go.dev/golang.yandex/di';
 
 /**
  * GitHub Pages serves a project site under /<repo>; the workflow sets

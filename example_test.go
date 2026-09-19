@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Server struct{ repo *Repo }

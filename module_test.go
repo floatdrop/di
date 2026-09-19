@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type modDB struct{ tag string }
