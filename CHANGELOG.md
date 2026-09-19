@@ -7,6 +7,14 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Added
+
+- `digrpc`, the gRPC counterpart of `dihttp`, as a separate module so the
+  library keeps no dependency: `digrpc.Interceptor` opens a child scope per
+  call holding a `*digrpc.Call`, `digrpc.Module` provides it, and
+  `Interceptor.Options()` gives the server options. It is versioned on its
+  own, as `digrpc/vX.Y.Z`.
+
 ## [0.17.1] - 2026-09-19
 
 `go doc -all` against 0.17.0 adds `dihttp.HandleFunc` and changes nothing

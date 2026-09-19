@@ -19,6 +19,7 @@ jobs:
           check-latest: true
           cache-dependency-path: |
             benchmarks/go.sum
+            digrpc/go.sum
             examples/go.sum
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -d . && exit 1)
@@ -28,6 +29,16 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.1
+      - name: lint digrpc
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.1
+          working-directory: digrpc
+      - name: digrpc vet and test
+        working-directory: digrpc
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
       - name: README examples are in sync
         run: go run github.com/campoy/embedmd@v1.0.0 -d README.md
       - name: examples vet, test and run
