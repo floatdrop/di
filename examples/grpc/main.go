@@ -44,6 +44,8 @@ type Health struct {
 	db *DB
 }
 
+func NewHealth(db *DB) *Health { return &Health{db: db} }
+
 func (h *Health) Check(ctx context.Context, _ *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
 	scope, _ := di.FromContext(ctx)
 	caller := scope.Get[*Caller]()
@@ -66,7 +68,7 @@ func main() {
 	app.Wire[*DB](func() *DB { return &DB{dsn: "postgres://localhost/app"} }).
 		OnStop(func(ctx context.Context, db *DB) error { log.Println("db closed"); return nil })
 	app.Wire[*Caller](NewCaller).Scoped()
-	app.Wire[*Health](func(db *DB) *Health { return &Health{db: db} })
+	app.Wire[*Health](NewHealth)
 
 	app.Wire[*grpc.Server](NewServer).
 		Eager().
