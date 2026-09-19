@@ -73,3 +73,22 @@ func ExampleModule() {
 	// <nil>
 	// hello ada
 }
+
+// A router whose route methods take an http.HandlerFunc, as chi's do, gets
+// the same handler through HandleFunc.
+func ExampleHandleFunc() {
+	app := di.New()
+	app.Wire[*Caller](func(r *http.Request) *Caller { return &Caller{Name: r.Header.Get("X-Caller")} }).Scoped()
+	app.Wire[*Greetings](NewGreetings).Scoped()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /hello", dihttp.HandleFunc((*Greetings).Hello))
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/hello", nil)
+	r.Header.Set("X-Caller", "ada")
+	dihttp.NewMiddleware(app)(mux).ServeHTTP(rec, r)
+	fmt.Print(rec.Body.String())
+	// Output:
+	// hello ada
+}

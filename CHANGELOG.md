@@ -7,6 +7,15 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+`go doc -all` against 0.17.0 adds `dihttp.HandleFunc` and changes nothing
+else; nothing breaks.
+
+### Added
+
+- `dihttp.HandleFunc(method)` is `dihttp.Handle` as an `http.HandlerFunc`, for
+  routers whose route methods take one rather than an `http.Handler`:
+  `r.Get("/users/{id}", dihttp.HandleFunc((*Users).Show))` on a chi router.
+
 ## [0.17.0] - 2026-09-18
 
 What a comparison with `uber/fx` turned up: a group or optional parameter can
