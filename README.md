@@ -431,7 +431,9 @@ func NewServer(cfg Config, mw dihttp.Middleware) *http.Server {
 ```
 
 `dihttp.Handle` resolves a handler type from the request's scope and calls
-the method; mark the type `Scoped()` when it needs the request. Services
+the method; mark the type `Scoped()` when it needs the request.
+`dihttp.HandleFunc` is the same as an `http.HandlerFunc`, for a router such as
+chi whose `Get` and `Post` take one. Services
 that depend on the request are declared once, in the root, as `Scoped()`:
 
 ```go

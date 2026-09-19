@@ -65,11 +65,20 @@ func NewMiddleware(s *di.Scope) Middleware {
 // time panics with the error, which net/http recovers and logs with the
 // request; Validate at startup is what keeps that from happening.
 func Handle[H any](method func(H, http.ResponseWriter, *http.Request)) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return HandleFunc(method)
+}
+
+// HandleFunc is Handle as an http.HandlerFunc, for routers whose route
+// methods take one rather than an http.Handler; it resolves and fails as
+// Handle does:
+//
+//	r.Get("/users/{id}", dihttp.HandleFunc((*Users).Show))
+func HandleFunc[H any](method func(H, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		req, ok := di.FromContext(r.Context())
 		if !ok {
 			panic("dihttp: no request scope on the context; is the Middleware above this handler?")
 		}
 		method(req.Get[H](), w, r)
-	})
+	}
 }
