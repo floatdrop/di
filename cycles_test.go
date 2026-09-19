@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // A constructor may resolve its dependencies from several goroutines. The

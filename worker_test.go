@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // A Go hook that dies on its own is reported by Stop, not only by Run.

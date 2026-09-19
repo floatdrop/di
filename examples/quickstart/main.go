@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct{ DSN string }

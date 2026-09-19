@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-`github.com/floatdrop/di` is a dependency-injection container for Go 1.27+ built
+`golang.yandex/di` is a dependency-injection container for Go 1.27+ built
 on generic methods, with no dependency outside the standard library.
 [`docs/DESIGN.md`](docs/DESIGN.md) is the model — resolution, lifetimes, phases,
 cycles, teardown, with diagrams. This file is the working detail behind it; the

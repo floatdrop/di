@@ -22,7 +22,7 @@ export const ja: Content = {
 				で解決すれば、あとはコンテナが生成し、起動し、停止し、グラフを検査します。コード生成なし、依存パッケージなし。
 			</>
 		),
-		install: 'go get github.com/floatdrop/di'
+		install: 'go get golang.yandex/di'
 	},
 
 	labels: {
@@ -269,7 +269,7 @@ export const ja: Content = {
 
 	footer: (
 		<>
-			<Link href={REPO}>github.com/floatdrop/di</Link> · <Link href={PKG_DOC}>pkg.go.dev</Link> ·
+			<Link href={REPO}>golang.yandex/di</Link> · <Link href={PKG_DOC}>pkg.go.dev</Link> ·
 			MIT ライセンス · このページはリポジトリの<C>site/</C>
 			ディレクトリから作られ、掲載しているコードは<C>examples/guide/</C>のものです。
 		</>

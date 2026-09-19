@@ -2,13 +2,13 @@
 // dependency-free: charmbracelet/log is a dependency of the examples only.
 // The module path is the directory's old import path, so nothing an example
 // imports had to change.
-module github.com/floatdrop/di/examples
+module golang.yandex/di/examples
 
 go 1.27
 
 require (
 	github.com/charmbracelet/log v1.0.0
-	github.com/floatdrop/di v0.0.0
+	golang.yandex/di v0.0.0
 )
 
 require (
@@ -29,4 +29,4 @@ require (
 	golang.org/x/sys v0.30.0 // indirect
 )
 
-replace github.com/floatdrop/di => ../
+replace golang.yandex/di => ../

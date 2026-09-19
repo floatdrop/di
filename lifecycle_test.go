@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 func TestStoppedChildIsDetached(t *testing.T) {
@@ -114,7 +114,7 @@ func TestMustInsideConstructor(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
-	if !strings.Contains(err.Error(), "building *github.com/floatdrop/di_test.DB") {
+	if !strings.Contains(err.Error(), "building *golang.yandex/di_test.DB") {
 		t.Fatalf("error should name the failing service: %v", err)
 	}
 	if v := s.Must(42, nil); v != 42 {

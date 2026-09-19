@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // Fixtures for Wrap: a Store interface, one implementation, and wrappers

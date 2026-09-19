@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type (
@@ -34,7 +34,7 @@ var explainSite = regexp.MustCompile(` \(provided at [^)]*\)`)
 
 func compact(s string) string {
 	s = explainSite.ReplaceAllString(s, "")
-	return strings.ReplaceAll(s, "github.com/floatdrop/di_test.", "")
+	return strings.ReplaceAll(s, "golang.yandex/di_test.", "")
 }
 
 func wantExplain(t *testing.T, got, want string) {

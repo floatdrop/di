@@ -51,7 +51,7 @@
 // it naming both sites. That marker is the test seam: wire the production
 // graph into a fresh scope, then override what you want faked before anything
 // is resolved ([Test] does the bookkeeping). For HTTP,
-// [github.com/floatdrop/di/dihttp.Middleware] gives each request a child
+// [golang.yandex/di/dihttp.Middleware] gives each request a child
 // scope holding the *http.Request, reachable through [FromContext].
 //
 // # Modules

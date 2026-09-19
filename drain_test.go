@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
 )
 
 // A request in flight when Stop begins keeps its scope until the server

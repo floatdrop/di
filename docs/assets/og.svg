@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
-  <title id="title">floatdrop/di — dependency injection for Go</title>
-  <desc id="description">The di gopher joining two cable connectors, beside the words: di, dependency injection for Go, built on generic methods, and the command go get github.com/floatdrop/di.</desc>
+  <title id="title">golang.yandex/di — dependency injection for Go</title>
+  <desc id="description">The di gopher joining two cable connectors, beside the words: di, dependency injection for Go, built on generic methods, and the command go get golang.yandex/di.</desc>
   <rect width="1280" height="640" fill="#FFFDF8"/>
   <rect x="0" y="630" width="1280" height="10" fill="#79D6E8"/>
   <rect x="0" y="630" width="572" height="10" fill="#F58068"/>
@@ -77,5 +77,5 @@
     <text x="572" y="394" font-size="44" font-weight="500" opacity="0.88">built on generic methods.</text>
   </g>
   <rect x="572" y="452" width="596" height="72" rx="14" fill="none" stroke="#27343B" stroke-width="2.5" opacity="0.28"/>
-  <text x="600" y="497" font-family="SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="29" fill="#27343B" opacity="0.92">go get github.com/floatdrop/di</text>
+  <text x="600" y="497" font-family="SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="29" fill="#27343B" opacity="0.92">go get golang.yandex/di</text>
 </svg>

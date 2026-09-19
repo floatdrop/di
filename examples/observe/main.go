@@ -9,9 +9,9 @@ import (
 	"os"
 
 	charm "github.com/charmbracelet/log"
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dislog"
-	"github.com/floatdrop/di/examples/observe/internal/store"
+	"golang.yandex/di"
+	"golang.yandex/di/dislog"
+	"golang.yandex/di/examples/observe/internal/store"
 )
 
 type Repo struct{ db *store.DB }

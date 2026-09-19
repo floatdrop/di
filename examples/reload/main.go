@@ -10,7 +10,7 @@ import (
 	"log"
 	"sync/atomic"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct{ RateLimit int }

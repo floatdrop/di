@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/examples/guide/internal/config"
-	"github.com/floatdrop/di/examples/guide/internal/storage"
+	"golang.yandex/di"
+	"golang.yandex/di/examples/guide/internal/config"
+	"golang.yandex/di/examples/guide/internal/storage"
 )
 
 // The production modules, with the configuration overridden: the store is

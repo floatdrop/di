@@ -5,7 +5,7 @@ import (
 	"cmp"
 	"os"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 type Config struct {

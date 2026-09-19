@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // Handler is per request: it needs a root singleton and the request itself.

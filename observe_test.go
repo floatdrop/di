@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
 )
 
 func kinds(evs []di.Event) string {
@@ -41,7 +41,7 @@ func TestObserveSeesWholeLifecycle(t *testing.T) {
 	if got := kinds(evs); got != "build,start,shutdown,stop!" {
 		t.Fatalf("got %q", got)
 	}
-	if evs[0].Service != "*github.com/floatdrop/di_test.DB" || evs[0].Scope != "root" || !strings.Contains(evs[0].Site, "observe_test.go") {
+	if evs[0].Service != "*golang.yandex/di_test.DB" || evs[0].Scope != "root" || !strings.Contains(evs[0].Site, "observe_test.go") {
 		t.Fatalf("build event %+v", evs[0])
 	}
 }
@@ -141,7 +141,7 @@ func TestEventPackage(t *testing.T) {
 	s.Get[map[string]int]()
 	s.Shutdown(nil) // names no service, so no package either
 
-	const pkg = "github.com/floatdrop/di_test"
+	const pkg = "golang.yandex/di_test"
 	want := map[string]string{
 		"*" + pkg + ".DB": pkg,
 		"map[string]int":  "",

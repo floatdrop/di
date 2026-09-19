@@ -12,7 +12,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // Middleware gives every request its own child scope of the application

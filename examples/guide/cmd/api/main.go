@@ -10,14 +10,14 @@ import (
 	"time"
 
 	charm "github.com/charmbracelet/log"
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/dihttp"
-	"github.com/floatdrop/di/dislog"
-	"github.com/floatdrop/di/examples/guide/internal/api"
-	"github.com/floatdrop/di/examples/guide/internal/cache"
-	"github.com/floatdrop/di/examples/guide/internal/config"
-	"github.com/floatdrop/di/examples/guide/internal/mail"
-	"github.com/floatdrop/di/examples/guide/internal/storage"
+	"golang.yandex/di"
+	"golang.yandex/di/dihttp"
+	"golang.yandex/di/dislog"
+	"golang.yandex/di/examples/guide/internal/api"
+	"golang.yandex/di/examples/guide/internal/cache"
+	"golang.yandex/di/examples/guide/internal/config"
+	"golang.yandex/di/examples/guide/internal/mail"
+	"golang.yandex/di/examples/guide/internal/storage"
 )
 
 func main() {

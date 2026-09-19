@@ -3,9 +3,9 @@ package cache
 import (
 	"testing"
 
-	"github.com/floatdrop/di"
-	"github.com/floatdrop/di/examples/guide/internal/config"
-	"github.com/floatdrop/di/examples/guide/internal/storage"
+	"golang.yandex/di"
+	"golang.yandex/di/examples/guide/internal/config"
+	"golang.yandex/di/examples/guide/internal/storage"
 )
 
 // An internal test, since the cache is private: only this package can name

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // A small application in four modules, registered in order, plus one

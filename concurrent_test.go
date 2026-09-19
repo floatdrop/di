@@ -43,7 +43,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // ---- the stop-order oracle -------------------------------------------------

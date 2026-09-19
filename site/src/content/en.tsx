@@ -23,7 +23,7 @@ export const en: Content = {
 				start, stop and check the graph. No code generation, no dependencies.
 			</>
 		),
-		install: 'go get github.com/floatdrop/di'
+		install: 'go get golang.yandex/di'
 	},
 
 	labels: {
@@ -285,7 +285,7 @@ export const en: Content = {
 
 	footer: (
 		<>
-			<Link href={REPO}>github.com/floatdrop/di</Link> ·{' '}
+			<Link href={REPO}>golang.yandex/di</Link> ·{' '}
 			<Link href={PKG_DOC}>pkg.go.dev</Link> · MIT licensed · This page is built from the
 			repository's <C>site/</C> directory and the code it shows from <C>examples/guide/</C>.
 		</>

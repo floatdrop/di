@@ -16,7 +16,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // New returns a function for [di.Scope.Observe] that logs each event

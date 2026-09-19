@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/floatdrop/di"
+	"golang.yandex/di"
 )
 
 // An instance built concurrently with Start must be started by exactly one
