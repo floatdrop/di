@@ -14,8 +14,8 @@ registry, `freeze`, parent-chain readers), `resolve.go` (resolution path, both
 cycle detectors, build step, `Get`), `lifecycle.go` (instance phase machine,
 hooks, `Start`, `Stop`), `run.go` (`Run`, `Shutdown`), `explain.go` (renders the
 recorded graph), `validate.go` (checks the declared graph). Plus the net/http
-adapter `dihttp/`, the slog bridge `dislog/`, tests, and two separate modules,
-`examples/` and `benchmarks/`.
+adapter `dihttp/`, the slog bridge `dislog/`, tests, and three separate modules:
+the gRPC adapter `digrpc/`, `examples/` and `benchmarks/`.
 
 ## Working rules
 
@@ -49,6 +49,7 @@ go run github.com/campoy/embedmd@v1.0.0 -w README.md   # re-embed after editing 
 go run scripts/og.go                          # redraw the social card after a logo change
 cd benchmarks && go test -bench . -benchmem   # separate module
 cd examples && go test ./...                  # separate module
+cd digrpc && go test -race ./... && golangci-lint run ./...   # separate module
 cd examples && go test ./guide -update        # rewrite testdata/ after rewiring the guide app
 cd site && npm ci && npm run check && npm run build   # guide site; BASE_PATH=/di for Pages
 
@@ -557,6 +558,13 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   the root module keeps zero requires. A root `go test ./...` does not cover the
   examples and `golangci-lint run ./...` does not lint them; CI runs them in
   their own step. `gofmt -l .` still walks both.
+- **`digrpc/` is a separate module too, but one that is imported**, so it has
+  no `replace`: it requires a released `di`, and bumping that requirement is
+  how it picks up a library change. Tag it as a nested module,
+  `digrpc/vX.Y.Z`; `release.yml` matches `v*` only, so those tags publish no
+  GitHub release and need no CHANGELOG section. Its tests use grpc's own
+  health service over `bufconn`, so nothing is generated from protobuf. The
+  coverage badge does not include it.
 - **`dislog/` is the slog bridge for `Observe`** and imports nothing but
   `log/slog` and the library. `dislog.New` returns the `func(di.Event)` that
   `Observe` takes, not a `slog.Handler`. Failed steps log at Error with the site

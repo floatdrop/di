@@ -452,6 +452,25 @@ mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
 srv := &http.Server{Handler: dihttp.NewMiddleware(app)(mux)}
 ```
 
+For gRPC, [`digrpc`](digrpc) is the same adapter as a separate module, so
+the library itself does not depend on grpc: `go get github.com/floatdrop/di/digrpc`.
+Its `Interceptor` opens a scope per call holding a `*digrpc.Call`, the method
+and the incoming context; `Module` provides it; a service implementation
+reaches the scope with `di.FromContext`:
+
+```go
+app.Use(digrpc.Module)
+app.Wire[*Caller](func(c *digrpc.Call) *Caller {
+    md, _ := metadata.FromIncomingContext(c.Context)
+    return &Caller{Name: strings.Join(md.Get("x-caller"), ",")}
+}).Scoped()
+app.Wire[*grpc.Server](NewServer)
+
+func NewServer(ic digrpc.Interceptor) *grpc.Server {
+    return grpc.NewServer(ic.Options()...)
+}
+```
+
 `di.WithScope` and `di.FromContext` are the primitives without `net/http`.
 [`examples/guide`](examples/guide) is a complete application, module by
 module, and [the guide](https://floatdrop.github.io/di/) walks through it.
