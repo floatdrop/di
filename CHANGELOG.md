@@ -7,6 +7,8 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-09-19
+
 `go doc -all` against 0.17.0 adds `dihttp.HandleFunc` and changes nothing
 else; nothing breaks.
 
@@ -1100,7 +1102,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/floatdrop/di/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/floatdrop/di/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/floatdrop/di/compare/v0.16.2...v0.17.0
 [0.16.2]: https://github.com/floatdrop/di/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/floatdrop/di/compare/v0.16.0...v0.16.1
