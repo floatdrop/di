@@ -1,8 +1,9 @@
 // Graceful shutdown of a gRPC server, with a service built per call.
 //
 // The digrpc interceptor opens a scope for every call and registers the
-// *digrpc.Call in it, so a Caller declared Scoped is built per call from the
-// call's metadata. Run starts the scope, waits for SIGINT/SIGTERM or a
+// *digrpc.Call in it, and digrpc.Register serves the health service with an
+// implementation resolved from that scope, so a Scoped Health is built per
+// call with a Caller read from the call's metadata. Run starts the scope, waits for SIGINT/SIGTERM or a
 // Shutdown call, then stops everything in reverse order with a bounded
 // context. The server's OnDrain calls GracefulStop, which stops accepting
 // calls and waits for in-flight ones. Draining runs before anything is torn
@@ -36,28 +37,27 @@ func NewCaller(c *digrpc.Call) *Caller {
 	return &Caller{Name: cmp.Or(strings.Join(md.Get("x-caller"), ","), "anonymous")}
 }
 
-// Health is a service implementation. grpc registers one value for the whole
-// server, so it is a singleton that reaches per-call services through the
-// scope on its context.
+// Health is the service implementation, built per call because it takes the
+// Caller. Methods it does not define fall through to the embedded type.
 type Health struct {
 	grpc_health_v1.UnimplementedHealthServer
-	db *DB
+	db     *DB
+	caller *Caller
 }
 
-func NewHealth(db *DB) *Health { return &Health{db: db} }
+func NewHealth(db *DB, c *Caller) *Health { return &Health{db: db, caller: c} }
 
-func (h *Health) Check(ctx context.Context, _ *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
-	scope, _ := di.FromContext(ctx)
-	caller := scope.Get[*Caller]()
+func (h *Health) Check(context.Context, *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
 	time.Sleep(2 * time.Second) // simulate slow work that must not be cut short
-	log.Println("checked by", caller.Name, "against", h.db.dsn)
+	log.Println("checked by", h.caller.Name, "against", h.db.dsn)
 	return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVING}, nil
 }
 
-// NewServer is a plain constructor: the interceptor arrives as a dependency.
-func NewServer(ic digrpc.Interceptor, h *Health) *grpc.Server {
+// NewServer is a plain constructor: the interceptor arrives as a dependency,
+// and Register resolves *Health from each call's scope.
+func NewServer(ic digrpc.Interceptor) *grpc.Server {
 	srv := grpc.NewServer(ic.Options()...)
-	grpc_health_v1.RegisterHealthServer(srv, h)
+	digrpc.Register[*Health](srv, &grpc_health_v1.Health_ServiceDesc)
 	return srv
 }
 
@@ -68,7 +68,7 @@ func main() {
 	app.Wire[*DB](func() *DB { return &DB{dsn: "postgres://localhost/app"} }).
 		OnStop(func(ctx context.Context, db *DB) error { log.Println("db closed"); return nil })
 	app.Wire[*Caller](NewCaller).Scoped()
-	app.Wire[*Health](NewHealth)
+	app.Wire[*Health](NewHealth).Scoped()
 
 	app.Wire[*grpc.Server](NewServer).
 		Eager().

@@ -14,6 +14,10 @@ below says plainly whether an upgrade can break a caller.
   call holding a `*digrpc.Call`, `digrpc.Module` provides it, and
   `Interceptor.Options()` gives the server options. It is versioned on its
   own, as `digrpc/vX.Y.Z`.
+- `digrpc.Register[H](srv, desc)`, in `digrpc/v0.2.0`, serves a generated
+  service with an `H` resolved from each call's scope: the implementation is
+  `Scoped` when it takes the call, is built after the server's interceptors
+  have run, and a constructor's status error fails the call with that status.
 
 ## [0.17.1] - 2026-09-19
 

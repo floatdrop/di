@@ -2,7 +2,9 @@
 //
 // An [Interceptor] gives every call its own child scope holding a [*Call],
 // so services that depend on the call are declared once in the application
-// scope as Scoped and built per call. A handler reaches the scope through
+// scope as Scoped and built per call. [Register] serves a generated service
+// with an implementation resolved from that scope, so the implementation is
+// such a service too; one registered the plain way reaches the scope through
 // [di.FromContext] on the context it is given. [Module] registers the
 // interceptor as a service; [New] makes one directly.
 //
