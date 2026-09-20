@@ -588,8 +588,6 @@ func main() {
 </details>
 
 `di.WithScope` and `di.FromContext` are the primitives without `net/http`.
-[`examples/guide`](examples/guide) is a complete application, module by
-module, and [the guide](https://floatdrop.github.io/di/) walks through it.
 
 #### Values that change
 
