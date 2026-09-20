@@ -566,6 +566,16 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   health service over `bufconn`, so nothing is generated from protobuf. The
   coverage badge does not include it. `examples/` reaches it through a second
   `replace`, and `examples/grpc` is the lifecycle example the README embeds.
+  `Register[H]` copies the generated `ServiceDesc` with its handlers replaced:
+  a unary wrapper hands the generated handler a fake interceptor, so the
+  generated code still decodes and builds the info, then runs the server's
+  real chain with a handler that resolves `H` and calls the method through
+  `reflect`; a stream wrapper resolves `H` and passes it to the generated
+  handler unchanged, since stream interceptors run outside it. `H` is
+  therefore built after every interceptor, the info's `Server` is nil, and a
+  constructor's status is taken from inside the build error with
+  `errors.AsType` so the client never sees the registration site. That rests
+  on `grpc.MethodHandler` being the public contract it is documented as.
 - **`dislog/` is the slog bridge for `Observe`** and imports nothing but
   `log/slog` and the library. `dislog.New` returns the `func(di.Event)` that
   `Observe` takes, not a `slog.Handler`. Failed steps log at Error with the site
