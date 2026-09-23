@@ -1,14 +1,14 @@
 // Separate module, like examples/ and benchmarks/, so the library itself
 // stays dependency-free: google.golang.org/grpc is a dependency of this
 // adapter only. It requires a released di rather than a replace, because a
-// replace is ignored by whoever imports this module -- the replace below is
-// temporary, until di is released under the new path.
+// replace is ignored by whoever imports this module: bumping the requirement
+// below is how this adapter picks up a library change.
 module golang.yandex/di/digrpc
 
 go 1.27
 
 require (
-	golang.yandex/di v0.0.0
+	golang.yandex/di v0.17.2
 	google.golang.org/grpc v1.84.0
 )
 
@@ -19,5 +19,3 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace golang.yandex/di => ../

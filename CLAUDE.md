@@ -559,12 +559,11 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   examples and `golangci-lint run ./...` does not lint them; CI runs them in
   their own step. `gofmt -l .` still walks both.
 - **`digrpc/` is a separate module too, but one that is imported**, so it
-  normally carries no `replace`: it requires a released `di`, and bumping that
-  requirement is how it picks up a library change. It carries one now, because
-  nothing is released under `golang.yandex/di` yet — drop the `replace` and
-  require the first release under the new path before tagging `digrpc`, or
-  whoever imports it gets a version that does not exist. Tag it as a nested
-  module,
+  carries no `replace`: it requires a released `di`, and bumping that
+  requirement is how it picks up a library change. A `replace` here would be
+  ignored by whoever imports the module, so releasing `di` first and bumping
+  the requirement second is the order, or the tag names a version that does
+  not exist. Tag it as a nested module,
   `digrpc/vX.Y.Z`; `release.yml` matches `v*` only, so those tags publish no
   GitHub release and need no CHANGELOG section. Its tests use grpc's own
   health service over `bufconn`, so nothing is generated from protobuf. The

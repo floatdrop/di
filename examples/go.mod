@@ -8,7 +8,7 @@ go 1.27
 
 require (
 	github.com/charmbracelet/log v1.0.0
-	golang.yandex/di v0.0.0
+	golang.yandex/di v0.17.2
 	golang.yandex/di/digrpc v0.0.0
 	google.golang.org/grpc v1.84.0
 )
