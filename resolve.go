@@ -335,7 +335,10 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	if err != nil {
 		panic(abort{err})
 	}
-	b.used.Store(true)
+	// Loaded first so a warm resolution does not write a line other cores read.
+	if !b.used.Load() {
+		b.used.Store(true)
+	}
 	// The edge belongs to the node that asked, and only a node with a binding
 	// has an instance to record it on: a top-level Get, or a Scope kept past
 	// its resolution, has none. The test is here rather than in dependOn so
