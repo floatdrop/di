@@ -7,6 +7,14 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-09-23
+
+The first release under `golang.yandex/di`. `go doc -all` against 0.17.1
+changes one line per package — the import path — and nothing else: no
+identifier, signature or behaviour differs in `di`, `dihttp` or `dislog`.
+**The upgrade breaks every caller all the same**, because the module path
+moved; the recipe below is the whole of the edit.
+
 ### Added
 
 - `digrpc`, the gRPC counterpart of `dihttp`, as a separate module so the
@@ -1143,7 +1151,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/yandex/di/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/yandex/di/compare/v0.17.2...HEAD
+[0.17.2]: https://github.com/yandex/di/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/yandex/di/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/yandex/di/compare/v0.16.2...v0.17.0
 [0.16.2]: https://github.com/yandex/di/compare/v0.16.1...v0.16.2
