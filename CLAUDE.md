@@ -563,7 +563,16 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   requirement is how it picks up a library change. A `replace` here would be
   ignored by whoever imports the module, so releasing `di` first and bumping
   the requirement second is the order, or the tag names a version that does
-  not exist. Tag it as a nested module,
+  not exist. **The vanity host has to know about it separately**:
+  `golang.yandex/di?go-get=1` serves one `go-import` for the main module, and
+  prefix shortening is what makes `dihttp` and `dislog` resolve — they are
+  packages *inside* it. `digrpc` is its own module, so shortening lands on
+  `golang.yandex/di`, which excludes the directory, and the import fails with
+  "module golang.yandex/di@latest found, but does not contain package". It
+  needs `golang.yandex/di/digrpc?go-get=1` to serve
+  `<meta name="go-import" content="golang.yandex/di/digrpc git https://github.com/yandex/di">`
+  of its own; nothing in this repository can supply it. Tag it as a nested
+  module,
   `digrpc/vX.Y.Z`; `release.yml` matches `v*` only, so those tags publish no
   GitHub release and need no CHANGELOG section. Its tests use grpc's own
   health service over `bufconn`, so nothing is generated from protobuf. The
