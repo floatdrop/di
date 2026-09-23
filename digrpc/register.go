@@ -36,7 +36,7 @@ func Register[H any](srv grpc.ServiceRegistrar, desc *grpc.ServiceDesc) {
 	wrapped := *desc
 	wrapped.Methods = make([]grpc.MethodDesc, len(desc.Methods))
 	for i, m := range desc.Methods {
-		wrapped.Methods[i] = grpc.MethodDesc{MethodName: m.MethodName, Handler: unary[H](m.Handler, m.MethodName)}
+		wrapped.Methods[i] = grpc.MethodDesc{MethodName: m.MethodName, Handler: unary[H](m.Handler)}
 	}
 	wrapped.Streams = make([]grpc.StreamDesc, len(desc.Streams))
 	for i, s := range desc.Streams {
@@ -59,10 +59,12 @@ func placeholder[H any]() any {
 
 // unary lets the generated handler decode the request and build the call's
 // info, then runs the server's interceptor chain with a handler that resolves
-// H and calls the method. The method is looked up on the value, so H may be
-// an interface. The generated handler always calls the interceptor it is
-// given, so the value it is given as the server is never used.
-func unary[H any](orig grpc.MethodHandler, name string) grpc.MethodHandler {
+// H and calls the generated handler again with it: a decoder that does
+// nothing and an interceptor that hands it the request already decoded make
+// that second call the typed method call. The generated handler always calls
+// the interceptor it is given, so the value it is first given as the server
+// is never used.
+func unary[H any](orig grpc.MethodHandler) grpc.MethodHandler {
 	return func(_ any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 		return orig(nil, ctx, dec, func(ctx context.Context, req any, info *grpc.UnaryServerInfo, _ grpc.UnaryHandler) (any, error) {
 			handler := func(ctx context.Context, req any) (any, error) {
@@ -70,9 +72,10 @@ func unary[H any](orig grpc.MethodHandler, name string) grpc.MethodHandler {
 				if err != nil {
 					return nil, err
 				}
-				out := reflect.ValueOf(impl).MethodByName(name).Call([]reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(req)})
-				err, _ = out[1].Interface().(error)
-				return out[0].Interface(), err
+				return orig(impl, ctx, func(any) error { return nil },
+					func(ctx context.Context, _ any, _ *grpc.UnaryServerInfo, call grpc.UnaryHandler) (any, error) {
+						return call(ctx, req)
+					})
 			}
 			if interceptor == nil {
 				return handler(ctx, req)

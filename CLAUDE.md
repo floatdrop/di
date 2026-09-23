@@ -572,9 +572,12 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   `Register[H]` copies the generated `ServiceDesc` with its handlers replaced:
   a unary wrapper hands the generated handler a fake interceptor, so the
   generated code still decodes and builds the info, then runs the server's
-  real chain with a handler that resolves `H` and calls the method through
-  `reflect`; a stream wrapper resolves `H` and passes it to the generated
-  handler unchanged, since stream interceptors run outside it. `H` is
+  real chain with a handler that resolves `H` and calls the generated handler
+  again with it, through a no-op decoder and an interceptor forwarding the
+  decoded request, so the typed call is the generated code's own (the proto
+  method name is not the Go one, so no lookup by name); a stream wrapper
+  resolves `H` and passes it to the generated handler unchanged, since stream
+  interceptors run outside it. `H` is
   therefore built after every interceptor, the info's `Server` is nil, and a
   constructor's status is taken from inside the build error with
   `errors.AsType` so the client never sees the registration site. That rests
