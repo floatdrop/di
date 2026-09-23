@@ -7,6 +7,14 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Changed
+
+- A warm `Get` no longer writes to the registration it reads. Every
+  resolution stored the "resolved" mark again, on the cache line the value is
+  read from, so cores resolving the same singleton kept invalidating each
+  other: a warm `Get` at eight cores took 56 ns and now takes 19 ns on an M3
+  Max, and 61 ns through a child scope now takes 34 ns.
+
 ### Fixed
 
 - A `Wrap` over a registration that is marked `Group()` only afterwards is

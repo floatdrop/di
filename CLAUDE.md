@@ -96,8 +96,10 @@ final.
 
 **The warm path takes no lock in the owning scope.** A top-level resolution of a
 built singleton reads three atomics: `hasPending` and `reg` per scope looked
-through, and `instance.ready`. The two remaining locks belong to the resolving
-side (`instanceFor` for a `Scoped` binding, `dependOn` while a constructor
+through, and `instance.ready`. It writes nothing shared: `binding.used` is
+loaded before it is stored, since it sits on the line `single` is read from
+and a store per `Get` made every core miss. The two remaining locks belong to
+the resolving side (`instanceFor` for a `Scoped` binding, `dependOn` while a constructor
 builds). `ready` summarises `ph`/`err`/`settled` and is recomputed by `refresh`
 in the same critical section as every change to them; it is set exactly when
 `await`'s locked loop would return at once. `startCtx` and `running` are atomics
