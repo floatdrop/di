@@ -39,6 +39,10 @@ type resolver struct {
 	done atomic.Bool
 }
 
+// topLevel is the root node of every resolution begun outside a constructor.
+// It resolves nothing, is never finished and never builds, so one serves all.
+var topLevel = &resolver{}
+
 func (r *resolver) child(b *binding, holder *state) *resolver {
 	return &resolver{parent: r, b: b, holder: holder}
 }
@@ -90,11 +94,12 @@ func (r *resolver) pathStr() string {
 type graph struct {
 	mu sync.Mutex
 
-	// under indexes every wait by each node of the blocked resolution's path,
-	// up to and including the first finished one, as the path stood when it
-	// blocked. A node only ever becomes finished, so the set descends can
-	// match only shrinks and the index is a superset of it: wait narrows the
-	// search to under[builder] and descends still decides.
+	// under indexes every wait by each node of the blocked resolution's path
+	// below the root, up to and including the first finished one, as the path
+	// stood when it blocked. The root builds nothing, so no search reads it.
+	// A node only ever becomes finished, so the set descends can match only
+	// shrinks and the index is a superset of it: wait narrows the search to
+	// under[builder] and descends still decides.
 	under map[*resolver]map[*waitEdge]struct{}
 }
 
@@ -151,7 +156,7 @@ func (r *resolver) wait(g *graph, in *instance) *waitEdge {
 		}
 	}
 	e := &waitEdge{r: r, in: in}
-	for n := r; n != nil; n = n.parent {
+	for n := r; n != nil && n.b != nil; n = n.parent {
 		e.path = append(e.path, n)
 		set := g.under[n]
 		if set == nil {
@@ -214,7 +219,7 @@ func (s *Scope) enter() *Scope {
 	if s.inFlight() {
 		return s
 	}
-	return s.view(&resolver{})
+	return s.view(topLevel)
 }
 
 // get resolves k. Outside a constructor the internal abort becomes a panic
@@ -318,26 +323,36 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	if s.r.onPath(b, holder) {
 		panic(abort{fmt.Errorf("di: %w: %s -> %s", ErrCycle, s.r.pathStr(), b.key)})
 	}
-	if !b.used.Load() {
+	used := b.used.Load()
+	if !used {
 		// Hold the key against an override while this resolution runs, so a
 		// constructor cannot replace the registration it is built from. used
 		// is set before this is dropped, so the two guards leave no gap.
 		b.resolving.Add(1)
 		defer b.resolving.Add(-1)
 	}
-	sc := s.view(s.r.child(b, holder))
-	// The node stops being a dependency when this resolution returns, however
-	// it returns. See resolver.done.
-	defer sc.r.done.Store(true)
-
 	in := holder.instanceFor(b)
-	v, err := sc.await(in, holder)
-	if err != nil {
-		panic(abort{err})
-	}
-	// Loaded first so a warm resolution does not write a line other cores read.
-	if !b.used.Load() {
-		b.used.Store(true)
+	var v any
+	if used && in.ready.Load() && !s.st.isStopped() {
+		// The warm path, without the holder's mutex and without a node: the
+		// build is settled, no start step is owed or in flight, and the value
+		// is final. ready is written under that mutex at every change that
+		// could make the answer differ (see refresh), so a load that sees it
+		// set is ordered before any such change. Nothing it does writes a
+		// line other cores read.
+		v = in.value
+	} else {
+		sc := s.view(s.r.child(b, holder))
+		// The node stops being a dependency when this resolution returns,
+		// however it returns. See resolver.done.
+		defer sc.r.done.Store(true)
+		var err error
+		if v, err = sc.await(in, holder); err != nil {
+			panic(abort{err})
+		}
+		if !b.used.Load() {
+			b.used.Store(true)
+		}
 	}
 	// The edge belongs to the node that asked, and only a node with a binding
 	// has an instance to record it on: a top-level Get, or a Scope kept past
@@ -371,14 +386,6 @@ func (r *resolver) dependOn(in *instance, holder *state) {
 // well, so a running scope never hands out a service whose OnStart is in
 // flight. A wait that would close a cycle is reported as ErrCycle.
 func (s *Scope) await(in *instance, holder *state) (any, error) {
-	if in.ready.Load() && !s.st.isStopped() {
-		// The warm path, without the holder's mutex: the build is settled,
-		// no start step is owed or in flight, and the value is final. ready
-		// is written under that mutex at every change that could make the
-		// answer differ (see refresh), so a load that sees it set is ordered
-		// before any such change.
-		return in.value, nil
-	}
 	holder.mu.Lock()
 	for in.ph == phaseNew || !in.settled || in.ph == phaseStarting {
 		if in.ph == phaseNew {

@@ -38,7 +38,7 @@ func TestWaitIndexIncludesTheFinishedNode(t *testing.T) {
 func TestWaitEdgesAreRemovedPerWait(t *testing.T) {
 	g := &graph{under: map[*resolver]map[*waitEdge]struct{}{}}
 	b := &binding{}
-	mid := (&resolver{}).child(b, nil)
+	mid := (&resolver{}).child(b, nil).child(b, nil)
 	r := mid.child(b, nil)
 
 	long := r.wait(g, &instance{b: b})
@@ -51,5 +51,30 @@ func TestWaitEdgesAreRemovedPerWait(t *testing.T) {
 	g.unwait(long)
 	if len(g.under) != 0 {
 		t.Fatalf("%d nodes still indexed after both waits ended", len(g.under))
+	}
+}
+
+// A warm top-level resolution makes no path node, and the one root every
+// top-level resolution shares is neither indexed nor ever finished: indexed,
+// it would collect every blocked top-level resolution in the container, and
+// finished, no view over it would count as in flight again.
+func TestTopLevelResolutionSharesAnUnindexedRoot(t *testing.T) {
+	s := New()
+	s.Provide(func(*Scope) *graph { return &graph{} })
+	child := s.Child("child")
+	_ = child.Get[*graph]()
+	if n := testing.AllocsPerRun(100, func() { _ = s.Get[*graph](); _ = child.Get[*graph]() }); n != 0 && !raceEnabled {
+		t.Errorf("a warm Get allocates %v times", n)
+	}
+
+	g := &graph{under: map[*resolver]map[*waitEdge]struct{}{}}
+	b := &binding{}
+	e := topLevel.child(b, nil).wait(g, &instance{b: b})
+	if _, ok := g.under[topLevel]; ok || len(e.path) != 1 {
+		t.Errorf("the shared root is indexed: path of %d nodes", len(e.path))
+	}
+	g.unwait(e)
+	if topLevel.done.Load() {
+		t.Error("the shared root was marked finished")
 	}
 }

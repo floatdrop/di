@@ -95,16 +95,20 @@ service whose `OnStart` is still running. `settled` means `value`/`err` are
 final.
 
 **The warm path takes no lock in the owning scope.** A top-level resolution of a
-built singleton reads three atomics: `hasPending` and `reg` per scope looked
-through, and `instance.ready`. It writes nothing shared: `binding.used` is
-loaded before it is stored, since it sits on the line `single` is read from
+built singleton only loads atomics: `hasPending` and `reg` per scope looked
+through, `stopped` up to the root, then `binding.used`, `instance.ready` and
+`stopped` again, in that order, since the seal argument below rests on `ready`
+before `stopped`. It allocates no path node: the root of every top-level
+resolution is the shared `topLevel`, which `wait` does not index, and a node is
+made only when the value is not ready. It writes nothing shared: `binding.used`
+is loaded before it is stored, since it sits on the line `single` is read from
 and a store per `Get` made every core miss. The two remaining locks belong to
-the resolving side (`instanceFor` for a `Scoped` binding, `dependOn` while a constructor
-builds). `ready` summarises `ph`/`err`/`settled` and is recomputed by `refresh`
-in the same critical section as every change to them; it is set exactly when
-`await`'s locked loop would return at once. `startCtx` and `running` are atomics
-for the same reason. `benchmarks/parallel_test.go` is the record of what this
-bought.
+the resolving side (`instanceFor` for a `Scoped` binding, `dependOn` while a
+constructor builds). `ready` summarises `ph`/`err`/`settled` and is recomputed
+by `refresh` in the same critical section as every change to them; it is set
+exactly when `await`'s locked loop would return at once. `startCtx` and
+`running` are atomics for the same reason. `benchmarks/parallel_test.go` is the
+record of what this bought.
 
 What still takes a shared lock per request is `Child` and the detach at the end
 of `teardown`, both on the parent's mutex, and `claimBuild`/`settle` on
@@ -125,7 +129,8 @@ across a `Stop`.
 branch, `resolver.onPath` walks the immutable path. Across branches,
 `resolver.wait` searches a `*graph` before blocking, matching whole paths
 (`descends`) in both directions; `graph.under` indexes each blocked resolution
-by its path's nodes so a search reads only the waits beneath one builder. A node
+by its path's nodes below the root, so a search reads only the waits beneath
+one builder. A node
 only ever becomes finished, so that index is a superset and `descends` still
 decides. That the finished node itself is indexed is pinned only by
 `TestWaitIndexIncludesTheFinishedNode`, an internal test: no test through the
@@ -194,8 +199,8 @@ goes round again, or the announcer learns the scope stopped and undoes its work
 calls `refresh`, which sets `ready` on a built instance that never started, in a
 scope that may otherwise look running; that is safe only because `gateStart`
 undoes the claim *after* `announce` has read `stopped` as set, so a reader that
-later sees `ready` sees `stopped` too, and both `resolve` and the warm path in
-`await` check it (`TestSealDecidesAClaimedStart`). `claimNext` returns nil for a
+later sees `ready` sees `stopped` too, and both `resolve`'s entry and its warm
+path check it (`TestSealDecidesAClaimedStart`). `claimNext` returns nil for a
 stopped scope, or `Start`'s loop would find a refused instance for ever.
 Whoever owns the stop phase seals, whether or not it ran the sweep, since an
 ancestor's run may have settled this scope's drain phase and moved on.

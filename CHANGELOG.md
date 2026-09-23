@@ -14,6 +14,10 @@ below says plainly whether an upgrade can break a caller.
   read from, so cores resolving the same singleton kept invalidating each
   other: a warm `Get` at eight cores took 56 ns and now takes 19 ns on an M3
   Max, and 61 ns through a child scope now takes 34 ns.
+- A warm `Get` no longer allocates. It made two resolution-path nodes, one
+  for the top-level call and one for the service, that nothing reads once
+  the value is built: 38 ns, 64 B and 2 allocations became 21 ns and none, on
+  an M3 Max, and the eight-core figures above are now 7 ns and 15 ns.
 
 ### Fixed
 
