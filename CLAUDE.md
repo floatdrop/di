@@ -594,7 +594,7 @@ reverse: caught by the fuzzer in 0.06s, missed by 400 seeded sequences).
   accessor, so its warm number is `Invoke` reflecting on every call. Do not quote
   the dig warm figure without that caveat. `di` is measured twice (`Provide` and
   `Wire`) as the check on the claim that a warm `Get` is one code path.
-- **`site/` is the landing page and guide** at https://floatdrop.github.io/di/ —
+- **`site/` is the landing page and guide** at https://yandex.github.io/di/ —
   React with Gravity UI, prerendered to static HTML in English at `/` and
   Russian, Chinese, Japanese at `/ru/`, `/zh/`, `/ja/`, each one value of a
   `Content` type so a missing translation is a compile error. It ships no React.

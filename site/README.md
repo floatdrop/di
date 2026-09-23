@@ -1,6 +1,6 @@
 # site
 
-The landing page and step-by-step guide at https://floatdrop.github.io/di/,
+The landing page and step-by-step guide at https://yandex.github.io/di/,
 in English, Russian, Chinese and Japanese, prerendered to static HTML.
 
 It is a React project built with [Gravity UI](https://gravity-ui.com), and it

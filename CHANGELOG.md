@@ -35,15 +35,16 @@ below says plainly whether an upgrade can break a caller.
       gofmt -w .   # the new path sorts elsewhere in a mixed import block
 
   The rewrite is anchored on the opening quote so that it touches import
-  paths only, and leaves a `https://github.com/floatdrop/di/...` link in a
-  comment pointing where it still points.
+  paths only.
 
   A service's reported name carries its package path, so anything asserting on
   `Explain`, `Graph`, `Modules` or an `Event.Service` of a type declared in
   this module sees the new prefix.
 
-  The source stays on GitHub at <https://github.com/floatdrop/di>; only the
-  import path moved.
+- **The repository moved to <https://github.com/yandex/di>**, and the guide
+  with it, to <https://yandex.github.io/di/>. GitHub redirects the old
+  location, so a remote, a clone or a link still works; nothing about the
+  library does.
 
 ## [0.17.1] - 2026-09-19
 
@@ -556,7 +557,7 @@ warm resolve allocates 64 B rather than 96 B and runs about 8% faster
 ## [0.7.0] - 2026-09-05
 
 The API surface cut down ahead of the graph-validation work of
-[#3](https://github.com/floatdrop/di/issues/3), so that it lands on a
+[#3](https://github.com/yandex/di/issues/3), so that it lands on a
 smaller and more regular API, and the four defects of the fourth September
 2026 review.
 
@@ -1140,32 +1141,32 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/floatdrop/di/compare/v0.17.1...HEAD
-[0.17.1]: https://github.com/floatdrop/di/compare/v0.17.0...v0.17.1
-[0.17.0]: https://github.com/floatdrop/di/compare/v0.16.2...v0.17.0
-[0.16.2]: https://github.com/floatdrop/di/compare/v0.16.1...v0.16.2
-[0.16.1]: https://github.com/floatdrop/di/compare/v0.16.0...v0.16.1
-[0.16.0]: https://github.com/floatdrop/di/compare/v0.15.1...v0.16.0
-[0.15.1]: https://github.com/floatdrop/di/compare/v0.15.0...v0.15.1
-[0.15.0]: https://github.com/floatdrop/di/compare/v0.14.0...v0.15.0
-[0.14.0]: https://github.com/floatdrop/di/compare/v0.13.1...v0.14.0
-[0.13.1]: https://github.com/floatdrop/di/compare/v0.13.0...v0.13.1
-[0.13.0]: https://github.com/floatdrop/di/compare/v0.12.0...v0.13.0
-[0.12.0]: https://github.com/floatdrop/di/compare/v0.11.0...v0.12.0
-[0.11.0]: https://github.com/floatdrop/di/compare/v0.10.0...v0.11.0
-[0.10.0]: https://github.com/floatdrop/di/compare/v0.9.1...v0.10.0
-[0.9.1]: https://github.com/floatdrop/di/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/floatdrop/di/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/floatdrop/di/compare/v0.7.0...v0.8.0
-[#2]: https://github.com/floatdrop/di/issues/2
-[#6]: https://github.com/floatdrop/di/issues/6
-[0.7.0]: https://github.com/floatdrop/di/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/floatdrop/di/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/floatdrop/di/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/floatdrop/di/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/floatdrop/di/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/floatdrop/di/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/floatdrop/di/releases/tag/v0.1.0
-[#3]: https://github.com/floatdrop/di/issues/3
-[#1]: https://github.com/floatdrop/di/issues/1
-[#35]: https://github.com/floatdrop/di/issues/35
+[Unreleased]: https://github.com/yandex/di/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/yandex/di/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/yandex/di/compare/v0.16.2...v0.17.0
+[0.16.2]: https://github.com/yandex/di/compare/v0.16.1...v0.16.2
+[0.16.1]: https://github.com/yandex/di/compare/v0.16.0...v0.16.1
+[0.16.0]: https://github.com/yandex/di/compare/v0.15.1...v0.16.0
+[0.15.1]: https://github.com/yandex/di/compare/v0.15.0...v0.15.1
+[0.15.0]: https://github.com/yandex/di/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/yandex/di/compare/v0.13.1...v0.14.0
+[0.13.1]: https://github.com/yandex/di/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/yandex/di/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/yandex/di/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/yandex/di/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/yandex/di/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/yandex/di/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/yandex/di/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/yandex/di/compare/v0.7.0...v0.8.0
+[#2]: https://github.com/yandex/di/issues/2
+[#6]: https://github.com/yandex/di/issues/6
+[0.7.0]: https://github.com/yandex/di/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/yandex/di/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/yandex/di/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/yandex/di/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/yandex/di/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/yandex/di/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/yandex/di/releases/tag/v0.1.0
+[#3]: https://github.com/yandex/di/issues/3
+[#1]: https://github.com/yandex/di/issues/1
+[#35]: https://github.com/yandex/di/issues/35

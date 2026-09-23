@@ -80,7 +80,7 @@ function page(locale: Locale, styles: Styles, body: string): string {
 		githubButton: GITHUB_BUTTON,
 		starsCount: STARS_COUNT,
 		starsClass: STARS_CLASS,
-		starsApi: 'https://api.github.com/repos/floatdrop/di',
+		starsApi: 'https://api.github.com/repos/yandex/di',
 		copyText: hero.install,
 		labels: { toLight: labels.toLight, toDark: labels.toDark }
 	})})`;

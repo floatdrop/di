@@ -14,7 +14,7 @@ import api from '../../examples/guide/internal/api/api.go?raw';
 import explain from '../../examples/guide/testdata/explain.txt?raw';
 import modules from '../../examples/guide/testdata/modules.txt?raw';
 
-const run = `git clone https://github.com/floatdrop/di && cd di
+const run = `git clone https://github.com/yandex/di && cd di
 go run ./examples/guide/cmd/api &
 curl -H 'X-User: ada' localhost:8080/users/42`;
 

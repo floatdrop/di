@@ -421,7 +421,7 @@ would be a wait on itself. `Shutdown` never blocks.
 once it runs, so a missing dependency of a lazy closure surfaces on first
 resolution, or at `Start` if the service is eager. `Validate` checks what
 `Wire` declares and lists the closures as unchecked
-([#3](https://github.com/floatdrop/di/issues/3)).
+([#3](https://github.com/yandex/di/issues/3)).
 
 ## Where this lives in the source
 
@@ -437,4 +437,4 @@ resolution, or at `Start` if the service is eager. `Validate` checks what
 | [`explain.go`](../explain.go) | `Explain`, `Graph` and `Modules` |
 | [`dihttp/`](../dihttp) | the net/http adapter: request scopes and handlers |
 | [`dislog/`](../dislog) | the slog bridge for `Observe` |
-| [`examples/guide/`](../examples/guide) | one application, walked through at <https://floatdrop.github.io/di/> |
+| [`examples/guide/`](../examples/guide) | one application, walked through at <https://yandex.github.io/di/> |

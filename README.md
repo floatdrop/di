@@ -4,9 +4,9 @@
 
 # di
 
-[![CI](https://github.com/floatdrop/di/actions/workflows/ci.yml/badge.svg)](https://github.com/floatdrop/di/actions/workflows/ci.yml)
+[![CI](https://github.com/yandex/di/actions/workflows/ci.yml/badge.svg)](https://github.com/yandex/di/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/golang.yandex/di.svg)](https://pkg.go.dev/golang.yandex/di)
-[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Ffloatdrop.github.io%2Fdi%2Fcoverage.json)](https://floatdrop.github.io/di/coverage.html)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fyandex.github.io%2Fdi%2Fcoverage.json)](https://yandex.github.io/di/coverage.html)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Awesome Go](https://raw.githubusercontent.com/floatdrop/awesome-go/main/badges/floatdrop--di.svg)](https://floatdrop.github.io/awesome-go/#floatdrop--di)
 
@@ -29,7 +29,7 @@ There is no code generation and no dependency outside the standard library.
 `Provide` takes a closure for the rare constructor that needs the scope
 itself.
 
-[**The guide**](https://floatdrop.github.io/di/) walks through one application
+[**The guide**](https://yandex.github.io/di/) walks through one application
 file by file. [**How it works**](docs/DESIGN.md) explains what happens between
 `Get` and a value, with diagrams.
 
@@ -1476,7 +1476,7 @@ cd benchmarks && go test -bench . -benchmem
 
 While the major version is 0, a minor bump may change behaviour. Every entry
 in [CHANGELOG.md](CHANGELOG.md) and on the
-[releases page](https://github.com/floatdrop/di/releases) says whether an
+[releases page](https://github.com/yandex/di/releases) says whether an
 upgrade can break a caller.
 
 ## Contributing

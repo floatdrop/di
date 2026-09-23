@@ -1,4 +1,4 @@
-export const REPO = 'https://github.com/floatdrop/di';
+export const REPO = 'https://github.com/yandex/di';
 export const PKG_DOC = 'https://pkg.go.dev/golang.yandex/di';
 
 /**
