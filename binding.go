@@ -7,6 +7,7 @@ package di
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 	"runtime"
 	"slices"
@@ -229,7 +230,10 @@ type guard struct {
 	// resolving counts the resolutions of this binding that have not served a
 	// value yet, the window used cannot cover: a constructor that registers
 	// over its own key and resolves the replacement would otherwise hand the
-	// nested call the new value and the outer call the old one.
+	// nested call the new value and the outer call the old one. A freeze
+	// deciding whether to replace or wrap the binding holds it at replacing,
+	// so the claim and a resolution's count are one variable: whichever comes
+	// second sees the first.
 	resolving atomic.Int32
 
 	// wraps holds the Wraps bound to this binding whose scopes are still
@@ -252,11 +256,8 @@ type guard struct {
 // or returns "" when nothing stops it. The reasons read as the end of a
 // sentence: "cannot be overridden at wire.go:9: it has already been resolved".
 func (g *guard) against(replacer *binding) string {
-	switch {
-	case g.used.Load():
+	if g.used.Load() {
 		return "it has already been resolved"
-	case g.resolving.Load() > 0:
-		return "it is being resolved"
 	}
 	if replacer.inner == nil {
 		// An Override, not a Wrap: a wrapper over this registration would go
@@ -266,6 +267,43 @@ func (g *guard) against(replacer *binding) string {
 		}
 	}
 	return ""
+}
+
+// replacing is what a freeze holds resolving at while it decides; far enough
+// below zero that no count of resolutions brings it back up.
+const replacing = math.MinInt32 / 2
+
+// claim holds off new resolutions while a freeze decides whether to replace
+// or wrap the guarded registration, and fails if one is in flight. used is
+// read after it, so a resolution that finished first is seen by against.
+func (g *guard) claim() bool { return g.resolving.CompareAndSwap(0, replacing) }
+
+// unclaim ends a claim.
+func (g *guard) unclaim() { g.resolving.Add(-replacing) }
+
+// hold counts a resolution of b in, so no freeze replaces or wraps b until it
+// is counted out. While a freeze in owner has b claimed, it waits for that
+// freeze to decide. A binding found by key is held only if it still serves
+// the key, and otherwise the caller looks the key up again. One reached
+// another way, as a group member or what a wrapper wraps, is never replaced:
+// a claim on it is a same-scope Wrap's, and an Override of it is rejected.
+func (b *binding) hold(owner *state, byKey bool) bool {
+	for {
+		if b.resolving.Add(1) > 0 {
+			if !byKey || owner.reg.Load().index[b.key] == b {
+				return true
+			}
+			b.resolving.Add(-1)
+			return false
+		}
+		b.resolving.Add(-1)
+		owner.mu.Lock() // the freeze that claimed b holds it until it has decided
+		replaced := byKey && owner.reg.Load().index[b.key] != b
+		owner.mu.Unlock()
+		if replaced {
+			return false
+		}
+	}
 }
 
 // wrapSet is a guard's wrappers and retired flag. It is never written after

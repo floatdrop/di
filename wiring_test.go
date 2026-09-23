@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.yandex/di"
 	"golang.yandex/di/dihttp"
@@ -544,5 +545,43 @@ func TestRegistrationSiteNamesTheCaller(t *testing.T) {
 	want("Wrap", s, at(s.Wrap[*DB](func(db *DB) *DB { return db })))
 	if len(sites) != 4 {
 		t.Fatalf("checked %d registration methods, want 4", len(sites))
+	}
+}
+
+// An Override racing the first resolution of what it replaces commits only if
+// that resolution serves nothing from the replaced registration. The window is
+// a few instructions wide, so this repeats it for a second. (review 7, 2)
+func TestReviewOverrideRacingFirstResolution(t *testing.T) {
+	for i, start := 0, time.Now(); time.Since(start) < time.Second; i++ {
+		s := di.New()
+		s.Provide(func(*di.Scope) *vT { return &vT{n: 1} })
+		var got *vT
+		var ready atomic.Int32
+		gate := func() {
+			ready.Add(1)
+			for ready.Load() < 2 {
+			}
+		}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			defer func() { _ = recover() }()
+			gate()
+			got = s.Get[*vT]()
+		})
+		wg.Go(func() {
+			defer func() { _ = recover() }()
+			gate()
+			s.Provide(func(*di.Scope) *vT { return &vT{n: 2} }).Override()
+			_, _ = s.Resolve[*vT]()
+		})
+		wg.Wait()
+		committed := func() (ok bool) {
+			defer func() { _ = recover() }() // a rejected Override panics again here
+			now, err := s.Resolve[*vT]()
+			return err == nil && now.n == 2
+		}()
+		if got != nil && got.n == 1 && committed {
+			t.Fatalf("iteration %d: the old registration served a value and the Override still committed", i)
+		}
 	}
 }
