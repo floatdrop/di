@@ -7,7 +7,8 @@ package di_test
 // Those files hold one test per defect, named for the rule it pins, with a
 // tag at the end of its comment saying where the defect came from. (review 1,
 // 3) is the third defect of the first September 2026 review, checked against
-// 12dba3c; review 2 was checked against 2b8915d and review 3 against 9ace680.
+// 12dba3c; review 2 was checked against 2b8915d, review 3 against 9ace680
+// and review 7 against 1c1b52d.
 // (pass 4) is the fourth of the seven narrower passes that preceded those
 // reviews, each checked against the code before the instance-phase refactor.
 // (fx review) is the comparison with uber/fx, checked against 3728d76.

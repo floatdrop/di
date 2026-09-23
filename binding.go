@@ -78,6 +78,8 @@ func (b *binding) validate() {
 		bad("Override", "does not apply to a group member: members accumulate rather than replace one another")
 	case b.inner != nil && b.group:
 		bad("Group", "does not apply to a wrapper: it serves the key it wraps")
+	case b.inner != nil && b.inner.group:
+		bad("Wrap", "does not apply to a group member: the registration it wraps, at "+b.inner.where()+", was marked Group")
 	case b.inner != nil && b.override:
 		bad("Override", "does not apply to a wrapper: it composes over the registration it wraps rather than replacing it")
 	}

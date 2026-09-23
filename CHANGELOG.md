@@ -7,6 +7,13 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+### Fixed
+
+- A `Wrap` over a registration that is marked `Group()` only afterwards is
+  now rejected at the next resolution, as it already was when the
+  registration was a group member before `Wrap` ran. It used to commit, so
+  `Get` served the wrapper while `All` still returned the unwrapped member.
+
 ## [0.17.2] - 2026-09-23
 
 The first release under `golang.yandex/di`. `go doc -all` against 0.17.1

@@ -227,6 +227,16 @@ func TestWrapRejectsGroupAndOverrideMarkers(t *testing.T) {
 	rejected(t, "does not apply to a wrapper", func() { _, _ = o.Resolve[wStore]() })
 }
 
+// A registration marked a group member after a wrapper bound to it is
+// rejected as if it had been a member when Wrap looked. (review 7, 1)
+func TestWrapOfALaterGroupMemberIsRejected(t *testing.T) {
+	s := di.New()
+	b := s.Wire[wStore](newWPG)
+	s.Wrap[wStore](newWTracing)
+	b.Group()
+	rejected(t, "does not apply to a group member", func() { _, _ = s.Resolve[wStore]() })
+}
+
 func TestWrapWithAValueAndAScopeThatServedTheKey(t *testing.T) {
 	s := di.New()
 	s.Value(wStore(&wPG{}))
