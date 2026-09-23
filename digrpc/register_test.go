@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,8 +70,13 @@ func serve(t *testing.T, log *[]string, opts ...grpc.ServerOption) grpc_health_v
 	if err := app.Validate(di.Provided[*digrpc.Call]()).Err(); err != nil {
 		t.Fatal(err)
 	}
+	return grpc_health_v1.NewHealthClient(dial(t, app.Get[*grpc.Server]()))
+}
+
+// dial serves srv over an in-memory listener and returns a connection to it.
+func dial(t *testing.T, srv *grpc.Server) *grpc.ClientConn {
+	t.Helper()
 	lis := bufconn.Listen(1 << 20)
-	srv := app.Get[*grpc.Server]()
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -80,7 +86,7 @@ func serve(t *testing.T, log *[]string, opts ...grpc.ServerOption) grpc_health_v
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return grpc_health_v1.NewHealthClient(conn)
+	return conn
 }
 
 func as(t *testing.T, name string) context.Context {
@@ -155,17 +161,8 @@ func TestRegisterLeavesUnimplementedMethodsAlone(t *testing.T) {
 func TestRegisterWithoutTheInterceptorIsInternal(t *testing.T) {
 	srv := grpc.NewServer()
 	digrpc.Register[*health](srv, &grpc_health_v1.Health_ServiceDesc)
-	lis := bufconn.Listen(1 << 20)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-	conn, err := grpc.NewClient("passthrough:///bufnet",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	_, err = grpc_health_v1.NewHealthClient(conn).Check(t.Context(), &grpc_health_v1.HealthCheckRequest{})
+	conn := dial(t, srv)
+	_, err := grpc_health_v1.NewHealthClient(conn).Check(t.Context(), &grpc_health_v1.HealthCheckRequest{})
 	if st := status.Convert(err); st.Code() != codes.Internal || !strings.Contains(st.Message(), "Interceptor") {
 		t.Errorf("got %v, want Internal naming the Interceptor", err)
 	}
@@ -197,16 +194,7 @@ func TestRegisterAcceptsTheServiceInterface(t *testing.T) {
 	}).Scoped()
 	srv := grpc.NewServer(digrpc.New(app).Options()...)
 	digrpc.Register[grpc_health_v1.HealthServer](srv, &grpc_health_v1.Health_ServiceDesc)
-	lis := bufconn.Listen(1 << 20)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-	conn, err := grpc.NewClient("passthrough:///bufnet",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+	conn := dial(t, srv)
 	client := grpc_health_v1.NewHealthClient(conn)
 
 	if _, err := client.Check(as(t, "ada"), &grpc_health_v1.HealthCheckRequest{}); err != nil {
@@ -233,5 +221,30 @@ func TestRegisterAcceptsTheServiceInterface(t *testing.T) {
 	}
 	if _, err := w.Recv(); status.Code(err) != codes.Internal {
 		t.Errorf("nil stream: %v, want Internal", err)
+	}
+}
+
+// TestRegisterServesAMethodNamedApartFromItsGoMethod: protoc-gen-go-grpc puts
+// the proto name in MethodName and CamelCases the Go method, so an rpc
+// get_user is served by GetUser.
+func TestRegisterServesAMethodNamedApartFromItsGoMethod(t *testing.T) {
+	var log []string
+	app := di.Test(t)
+	app.Use(digrpc.Module)
+	app.Wire[*caller](newCaller).Scoped()
+	app.Wire[*health](func(c *caller) *health { return &health{caller: c, log: &log} }).Scoped()
+	desc := grpc_health_v1.Health_ServiceDesc
+	desc.Methods = slices.Clone(desc.Methods)
+	for i := range desc.Methods {
+		desc.Methods[i].MethodName = strings.ToLower(desc.Methods[i].MethodName)
+	}
+	srv := grpc.NewServer(digrpc.New(app).Options()...)
+	digrpc.Register[*health](srv, &desc)
+	res := new(grpc_health_v1.HealthCheckResponse)
+	if err := dial(t, srv).Invoke(as(t, "ada"), "/grpc.health.v1.Health/check", &grpc_health_v1.HealthCheckRequest{}, res); err != nil {
+		t.Fatal(err)
+	}
+	if res.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING || !slices.Equal(log, []string{"check by ada"}) {
+		t.Errorf("got %v, log %q", res.GetStatus(), log)
 	}
 }
