@@ -241,16 +241,37 @@ func (s *Scope) get(k key) any {
 
 // markServed records that k was served to this scope from owner, in every
 // scope between the two: each handed out a value for k, and registering k in
-// one of them afterwards would give the key two live values there.
+// one of them afterwards would give the key two live values there. Scopes are
+// marked top down, so a scope marked toward owner or beyond has the rest of
+// the route marked above it and the walk stops there.
 func (s *Scope) markServed(owner *state, k key) {
-	for st := s.st; st != nil && st != owner; st = st.parent {
-		st.mu.Lock()
-		if st.served == nil {
-			st.served = make(map[key]bool, 4)
+	stop := s.st
+	for ; stop != nil && stop != owner; stop = stop.parent {
+		stop.mu.Lock()
+		to := stop.served[k]
+		stop.mu.Unlock()
+		if owner.descendsFrom(to) {
+			break
 		}
-		st.served[k] = true
-		st.mu.Unlock()
 	}
+	markDown(s.st, stop, owner, k)
+}
+
+// markDown marks k as served toward owner in each scope from st up to, not
+// including, stop, the highest first.
+func markDown(st, stop, owner *state, k key) {
+	if st == stop {
+		return
+	}
+	markDown(st.parent, stop, owner, k)
+	st.mu.Lock()
+	if !owner.descendsFrom(st.served[k]) {
+		if st.served == nil {
+			st.served = make(map[key]*state, 4)
+		}
+		st.served[k] = owner
+	}
+	st.mu.Unlock()
 }
 
 // decline is one optional key a build asked for and did not find, and the

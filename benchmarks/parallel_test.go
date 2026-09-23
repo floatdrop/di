@@ -59,6 +59,22 @@ func BenchmarkDI_Parallel_ChildGet(b *testing.B) {
 	})
 }
 
+// A warm Get of a root singleton through a child scope held per goroutine
+// under one shared middle scope, as a tenant or module scope between the
+// application and its requests would be.
+func BenchmarkDI_Parallel_NestedGet(b *testing.B) {
+	s := parallelApp()
+	mid := s.Child("tenant")
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		c := mid.Child("request")
+		c.Get[*Svc]()
+		for pb.Next() {
+			_ = c.Get[*Svc]()
+		}
+	})
+}
+
 // The whole request: open a child, register the request, build the Scoped
 // handler over a root singleton, stop the child.
 func BenchmarkDI_Parallel_RequestScope(b *testing.B) {
