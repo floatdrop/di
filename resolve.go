@@ -230,13 +230,16 @@ func (s *Scope) get(k key) any {
 		defer unwrapAbort()
 		return s.enter().get(k)
 	}
-	b, owner := s.lookup(k)
-	if b == nil {
-		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, s.r.path())})
+	for {
+		b, owner := s.lookup(k)
+		if b == nil {
+			panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, s.r.path())})
+		}
+		if v, ok := s.resolveBy(b, owner, true); ok {
+			s.markServed(owner, k)
+			return v
+		}
 	}
-	v := s.resolve(b, owner)
-	s.markServed(owner, k)
-	return v
 }
 
 // markServed records that k was served to this scope from owner, in every
@@ -332,6 +335,14 @@ func (r *resolver) readGroup(k key, from *state, seen []*binding) {
 // resolve produces b's value for the resolving scope s, honouring the
 // binding's lifetime and starting the instance when the scope is running.
 func (s *Scope) resolve(b *binding, owner *state) any {
+	v, _ := s.resolveBy(b, owner, false)
+	return v
+}
+
+// resolveBy is resolve for a binding found by key when byKey is set: it
+// reports false, having built nothing, when an Override replaced b after it
+// was looked up.
+func (s *Scope) resolveBy(b *binding, owner *state, byKey bool) (any, bool) {
 	if s.st.isStopped() {
 		panic(abort{fmt.Errorf("di: %s: %w%s", b.key, ErrStopped, s.r.path())})
 	}
@@ -348,8 +359,11 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	if !used {
 		// Hold the key against an override while this resolution runs, so a
 		// constructor cannot replace the registration it is built from. used
-		// is set before this is dropped, so the two guards leave no gap.
-		b.resolving.Add(1)
+		// is set before this is dropped, and a freeze claims before it reads
+		// used, so the two guards leave no gap.
+		if !b.hold(owner, byKey) {
+			return nil, false
+		}
 		defer b.resolving.Add(-1)
 	}
 	in := holder.instanceFor(b)
@@ -383,7 +397,7 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 	if s.r.b != nil {
 		s.r.dependOn(in, holder)
 	}
-	return v
+	return v, true
 }
 
 // dependOn records that the resolution at this node needed in, once per

@@ -32,6 +32,12 @@ below says plainly whether an upgrade can break a caller.
   now rejected at the next resolution, as it already was when the
   registration was a group member before `Wrap` ran. It used to commit, so
   `Get` served the wrapper while `All` still returned the unwrapped member.
+- An `Override` committed concurrently with the first resolution of the
+  registration it replaces can no longer let both through. The resolution
+  could hand out the old value while the `Override` committed, leaving the
+  key two live values; now one of them waits for the other, so either the
+  resolution serves the new registration or the `Override` is rejected as
+  already resolved. Found by review, not reported.
 
 ## [0.17.2] - 2026-09-23
 

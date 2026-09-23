@@ -96,6 +96,12 @@ func (st *state) freeze() {
 
 	cur := st.reg.Load()
 	var replaced []*binding // chains an Override replaces, whose marks go on commit
+	var claimed []*binding  // held off resolution until the batch commits or fails
+	defer func() {
+		for _, b := range claimed {
+			b.unclaim()
+		}
+	}()
 	index := maps.Clone(cur.index)
 	groups := maps.Clone(cur.groups)
 	all := slices.Clone(cur.all)
@@ -127,7 +133,17 @@ func (st *state) freeze() {
 					b.key, b.where(), st.name))
 			}
 			if ok {
-				if why := prev.against(b); why != "" {
+				var why string
+				switch {
+				case prev.claim():
+					claimed = append(claimed, prev)
+					why = prev.against(b)
+				case prev.used.Load():
+					why = "it has already been resolved"
+				default:
+					why = "it is being resolved"
+				}
+				if why != "" {
 					panic(fmt.Sprintf("di: %s (provided at %s) cannot be %s at %s: %s",
 						b.key, prev.where(), act, b.where(), why))
 				}

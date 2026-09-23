@@ -149,7 +149,7 @@ one way of getting two live values for a key:
 |---|---|---|
 | collision | a second registration of a key without `Override()` | last-wins let one module rewire another silently |
 | `used` | replacing or wrapping a key that has served a value | callers already hold the old value |
-| `resolving` | replacing a key while a resolution of it is in flight | the nested build would get the new value, the caller the old |
+| `resolving` | replacing a key while a resolution of it is in flight | the nested build would get the new value, the caller the old; a freeze claims it before reading `used`, and a resolution that finds it claimed waits and looks again |
 | `served` | registering a key this scope already handed down from an ancestor | the scope would have given out two values for one key |
 | `wrappers` | overriding a registration a wrapper in a live scope composes over | the wrapper would serve a value built from a registration nothing else can reach; a stopped scope's wrappers no longer count |
 

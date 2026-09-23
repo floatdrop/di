@@ -238,11 +238,18 @@ lets `lookup`, `All` and the renderers read without the mutex.
 two.** A second registration of a key in one scope needs `override`, or it is a
 collision rejected naming both sites; an `override` with nothing in *this* scope
 to override is rejected too (a child shadows a parent without the marker). Then
-`used`, `resolving` and live `wrappers` — one embedded `guard` with one `against`
-check returning the end of the rejection sentence — and `served`, which stays on
-the scope because it is a fact about the scope that handed the key down. The
-nothing-to-override check is same-scope only: no two state mutexes are ever
-ordered against each other.
+`used`, `resolving` and live `wrappers` — one embedded `guard` with one
+`against` check returning the end of the rejection sentence — and `served`,
+which stays on the scope because it is a fact about the scope that handed the
+key down. The nothing-to-override check is same-scope only: no two state mutexes
+are ever ordered against each other. `used` and `resolving` are read without a
+lock against a resolution that writes them without one, so their order is the
+guard: a freeze `claim`s `resolving` (0 to `replacing`) before `against` reads
+`used`, a resolution `hold`s (`resolving.Add(1)`) and then, for a binding found
+by key, checks it still serves the key, and it stores `used` before counting
+itself out. Whichever side comes second sees the first; a resolution that loses
+waits on the owner's mutex, which the freeze holds, and looks the key up again
+(`TestReviewOverrideRacingFirstResolution`).
 
 **`Maybe` and `All` are reported, never guarded.** Both ask about the chain *as
 it stands* — a scope below may answer either differently, and `All` re-reads
