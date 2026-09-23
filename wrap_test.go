@@ -254,6 +254,31 @@ func TestWrapWithAValueAndAScopeThatServedTheKey(t *testing.T) {
 	rejected(t, "already resolved it from an outer scope", func() { _, _ = mid.Resolve[wStore]() })
 }
 
+// A mark records the owner it was made toward. A Wrap is bound to what it
+// wraps when registered, so its build's route runs past a nearer owner that
+// marked a scope first, and a walk that stopped at any mark would leave the
+// scopes above that nearer owner free to shadow what they handed down. It
+// passes on 0f4fe52 too, which marked every scope on every walk: it pins what
+// the early stop has to keep.
+func TestServedMarksReachTheOwnerAWrapperIsBoundTo(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	z := root.Child("z")
+	m := z.Child("m")
+	x := m.Child("x")
+	w := x.Child("w")
+	w.Wrap[wStore](newWTracing) // bound to root's registration
+	m.Wire[wStore](newWPG)      // nothing has been served through m yet
+	if got := x.Child("s").Get[wStore]().Kind(); got != "pg" {
+		t.Fatalf("x's child got %s, want m's", got)
+	}
+	if got := w.Child("c").Get[wStore]().Kind(); got != "tracing(pg)" {
+		t.Fatalf("w's child got %s", got)
+	}
+	z.Wire[wStore](newWPG)
+	rejected(t, "already resolved it from an outer scope", func() { _, _ = z.Resolve[wStore]() })
+}
+
 // Explain names a wrapper as one, and draws what it wraps beneath it, built
 // or declared.
 func TestExplainShowsTheWrappedChain(t *testing.T) {

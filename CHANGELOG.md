@@ -18,6 +18,13 @@ below says plainly whether an upgrade can break a caller.
   for the top-level call and one for the service, that nothing reads once
   the value is built: 38 ns, 64 B and 2 allocations became 21 ns and none, on
   an M3 Max, and the eight-core figures above are now 7 ns and 15 ns.
+- A `Get` through nested scopes no longer locks every scope between the
+  resolving one and the owner each time. Recording that the key was handed
+  down now stops at the first scope already recorded as handing it down from
+  the same owner or one further out, so a request scope under a shared middle
+  scope takes that scope's mutex once per key rather than on every `Get`:
+  repeated warm `Get`s went from 181 ns at eight cores to 10 ns
+  (`BenchmarkDI_Parallel_NestedGet`).
 
 ### Fixed
 

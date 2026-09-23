@@ -161,7 +161,9 @@ service would otherwise be a registration nobody resolves.
 `served` is the one fact in that table a resolution leaves behind rather than a
 registration: the scope handed the key down, so registering it here now would
 give it two live values. It is recorded from the resolving scope as far as the
-owner, taking each mutex in turn.
+owner, naming that owner, and marked from the top down, so a walk that meets a
+scope already marked toward the same owner or beyond it stops there: requests
+under a shared scope do not all take its mutex.
 
 ## Two questions a build can ask that time changes
 

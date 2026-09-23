@@ -102,13 +102,14 @@ before `stopped`. It allocates no path node: the root of every top-level
 resolution is the shared `topLevel`, which `wait` does not index, and a node is
 made only when the value is not ready. It writes nothing shared: `binding.used`
 is loaded before it is stored, since it sits on the line `single` is read from
-and a store per `Get` made every core miss. The two remaining locks belong to
-the resolving side (`instanceFor` for a `Scoped` binding, `dependOn` while a
-constructor builds). `ready` summarises `ph`/`err`/`settled` and is recomputed
-by `refresh` in the same critical section as every change to them; it is set
-exactly when `await`'s locked loop would return at once. `startCtx` and
-`running` are atomics for the same reason. `benchmarks/parallel_test.go` is the
-record of what this bought.
+and a store per `Get` made every core miss. The remaining locks belong to the
+resolving side: `markServed` takes the resolving scope's own mutex for a key
+from an outer scope, `instanceFor` does for a `Scoped` binding, and `dependOn`
+the asker's while a constructor builds. `ready` summarises `ph`/`err`/`settled`
+and is recomputed by `refresh` in the same critical section as every change to
+them; it is set exactly when `await`'s locked loop would return at once.
+`startCtx` and `running` are atomics for the same reason.
+`benchmarks/parallel_test.go` is the record of what this bought.
 
 What still takes a shared lock per request is `Child` and the detach at the end
 of `teardown`, both on the parent's mutex, and `claimBuild`/`settle` on
@@ -363,9 +364,13 @@ holder. Cycles are reported once, keyed by their members.
 
 **A key is served to a whole route.** `binding.used` protects the owner;
 `markServed` records the key in every scope between the resolver and that owner,
-so a scope in the middle cannot shadow a key it already handed out. An interface
-is served by a constructor returning the implementation — `Bind` aliases are
-gone.
+so a scope in the middle cannot shadow a key it already handed out. A mark names
+the owner it was made toward and scopes are marked top down, so the walk stops
+at the first scope marked toward this owner or an ancestor of it. A bare mark is
+not enough: a `Wrap` is bound to what it wraps at registration, so its build's
+route can run past a nearer owner that marked a scope first
+(`TestServedMarksReachTheOwnerAWrapperIsBoundTo`). An interface is served by a
+constructor returning the implementation — `Bind` aliases are gone.
 
 **A stopped scope refuses to serve, checked twice.** `resolve` checks on the way
 in; `await` checks again after the wait, because the scope can stop while a

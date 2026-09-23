@@ -32,7 +32,7 @@ type state struct {
 	pending  []*binding             // registrations not yet indexed
 	started  []*instance            // build order; stopped in reverse
 	scoped   map[*binding]*instance // per-scope instances of Scoped bindings
-	served   map[key]bool           // keys this scope resolved from an outer scope; lazily made
+	served   map[key]*state         // keys this scope resolved from an outer scope, to the furthest owner; lazily made
 	children []*state
 
 	// observers is replaced whole by Observe, under mu, and read without it
@@ -132,7 +132,7 @@ func (st *state) freeze() {
 						b.key, prev.where(), act, b.where(), why))
 				}
 			}
-			if st.served[b.key] {
+			if st.served[b.key] != nil {
 				// Shadowing a key this scope handed down from an outer scope
 				// would give it two live values here.
 				panic(fmt.Sprintf("di: %s cannot be registered at %s: this scope has already resolved it from an outer scope",
