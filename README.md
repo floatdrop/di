@@ -1449,14 +1449,14 @@ the application.
 [`benchmarks/`](benchmarks/) is a separate module comparing this package with
 [samber/do](https://github.com/samber/do) and
 [uber-go/dig](https://github.com/uber-go/dig) on the same four-service graph,
-so the library itself stays dependency-free. On an Apple M3 Pro:
+so the library itself stays dependency-free. On an Apple M3 Max:
 
 | | Warm resolve | Cold register and build |
 |---|---|---|
-| `di`, `Provide` closure | 38 ns, 64 B, 2 allocs | 3.7 µs, 4.5 kB, 70 allocs |
-| `di`, `Wire` | 38 ns, 64 B, 2 allocs | 4.2 µs, 4.9 kB, 77 allocs |
-| `do` v2.1 | 125 ns, 192 B, 6 allocs | 6.1 µs, 11.5 kB, 120 allocs |
-| `dig` v1.19 | 445 ns, 768 B, 24 allocs | 16.4 µs, 24.3 kB, 302 allocs |
+| `di`, `Provide` closure | 21 ns, 0 B, 0 allocs | 4.0 µs, 4.4 kB, 68 allocs |
+| `di`, `Wire` | 21 ns, 0 B, 0 allocs | 5.1 µs, 5.4 kB, 86 allocs |
+| `do` v2.1 | 134 ns, 160 B, 6 allocs | 7.0 µs, 11.2 kB, 120 allocs |
+| `dig` v1.19 | 486 ns, 768 B, 24 allocs | 19.9 µs, 24.3 kB, 302 allocs |
 
 `di` is measured twice because `dig.Provide` is reflective like `Wire`
 rather than like a closure; the warm figures are the same, and the cold

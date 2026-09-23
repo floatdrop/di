@@ -257,7 +257,9 @@ uncontended build allocates none.
 Once a value is built, and started if a start was owed, a resolution takes no
 lock in the scope that holds it. Committed registrations are an immutable
 snapshot behind an atomic pointer, and each instance carries a ready flag,
-written under the mutex with every phase change. A thousand request scopes
+written under the mutex with every phase change. Such a resolution allocates
+nothing: a path node is made only when there is a build or a wait for it to
+take part in. A thousand request scopes
 resolving one application singleton do not queue on the application scope.
 What still locks is on the resolving side: a `Scoped` service is found in the
 resolving scope's own map, and a constructor records each dependency on its
