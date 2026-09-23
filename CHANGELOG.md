@@ -28,14 +28,16 @@ below says plainly whether an upgrade can break a caller.
   both would link two copies of the container. No identifier, signature or
   behaviour changed, so the edit is the path and nothing else:
 
-      go mod edit -droprequire github.com/floatdrop/di
-      go get golang.yandex/di@latest
       grep -rl '"github.com/floatdrop/di' --include='*.go' . \
-        | xargs perl -pi -e 's{"github\.com/floatdrop/di}{"golang.yandex/di}g'
+        | xargs -r perl -pi -e 's{"github\.com/floatdrop/di(?=[/"])}{"golang.yandex/di}g'
       gofmt -w .   # the new path sorts elsewhere in a mixed import block
+      go mod tidy  # drops the old requirement, adds the new one
 
-  The rewrite is anchored on the opening quote so that it touches import
-  paths only.
+  The rewrite is anchored on the opening quote and on the end of the path
+  element, so it touches import paths only and leaves a
+  `github.com/floatdrop/dispatch` alone. `go mod tidy` last, rather than a
+  `go get` first, because `dihttp`, `dislog` and `digrpc` move in the same
+  edit and it works out which of them a caller imports.
 
   A service's reported name carries its package path, so anything asserting on
   `Explain`, `Graph`, `Modules` or an `Event.Service` of a type declared in
