@@ -393,6 +393,28 @@ func TestWrapRouteEndsAtARecordedScope(t *testing.T) {
 	}
 }
 
+// A wrapper in a middle scope's child is bound to the root's registration and
+// passes over the middle scope's own registration of the key, which leaves
+// that scope free to override its own. v0.17.2 marked every scope on the
+// wrapper's route and refused it; e2d70af passes over a scope that registers
+// the key. (review 7, 4)
+func TestAMiddleScopePassedOverByAWrapperCanOverrideItsOwn(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	mid := root.Child("mid")
+	w := mid.Child("w")
+	w.Wrap[wStore](newWTracing) // bound to the root's registration
+	mid.Wire[wStore](newWPG)
+	_, _ = mid.Resolve[*wCache]() // commits mid's batch without resolving the key
+	if got := w.Child("c").Get[wStore]().Kind(); got != "tracing(pg)" {
+		t.Fatalf("the wrapper served %s", got)
+	}
+	mid.Wire[wStore](func() wStore { return &wCaching{} }).Override()
+	if _, err := mid.Resolve[wStore](); err != nil {
+		t.Fatalf("mid could not override its own registration: %v", err)
+	}
+}
+
 // Explain names a wrapper as one, and draws what it wraps beneath it, built
 // or declared.
 func TestExplainShowsTheWrappedChain(t *testing.T) {
