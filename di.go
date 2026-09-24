@@ -190,12 +190,7 @@ type Scope struct {
 func New() *Scope { return &Scope{st: newState("root", nil)} }
 
 func newState(name string, parent *state) *state {
-	st := &state{
-		name:       name,
-		parent:     parent,
-		scoped:     map[*binding]*instance{},
-		shutdownCh: make(chan struct{}),
-	}
+	st := &state{name: name, parent: parent}
 	st.reg.Store(emptyRegistry)
 	// One graph per container, shared by every scope under the root.
 	if parent != nil {

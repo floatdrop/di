@@ -532,7 +532,7 @@ func call(fv reflect.Value, args []reflect.Value, fails bool, served reflect.Typ
 func (b Binding[T]) edit(f func(*binding)) Binding[T] {
 	b.s.st.mu.Lock()
 	defer b.s.st.mu.Unlock()
-	if b.s.st.frozen && !slices.Contains(b.s.st.pending, b.b) {
+	if b.s.st.reg.Load() != emptyRegistry && !slices.Contains(b.s.st.pending, b.b) {
 		panic(fmt.Sprintf("di: %s (provided at %s) modified after the scope was first resolved", b.b.key, b.b.where()))
 	}
 	f(b.b)
