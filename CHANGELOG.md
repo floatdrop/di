@@ -33,6 +33,11 @@ below says plainly whether an upgrade can break a caller.
 
 ### Fixed
 
+- In `digrpc/v0.2.2`: `Register` no longer panics on every unary call to a
+  method whose proto name is not its Go name (`rpc get_user`, served by
+  `GetUser`); it looked the Go method up by the proto name. The generated
+  handler now makes the typed call itself, with no reflection per call.
+
 - A `Wrap` racing another registration of the key it wraps can no longer
   leave two live values for the key or drop a registration unseen: an
   `Override` of the target could commit between `Wrap` finding it and
