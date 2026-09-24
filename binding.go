@@ -222,7 +222,7 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 		s.arguments(wants, args[1:])
 		return call(fv, args, fails, served)
 	}, func(b *binding) {
-		b.inner, b.innerAt, b.wants, b.scoped = inner, at, wants, inner.scoped
+		b.inner, b.innerAt, b.wants = inner, at, wants // freeze gives it the inner's lifetime
 		inner.addWrapper(b)
 	})
 	return Binding[T]{s, b}
@@ -648,13 +648,15 @@ func (b *binding) need(n Need, at string) {
 	if n.kind == wantGroup {
 		param = reflect.SliceOf(param)
 	}
-	matches := 0
-	for _, w := range b.wants {
+	i, matches := -1, 0
+	for j, w := range b.wants {
 		if w.param == param {
+			if matches == 0 {
+				i = j
+			}
 			matches++
 		}
 	}
-	i := slices.IndexFunc(b.wants, func(w want) bool { return w.param == param })
 	switch {
 	case i < 0:
 		bad("(%s) matches no %s parameter of the constructor", n, typeName(param))

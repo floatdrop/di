@@ -54,7 +54,7 @@ func (s *Scope) Validate(stubs ...Stub) Validation {
 		st.freeze()
 		chain = append(chain, st)
 	}
-	v := &validator{seen: map[string]bool{}, done: map[visit]bool{}, stubs: map[key]bool{}, leaf: len(stubs) > 0}
+	v := &validator{seen: map[string]bool{}, done: map[visit]bool{}, stubs: map[key]bool{}}
 	for _, st := range stubs {
 		v.stubs[st.k] = true
 	}
@@ -108,8 +108,7 @@ type validator struct {
 	out   Validation
 	seen  map[string]bool // lines already reported, and cycles by their members
 	done  map[visit]bool  // nodes fully explored, so a diamond is walked once
-	stubs map[key]bool    // what the resolving scope will hold, by the caller's word
-	leaf  bool            // stubs were given: the resolving scope is described, so nothing is owed
+	stubs map[key]bool    // what the resolving scope will hold, by the caller's word; any at all describe it, so nothing is owed
 }
 
 // Stub names a key the scope resolving a Scoped binding will provide, for
@@ -163,6 +162,7 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 		if dep != nil {
 			next.holder = dep.holderIn(owner, holder)
 		}
+		onPath := slices.Index(path, next)
 		switch {
 		case dep == nil && e.optional:
 			// Nothing provides it and the constructor said it can do without.
@@ -171,8 +171,8 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 			// in its own scope, where the resolving scope's values are not.
 		case dep == nil:
 			v.missing(k, b, holder, md, path)
-		case slices.Contains(path, next):
-			v.cycle(path[slices.Index(path, next):], k)
+		case onPath >= 0:
+			v.cycle(path[onPath:], k)
 		case dep.wants == nil:
 			// A Provide closure or a Value declares nothing to follow.
 		case dep.scoped:
@@ -187,7 +187,7 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 func (v *validator) missing(k key, b *binding, holder *state, md mode, path []step) {
 	switch {
 	case md == cyclesOnly:
-	case md == lenient && v.leaf:
+	case md == lenient && len(v.stubs) > 0:
 		v.err(fmt.Errorf("di: %s: %w by this scope or the stubs (needed by %s; scoped, provided at %s)", k, ErrNotProvided, keysOf(path), b.site))
 	case md == lenient:
 		v.owed(fmt.Sprintf("%s: needed by %s (scoped, provided at %s)", k, b.key, b.site))
