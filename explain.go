@@ -76,10 +76,7 @@ func (s *Scope) groupMembers(k key) []found {
 
 // explainOne renders one binding's tree, and the instances that needed it.
 func (s *Scope) explainOne(sb *strings.Builder, b *binding, owner *state, seen map[*instance]bool) {
-	holder := owner
-	if b.scoped {
-		holder = s.st
-	}
+	holder := b.holderIn(owner, s.st)
 	holder.mu.Lock()
 	in := holder.instanceAt(b)
 	holder.mu.Unlock()
@@ -142,10 +139,7 @@ func (s *Scope) declaredInto(sb *strings.Builder, b *binding, holder *state, pre
 			sb.WriteString(e.k.String() + ": not provided\n")
 			continue
 		}
-		th := owner
-		if target.scoped {
-			th = holder
-		}
+		th := target.holderIn(owner, holder)
 		th.mu.Lock()
 		in := th.instanceAt(target)
 		th.mu.Unlock()
@@ -545,10 +539,7 @@ func (s *Scope) Modules() string {
 				add(&m.unchecked, shortName(b.key.t))
 				continue
 			}
-			holder := st
-			if b.scoped {
-				holder = s.st
-			}
+			holder := b.holderIn(st, s.st)
 			for _, w := range b.wants {
 				if w.kind == wantGroup {
 					// A group is a set, not one registration, and every member

@@ -51,6 +51,16 @@ func (b *binding) where() string {
 	return b.module + " (" + b.site + ")"
 }
 
+// holderIn returns the scope that holds b's instance when b, registered in
+// owner, is resolved from resolving: the owner for a singleton, the resolving
+// scope for a Scoped binding.
+func (b *binding) holderIn(owner, resolving *state) *state {
+	if b.scoped {
+		return resolving
+	}
+	return owner
+}
+
 // once rejects a second registration of a hook the binding already carries:
 // a binding has one of each, so assigning over the first would drop work the
 // caller asked for. Unlike validate this cannot wait for freeze — the field
