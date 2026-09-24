@@ -447,7 +447,7 @@ of that predicate, shared by the drain and stop steps.
   never settled — a hang for every later `Stop`.
 - Nothing in the teardown path may run a user hook against a value another hook
   still holds: `OnStop` after `OnDrain`, `OnStop` after a `Go` worker (deferred
-  to `releaseAfterWorker` when `ctx` expires), and a parent's hooks after a
+  to `release` when `ctx` expires), and a parent's hooks after a
   child's.
 - `Start`'s rollback goes through `Stop` with `context.WithoutCancel`, so it
   stops child scopes and waits for workers.
