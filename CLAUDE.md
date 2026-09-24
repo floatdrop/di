@@ -348,9 +348,20 @@ purpose. A committed `Override` retires every link of the chain registered in
 that scope down to the first wrapping an ancestor; a retired link releases its
 mark only once nothing live wraps it (`release`), and `unwrap` carries that down
 the chain. The set and `retired` are one immutable `wrapSet` behind an atomic
-pointer, replaced by CAS. One window stays open: a descendant's `Wrap` racing an
-ancestor's `Override` can mark a link the `Override` already checked — closing
-it would order two scopes' commits, which no two state mutexes ever are.
+pointer, replaced by CAS. A `Wrap` racing an `Override` of what it wraps is
+settled in `register`: the mark on the target is made in the owner's critical
+section, which a freeze holds from its claim to its commit, after checking
+there (`markAbove`) that the target still serves the key through the
+owner's committed registry; an `Override` that committed first shows and
+`Wrap` is rejected (`rejectWrap`), one deciding later sees the mark and is
+refused, and a pending one is not counted since it may yet be refused. Then,
+under the wrapper's own mutex, a registration of the key that landed there
+since the lookup, another `Wrap` included, rejects the `Wrap` too
+(`admitWrapLocked`); for a target in that same scope the check, the mark and
+the append are one critical section, and the key must still be served by
+exactly that target. Only one mutex is
+held at a time, so no two scopes' commits are ordered (#52,
+`TestWrapLosingARaceToAnOverrideIsRejected`).
 `validate.go`'s `live` follows `inner` chains so the wrapped registration gets
 its own turn; `declared` puts the inner edge first, bound rather than looked up.
 

@@ -113,7 +113,19 @@ func (s *Scope) register(k key, build func(*Scope) any, init func(*binding)) *bi
 	if init != nil {
 		init(b)
 	}
+	if b.inner != nil && b.innerAt != s.st {
+		b.markAbove()
+	}
 	s.st.mu.Lock()
+	if b.inner != nil {
+		if why := s.st.admitWrapLocked(b); why != "" {
+			s.st.mu.Unlock()
+			if b.innerAt != s.st {
+				b.inner.unwrap(b)
+			}
+			b.rejectWrap(why)
+		}
+	}
 	s.st.pending = append(s.st.pending, b)
 	s.st.hasPending.Store(true)
 	stopped := s.st.stopped.Load()
@@ -222,10 +234,70 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 		s.arguments(wants, args[1:])
 		return call(fv, args, fails, served)
 	}, func(b *binding) {
-		b.inner, b.innerAt, b.wants = inner, at, wants // freeze gives it the inner's lifetime
-		inner.addWrapper(b)
+		b.inner, b.innerAt, b.wants = inner, at, wants // freeze gives it the inner's lifetime; register marks inner
 	})
 	return Binding[T]{s, b}
+}
+
+// servesThrough reports whether inner is b or what b's chain of wrappers
+// wraps.
+func servesThrough(b, inner *binding) bool {
+	for ; b != nil; b = b.inner {
+		if b == inner {
+			return true
+		}
+	}
+	return false
+}
+
+// markAbove marks what this wrapper wraps in an ancestor, in that owner's
+// critical section, which a freeze holds from its claim to its commit: an
+// Override that committed first shows in the owner's registry and the Wrap is
+// rejected, and one deciding later sees the mark. The committed registry only,
+// since a pending Override may yet be refused. The target still serves if the
+// owner's wrappers registered since compose over it.
+func (w *binding) markAbove() {
+	at := w.innerAt
+	at.mu.Lock()
+	cur := at.reg.Load().index[w.key]
+	ok := servesThrough(cur, w.inner)
+	if ok {
+		w.inner.addWrapper(w)
+	}
+	at.mu.Unlock()
+	if !ok {
+		for cur.inner != nil && cur.innerAt == at {
+			cur = cur.inner // name the registration, not a wrapper over it
+		}
+		w.rejectWrap("the registration at " + cur.where() + " replaced it")
+	}
+}
+
+// admitWrapLocked decides, with this scope's mutex held and so in one critical
+// section with the append, whether the wrapper w may be queued here, and makes
+// its mark when its target is in this scope. The key must be served here by
+// what Wrap looked up: its target in this scope, or nothing when the target
+// is an ancestor's. It returns why not, or "".
+func (st *state) admitWrapLocked(w *binding) string {
+	cur, _ := st.currentLocked(w.key)
+	want := w.inner
+	if w.innerAt != st {
+		want = nil
+	}
+	if cur != want {
+		return "the registration at " + cur.where() + " took the key in this scope"
+	}
+	if w.innerAt == st {
+		w.inner.addWrapper(w)
+	}
+	return ""
+}
+
+// rejectWrap panics for a wrapper that lost its target while Wrap was
+// registering it, saying why.
+func (w *binding) rejectWrap(why string) {
+	panic(fmt.Sprintf("di: %s (provided at %s) cannot be wrapped at %s: %s while the Wrap was being registered",
+		w.key, w.inner.where(), w.where(), why))
 }
 
 // guard is what stops a registration being replaced once that would leave two

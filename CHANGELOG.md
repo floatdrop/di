@@ -33,6 +33,15 @@ below says plainly whether an upgrade can break a caller.
 
 ### Fixed
 
+- A `Wrap` racing another registration of the key it wraps can no longer
+  leave two live values for the key or drop a registration unseen: an
+  `Override` of the target could commit between `Wrap` finding it and
+  marking it, and the wrapper went on serving a value built from a
+  registration nothing else could reach; a registration, or another `Wrap`,
+  landing in the wrapper's own scope meanwhile was silently displaced. `Wrap`
+  now panics with a configuration error naming the registration it lost to
+  (#52).
+
 - A `Wrap` over a registration that is marked `Group()` only afterwards is
   now rejected at the next resolution, as it already was when the
   registration was a group member before `Wrap` ran. It used to commit, so
