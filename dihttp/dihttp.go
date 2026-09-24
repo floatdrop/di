@@ -32,10 +32,10 @@ type Middleware func(http.Handler) http.Handler
 //		return &http.Server{Addr: cfg.Addr, Handler: mw(mux)}
 //	}
 //
-// This is a Provide closure rather than a wired constructor because the
+// It is registered with Provide rather than Wire because the
 // middleware needs the scope itself, to open a child per request.
 func Module(s *di.Scope) {
-	s.Provide(func(s *di.Scope) Middleware { return NewMiddleware(s) })
+	s.Provide(NewMiddleware)
 }
 
 // NewMiddleware makes a Middleware whose request scopes are children of s.
