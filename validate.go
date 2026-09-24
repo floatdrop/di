@@ -160,8 +160,8 @@ func (v *validator) walk(b *binding, holder *state, md mode, path []step) {
 	for _, e := range declared(b, holder) {
 		k, dep, owner := e.k, e.b, e.owner
 		next := step{dep, owner}
-		if dep != nil && dep.scoped {
-			next.holder = holder
+		if dep != nil {
+			next.holder = dep.holderIn(owner, holder)
 		}
 		switch {
 		case dep == nil && e.optional:

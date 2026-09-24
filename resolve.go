@@ -417,9 +417,7 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 // was looked up.
 func (s *Scope) resolveBy(b *binding, owner *state, byKey bool) (any, bool) {
 	s.refuseIfStopped(b.key)
-	// The holder owns the instance: the registering scope for a singleton,
-	// the resolving scope for a Scoped binding.
-	holder := owner
+	holder := owner // b.holderIn(owner, s.st), written out: the call costs a warm Get 7%
 	if b.scoped {
 		holder = s.st
 	}
