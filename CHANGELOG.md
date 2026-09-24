@@ -38,6 +38,17 @@ below says plainly whether an upgrade can break a caller.
   key two live values; now one of them waits for the other, so either the
   resolution serves the new registration or the `Override` is rejected as
   already resolved. Found by review, not reported.
+- A registration in a scope between a resolving scope and the owner it
+  resolves from, made while that resolution was building, no longer leaves
+  the resolving scope with two values for the key: the first `Get` kept the
+  ancestor's value and every later one got the new registration. The route
+  is now claimed before the build, so such a registration is rejected as the
+  scope having already resolved the key, and one committed before the claim
+  reaches it is found and served instead. The same held beside and through a
+  `Wrap`. **A resolution that fails now leaves its route claimed as well**, so
+  a scope below the owner that tried to resolve the key refuses a fallback
+  registration of it afterwards; register the fallback before resolving, or
+  in the owner.
 
 ## [0.17.2] - 2026-09-23
 

@@ -35,7 +35,7 @@ import (
 // reported here by the same panic.
 func (s *Scope) Explain[T any]() string {
 	k := key{t: reflect.TypeFor[T]()}
-	b, owner := s.lookup(k)
+	b, owner := s.st.lookup(k)
 	members := s.groupMembers(k)
 	if b == nil && len(members) == 0 {
 		return fmt.Sprintf("%s: not provided\n", k)
@@ -562,7 +562,7 @@ func (s *Scope) Modules() string {
 					add(m, &m.needs, "all of "+shortName(w.k.t))
 					continue
 				}
-				dep, _ := (&Scope{st: holder}).lookup(w.k)
+				dep, _ := holder.lookup(w.k)
 				var from string
 				switch {
 				case dep == nil && w.kind == wantOptional:

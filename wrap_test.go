@@ -279,6 +279,120 @@ func TestServedMarksReachTheOwnerAWrapperIsBoundTo(t *testing.T) {
 	rejected(t, "already resolved it from an outer scope", func() { _, _ = z.Resolve[wStore]() })
 }
 
+// The same race through a Scoped wrapper: the route from the resolving scope
+// to the wrapper is looked up, so a scope on it that registers the key first
+// is seen, however far past it the wrapper's own route runs. (review 7, 3)
+func TestWrapRouteBeingResolvedSeesARegistrationOnIt(t *testing.T) {
+	servedAny := false
+	for i := range 1000 {
+		root := di.New()
+		root.Wire[wStore](newWPG)
+		c := root.Child("c")
+		c.Wrap[wStore](newWTracing).Scoped()
+		x := c.Child("x")
+		g := x.Child("g")
+		got := raceGetAgainst(func() wStore { return g.Get[wStore]() }, func() {
+			x.Wire[wStore](newWPG)
+			_, _ = x.Resolve[wStore]()
+		})
+		if later := served(func() wStore { return g.Get[wStore]() }); got != nil && later != nil && later != got {
+			t.Fatalf("iteration %d: g was served %s, then %s", i, got.Kind(), later.Kind())
+		}
+		servedAny = servedAny || got != nil
+	}
+	if !servedAny {
+		t.Fatal("no iteration served g a value, so none was checked")
+	}
+}
+
+// A wrapper's route reads the pending registrations of the scopes on it as
+// well as their committed ones, so a registration still pending when the
+// wrapper is first built is passed over exactly as a committed one is.
+// (review 7, 3)
+func TestWrapRoutePassesOverAPendingRegistration(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	m := root.Child("m")
+	x := m.Child("x")
+	w := x.Child("w")
+	w.Wrap[wStore](newWTracing) // bound to root's registration
+	m.Wire[wStore](newWPG)      // pending until something freezes m
+	if got := w.Child("c").Get[wStore]().Kind(); got != "tracing(pg)" {
+		t.Fatalf("w's child got %s", got)
+	}
+	if got := x.Child("s").Get[wStore]().Kind(); got != "pg" {
+		t.Fatalf("x's child got %s, want m's", got)
+	}
+}
+
+// A wrapper's route records itself only when every scope it passed over has
+// committed its own registration: a pending one can still become a group
+// member, leaving that scope neither registering the key nor marked. It
+// passes on e7b5447 too, which recorded no routes: it guards what a record
+// promises. (review 7, 3)
+func TestWrapRouteRecordsNothingOverAPendingRegistration(t *testing.T) {
+	root := di.New()
+	root.Provide(func(*di.Scope) *vT { return &vT{n: 1} })
+	m := root.Child("m")
+	x := m.Child("x")
+	w := x.Child("w")
+	w.Wrap[*vT](func(v *vT) *vT { return &vT{n: 10 + v.n} })
+	pending := m.Provide(func(*di.Scope) *vT { return &vT{n: 2} })
+	if got := w.Get[*vT]().n; got != 11 {
+		t.Fatalf("the wrapper served n=%d", got)
+	}
+	pending.Group()
+	s := x.Child("s")
+	first := s.Get[*vT]()
+	m.Provide(func(*di.Scope) *vT { return &vT{n: 3} })
+	if later := served(func() *vT { return s.Get[*vT]() }); later != nil && later != first {
+		t.Fatalf("s was served n=%d, then n=%d", first.n, later.n)
+	}
+}
+
+// A wrapper in a direct child of the scope that owns what it wraps marks
+// nothing in that owner, which can still wrap or override its own key while
+// nothing has been served from it. It passes on e7b5447 too, which marked no
+// scope from a wrapper's build: it guards where the route starts.
+// (review 7, 3)
+func TestWrapInAChildLeavesTheOwnerUnmarked(t *testing.T) {
+	root := di.New()
+	root.Wire[*vT](func() (*vT, error) { return nil, errors.New("down") })
+	c := root.Child("c")
+	c.Wrap[*vT](func(v *vT) *vT { return v })
+	if _, err := c.Resolve[*vT](); err == nil {
+		t.Fatal("a failing constructor was served")
+	}
+	root.Wrap[*vT](func(v *vT) *vT { return v })
+	func() {
+		defer func() {
+			if msg, _ := recover().(string); strings.Contains(msg, "outer scope") {
+				t.Fatalf("the owner refused its own key: %s", msg)
+			}
+		}()
+		_, _ = root.Resolve[*vT]()
+	}()
+}
+
+// A wrapper's route ends at a scope above the wrapper's whose own route to
+// the wrapped owner is recorded, and every scope below that is marked.
+func TestWrapRouteEndsAtARecordedScope(t *testing.T) {
+	root := di.New()
+	root.Wire[wStore](newWPG)
+	mid := root.Child("mid")
+	_ = mid.Child("y").Get[wStore]() // records mid's route to root
+	x := mid.Child("x")
+	w := x.Child("w")
+	w.Wrap[wStore](newWTracing)
+	if got := w.Get[wStore]().Kind(); got != "tracing(pg)" {
+		t.Fatalf("got %s", got)
+	}
+	for _, sc := range []*di.Scope{x, mid} {
+		sc.Wire[wStore](newWPG)
+		rejected(t, "already resolved it from an outer scope", func() { _, _ = sc.Resolve[wStore]() })
+	}
+}
+
 // Explain names a wrapper as one, and draws what it wraps beneath it, built
 // or declared.
 func TestExplainShowsTheWrappedChain(t *testing.T) {
