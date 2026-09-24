@@ -426,49 +426,39 @@ func (in *instance) stop(ctx context.Context, owner *state) error {
 		return nil
 	}
 	t0 := time.Now()
-	var errs []error
 	if in.cancel != nil {
 		in.cancel()
 		select {
 		case <-in.runDone:
-			if in.runErr != nil {
-				errs = append(errs, in.runErr)
-			}
 		case <-ctx.Done():
 			err := fmt.Errorf("di: stopping %s: worker did not return: %w", b.key, ctx.Err())
 			if b.onStop == nil {
 				owner.report(EventStop, b, t0, err)
 				return err
 			}
-			go in.releaseAfterWorker(context.WithoutCancel(ctx), owner, err)
+			go func() {
+				<-in.runDone
+				_ = in.release(context.WithoutCancel(ctx), owner, time.Now(), err) // reported through EventStop
+			}()
 			return err
 		}
 	}
-	if b.onStop != nil {
-		if err := callHook(b.onStop, inHook(ctx, owner), in.value); err != nil {
-			errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
+	return in.release(ctx, owner, t0, nil)
+}
+
+// release ends a stop step once the worker, if any, has returned: it runs
+// OnStop and emits the instance's single EventStop, carrying missed, the
+// deadline Stop already reported, with the worker's and the hook's results.
+func (in *instance) release(ctx context.Context, owner *state, t0 time.Time, missed error) error {
+	errs := []error{missed, in.runErr}
+	if in.b.onStop != nil {
+		if err := callHook(in.b.onStop, inHook(ctx, owner), in.value); err != nil {
+			errs = append(errs, fmt.Errorf("di: stopping %s: %w", in.b.key, err))
 		}
 	}
 	err := errors.Join(errs...)
-	owner.report(EventStop, b, t0, err)
+	owner.report(EventStop, in.b, t0, err)
 	return err
-}
-
-// releaseAfterWorker finishes a stop step whose worker outlasted Stop's
-// context. missed is what Stop returned; the instance's single EventStop is
-// emitted here and carries it with the release's own result.
-func (in *instance) releaseAfterWorker(ctx context.Context, owner *state, missed error) {
-	<-in.runDone
-	b := in.b
-	t0 := time.Now()
-	errs := []error{missed}
-	if in.runErr != nil {
-		errs = append(errs, in.runErr)
-	}
-	if err := callHook(b.onStop, inHook(ctx, owner), in.value); err != nil {
-		errs = append(errs, fmt.Errorf("di: stopping %s: %w", b.key, err))
-	}
-	owner.report(EventStop, b, t0, errors.Join(errs...))
 }
 
 // onlyCancellation reports whether err says nothing beyond context.Canceled.
@@ -512,9 +502,7 @@ func onlyCancellation(err error) bool {
 func (s *Scope) Start(ctx context.Context) error {
 	// The rollback detaches the caller's context: an already-cancelled ctx
 	// must not skip the teardown.
-	return s.start(ctx, ctx, func() (context.Context, func()) {
-		return context.WithoutCancel(ctx), func() {}
-	})
+	return s.start(ctx, ctx, func() error { return s.Stop(context.WithoutCancel(ctx)) })
 }
 
 // start is Start with the phase and the rollback bounded by the caller: Start
@@ -525,7 +513,7 @@ func (s *Scope) Start(ctx context.Context) error {
 // read and what starts a service built after this returns; phase bounds only
 // the eager builds and start hooks this call drives. A worker's context is
 // detached from phase, as instance.start says.
-func (s *Scope) start(ctx, phase context.Context, rollbackCtx func() (context.Context, func())) (err error) {
+func (s *Scope) start(ctx, phase context.Context, rollback func() error) (err error) {
 	defer recoverAbort(&err)
 	s.st.freeze()
 	if !s.st.startCtx.CompareAndSwap(nil, &ctx) {
@@ -534,7 +522,7 @@ func (s *Scope) start(ctx, phase context.Context, rollbackCtx func() (context.Co
 	eager := s.st.reg.Load().eager // a registry is never written to; a later freeze stores a new one
 
 	if err := s.buildEager(phase, eager); err != nil {
-		return errors.Join(err, s.rollback(rollbackCtx))
+		return errors.Join(err, rollback())
 	}
 
 	s.st.running.Store(true)
@@ -543,7 +531,7 @@ func (s *Scope) start(ctx, phase context.Context, rollbackCtx func() (context.Co
 	// starting one service may build more.
 	for {
 		if err := expired(phase); err != nil {
-			return errors.Join(err, s.rollback(rollbackCtx))
+			return errors.Join(err, rollback())
 		}
 		in, owner := s.st.claimNext()
 		if in == nil {
@@ -557,15 +545,9 @@ func (s *Scope) start(ctx, phase context.Context, rollbackCtx func() (context.Co
 		}
 		if err := in.startClaimed(phase, owner); err != nil {
 			err = fmt.Errorf("di: starting %s: %w", in.b.key, err)
-			return errors.Join(err, s.rollback(rollbackCtx))
+			return errors.Join(err, rollback())
 		}
 	}
-}
-
-func (s *Scope) rollback(mk func() (context.Context, func())) error {
-	ctx, cancel := mk()
-	defer cancel()
-	return s.Stop(ctx)
 }
 
 // expired reports the start phase's deadline having passed, which ends the
@@ -663,11 +645,7 @@ func (s *Scope) Stop(ctx context.Context) error {
 	if h := hookOwner(ctx); h != nil && h.descendsFrom(s.st) {
 		return fmt.Errorf("di: a lifecycle hook of scope %s called Stop on scope %s, which it is inside: call Shutdown instead", h.name, s.st.name)
 	}
-	if !s.st.stopOnce.claim(s.st, func() {
-		if s.st.stopCtx == nil {
-			s.st.stopCtx = ctx // the first Stop owns it; a later call must not clobber it
-		}
-	}) {
+	if !s.st.stopOnce.claim(s.st, func() { s.st.stopCtx = ctx }) { // only the first Stop claims
 		finished, err := s.st.stopOnce.wait(s.st, ctx)
 		if !finished {
 			return fmt.Errorf("di: waiting for scope %s to stop: %w", s.st.name, ctx.Err())
@@ -688,14 +666,11 @@ func (s *Scope) teardown(ctx context.Context) error {
 	started := s.st.started
 	s.st.started = nil // stopped was stored by drain's seal, before this snapshot
 	var wrappers []*binding
-	for _, b := range s.st.reg.Load().all {
-		if b.inner != nil {
-			wrappers = append(wrappers, b)
-		}
-	}
-	for _, b := range s.st.pending {
-		if b.inner != nil {
-			wrappers = append(wrappers, b)
+	for _, bs := range [...][]*binding{s.st.reg.Load().all, s.st.pending} {
+		for _, b := range bs {
+			if b.inner != nil {
+				wrappers = append(wrappers, b)
+			}
 		}
 	}
 	s.st.mu.Unlock()
@@ -708,7 +683,9 @@ func (s *Scope) teardown(ctx context.Context) error {
 	for _, c := range children {
 		errs = append(errs, (&Scope{st: c}).Stop(ctx))
 	}
-	errs = append(errs, stopAll(ctx, s.st, started))
+	for _, in := range slices.Backward(started) {
+		errs = append(errs, in.stopIfNeeded(ctx, s.st))
+	}
 
 	if p := s.st.parent; p != nil {
 		p.mu.Lock()
@@ -727,8 +704,7 @@ func (s *Scope) drain(ctx context.Context) error {
 	g0 := s.st.drainGen.Load()
 	var r *drainRun
 	newRun := func() *drainRun {
-		root := &drainScope{st: s.st, ours: true}
-		return &drainRun{root: root, seen: map[*state]*drainScope{s.st: root}}
+		return &drainRun{root: &drainScope{st: s.st, ours: true}}
 	}
 	claimed := s.st.drainOnce.claim(s.st, nil)
 	var err error
@@ -832,7 +808,7 @@ func (in *instance) gateStart(owner *state) bool {
 // whether it owns each one's phase, and whether that phase has ended.
 type drainRun struct {
 	root *drainScope
-	seen map[*state]*drainScope
+	seen map[*state]*drainScope // the descendants visited; lazily made
 }
 
 type drainScope struct {
@@ -881,6 +857,9 @@ func (r *drainRun) visit(ctx context.Context, ds *drainScope, progress *bool) []
 		if cs == nil {
 			*progress = true
 			cs = &drainScope{st: c}
+			if r.seen == nil {
+				r.seen = map[*state]*drainScope{}
+			}
 			r.seen[c] = cs
 			if c.drainOnce.claim(c, nil) {
 				cs.ours = true
@@ -906,12 +885,4 @@ func (r *drainRun) visit(ctx context.Context, ds *drainScope, progress *bool) []
 		return nil // reported by this scope's own Stop, not by its parent's
 	}
 	return errs
-}
-
-func stopAll(ctx context.Context, owner *state, started []*instance) error {
-	var errs []error
-	for _, in := range slices.Backward(started) {
-		errs = append(errs, in.stopIfNeeded(ctx, owner))
-	}
-	return errors.Join(errs...)
 }

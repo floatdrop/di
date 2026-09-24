@@ -94,9 +94,16 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 	sigCtx, cancelSig := signal.NotifyContext(ctx, exitSignals...)
 	defer cancelSig()
 
+	// A failed start's rollback and the exit stop the scope the same way.
+	stop := func() error {
+		stopCtx, cancel := cfg.stopContext(ctx)
+		defer cancel()
+		return s.Stop(stopCtx)
+	}
+
 	startCtx, cancelStart := cfg.startContext(ctx)
 	defer cancelStart() // a configuration rejection unwinds past the call below
-	err := s.start(ctx, startCtx, func() (context.Context, func()) { return cfg.stopContext(ctx) })
+	err := s.start(ctx, startCtx, stop)
 	cancelStart() // the phase is over; the scope keeps ctx, not startCtx
 	if err != nil {
 		// The rollback runs the hooks, so a worker can die and publish its
@@ -112,10 +119,7 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 		cause = sd.err
 	}
 
-	stopCtx, cancel := cfg.stopContext(ctx)
-	defer cancel()
-
-	stopErr := s.Stop(stopCtx)
+	stopErr := stop()
 	if cause == nil {
 		// A worker that died during the stop published its failure after the
 		// select above had woken for a signal.
