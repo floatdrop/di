@@ -82,11 +82,9 @@ func short(service, pkg string) string {
 	if pkg == "" {
 		return service
 	}
-	stars := 0
-	for stars < len(service) && service[stars] == '*' {
-		stars++
-	}
-	name, ok := strings.CutPrefix(service[stars:], pkg+".")
+	rest := strings.TrimLeft(service, "*")
+	stars := len(service) - len(rest)
+	name, ok := strings.CutPrefix(rest, pkg+".")
 	if !ok {
 		return service // not the shape the pair promises; report it whole
 	}

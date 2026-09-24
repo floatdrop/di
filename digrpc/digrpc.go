@@ -51,10 +51,10 @@ func New(s *di.Scope) Interceptor { return Interceptor{scope: s} }
 //		return grpc.NewServer(ic.Options()...)
 //	}
 //
-// This is a Provide closure rather than a wired constructor because the
+// It is registered with Provide rather than Wire because the
 // interceptor needs the scope itself, to open a child per call.
 func Module(s *di.Scope) {
-	s.Provide(func(s *di.Scope) Interceptor { return New(s) })
+	s.Provide(New)
 }
 
 // Unary is a grpc.UnaryServerInterceptor.
