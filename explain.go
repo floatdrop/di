@@ -266,21 +266,19 @@ func (s *Scope) Graph() string {
 		d     dep
 		id    int
 		phase string
+		deps  []dep
 	}
 	ids := map[*instance]int{}
 	byScope := make([][]node, len(scopes))
-	var all []node
 	for i, st := range scopes {
 		st.mu.Lock()
 		built := slices.Clone(st.started)
 		st.mu.Unlock()
 		for _, in := range built {
 			d := dep{in: in, holder: st}
-			phase, _, _ := d.inspect()
-			n := node{d: d, id: len(all), phase: phase}
-			ids[in] = n.id
-			all = append(all, n)
-			byScope[i] = append(byScope[i], n)
+			phase, deps, _ := d.inspect()
+			ids[in] = len(ids)
+			byScope[i] = append(byScope[i], node{d: d, id: ids[in], phase: phase, deps: deps})
 		}
 	}
 
@@ -302,14 +300,15 @@ func (s *Scope) Graph() string {
 	}
 	// Edges last and outside every cluster: one declared inside a cluster is
 	// drawn wrong when it crosses the boundary.
-	for _, n := range all {
-		_, deps, _ := n.d.inspect()
-		for _, d := range deps {
-			if to, ok := ids[d.in]; ok {
-				fmt.Fprintf(&sb, "  n%d -> n%d;\n", n.id, to)
+	for _, nodes := range byScope {
+		for _, n := range nodes {
+			for _, d := range n.deps {
+				if to, ok := ids[d.in]; ok {
+					fmt.Fprintf(&sb, "  n%d -> n%d;\n", n.id, to)
+				}
+				// An edge into a stopped scope, or one above the scope Graph
+				// was called on, is dropped rather than given a node.
 			}
-			// An edge into a stopped scope, or one above the scope Graph was
-			// called on, is dropped rather than given a node.
 		}
 	}
 	sb.WriteString("}\n")
@@ -318,9 +317,9 @@ func (s *Scope) Graph() string {
 
 // ---- rendering helpers -----------------------------------------------------
 
-// inspect reads one instance's phase and edges together, the only critical
-// section a rendering takes, and reports whether the instance is unbuilt, in
-// which case what the binding declares stands in for the edges. Nothing is
+// inspect reads one instance's phase and edges together, in one critical
+// section, and reports whether the instance is unbuilt, in which case what
+// the binding declares stands in for the edges. Nothing is
 // held across the recursion, so two scopes' mutexes are never held at once.
 func (d dep) inspect() (phase string, deps []dep, fresh bool) {
 	d.holder.mu.Lock()
@@ -386,11 +385,19 @@ func describe(b *binding, holder *state, phase string) string {
 // It searches from the container root, since a dependent lives in the scope
 // that holds it or below, never above what it depends on.
 func dependentsOf(from *state, target *instance) []dep {
+	return startedWhere(from, func(in *instance) bool {
+		return slices.ContainsFunc(in.deps, func(d dep) bool { return d.in == target })
+	})
+}
+
+// startedWhere lists the built instances in from and every scope under it
+// that keep reports, reading each under its holder's mutex.
+func startedWhere(from *state, keep func(*instance) bool) []dep {
 	var out []dep
 	for _, st := range walkScopes(from) {
 		st.mu.Lock()
 		for _, in := range st.started {
-			if slices.ContainsFunc(in.deps, func(d dep) bool { return d.in == target }) {
+			if keep(in) {
 				out = append(out, dep{in: in, holder: st})
 			}
 		}
@@ -432,17 +439,7 @@ func missersOf(from *state, target found) []dep {
 			return d.in.b.key == target.b.key
 		})
 	}
-	var out []dep
-	for _, st := range walkScopes(from) {
-		st.mu.Lock()
-		for _, in := range st.started {
-			if missed(in) {
-				out = append(out, dep{in: in, holder: st})
-			}
-		}
-		st.mu.Unlock()
-	}
-	return out
+	return startedWhere(from, missed)
 }
 
 // walkScopes lists st and every scope under it, parents before children and
@@ -513,7 +510,6 @@ func (s *Scope) Modules() string {
 	type module struct {
 		name                              string
 		provides, needs, wraps, unchecked []string
-		seen                              map[string]bool
 	}
 	var order []*module
 	byName := map[string]*module{}
@@ -521,17 +517,15 @@ func (s *Scope) Modules() string {
 		if m := byName[name]; m != nil {
 			return m
 		}
-		m := &module{name: name, seen: map[string]bool{}}
+		m := &module{name: name}
 		byName[name] = m
 		order = append(order, m)
 		return m
 	}
 	// Deduped per section as well as per line: a key is listed under
 	// provides and again under unchecked.
-	add := func(m *module, list *[]string, line string) {
-		id := fmt.Sprintf("%p:%s", list, line)
-		if !m.seen[id] {
-			m.seen[id] = true
+	add := func(list *[]string, line string) {
+		if !slices.Contains(*list, line) {
 			*list = append(*list, line)
 		}
 	}
@@ -540,15 +534,15 @@ func (s *Scope) Modules() string {
 		for _, b := range st.live() {
 			m := get(moduleLabel(b))
 			if b.inner != nil {
-				add(m, &m.wraps, shortName(b.key.t)+" ← "+moduleLabel(b.inner))
+				add(&m.wraps, shortName(b.key.t)+" ← "+moduleLabel(b.inner))
 			} else {
-				add(m, &m.provides, shortName(b.key.t))
+				add(&m.provides, shortName(b.key.t))
 			}
 			switch {
 			case b.isValue:
 				continue
 			case b.wants == nil:
-				add(m, &m.unchecked, shortName(b.key.t))
+				add(&m.unchecked, shortName(b.key.t))
 				continue
 			}
 			holder := st
@@ -559,24 +553,24 @@ func (s *Scope) Modules() string {
 				if w.kind == wantGroup {
 					// A group is a set, not one registration, and every member
 					// names its own module under "provides".
-					add(m, &m.needs, "all of "+shortName(w.k.t))
+					add(&m.needs, "all of "+shortName(w.k.t))
 					continue
 				}
-				dep, _ := holder.lookup(w.k)
+				to, _ := holder.lookup(w.k)
 				var from string
 				switch {
-				case dep == nil && w.kind == wantOptional:
+				case to == nil && w.kind == wantOptional:
 					from = "not provided, optional"
-				case dep == nil && b.scoped:
+				case to == nil && b.scoped:
 					from = "owed to a resolving scope"
-				case dep == nil:
+				case to == nil:
 					from = "not provided"
-				case moduleLabel(dep) == m.name:
+				case moduleLabel(to) == m.name:
 					continue // the module's own business
 				default:
-					from = moduleLabel(dep)
+					from = moduleLabel(to)
 				}
-				add(m, &m.needs, shortName(w.k.t)+" ← "+from)
+				add(&m.needs, shortName(w.k.t)+" ← "+from)
 			}
 		}
 	}
@@ -585,12 +579,9 @@ func (s *Scope) Modules() string {
 	for _, m := range order {
 		sb.WriteString(m.name + "\n")
 		section := func(label string, lines []string) {
-			for i, l := range lines {
-				if i == 0 {
-					fmt.Fprintf(&sb, "  %-10s %s\n", label, l)
-				} else {
-					fmt.Fprintf(&sb, "  %-10s %s\n", "", l)
-				}
+			for _, l := range lines {
+				fmt.Fprintf(&sb, "  %-10s %s\n", label, l)
+				label = "" // named on the first line only
 			}
 		}
 		if len(m.provides) > 0 {
