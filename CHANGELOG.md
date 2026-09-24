@@ -7,23 +7,35 @@ below says plainly whether an upgrade can break a caller.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-24
+
+Three races that could leave a key two live values are closed, and a warm
+resolution got several times faster. `go doc -all` against 0.17.2 is
+unchanged in `di` and `dislog`; in `dihttp` one doc comment is reworded.
+**An upgrade can break a caller** in one case: a resolution that fails now
+leaves its route claimed, so a scope below the owner that tried to resolve a
+key refuses a fallback registration of it afterwards (see Fixed). A
+registration racing a resolution or a `Wrap` of the same key may now be
+refused where it used to commit into an inconsistent state.
+
 ### Changed
 
 - A warm `Get` no longer writes to the registration it reads. Every
   resolution stored the "resolved" mark again, on the cache line the value is
   read from, so cores resolving the same singleton kept invalidating each
-  other: a warm `Get` at eight cores took 56 ns and now takes 19 ns on an M3
-  Max, and 61 ns through a child scope now takes 34 ns.
+  other.
 - A warm `Get` no longer allocates. It made two resolution-path nodes, one
   for the top-level call and one for the service, that nothing reads once
-  the value is built: 38 ns, 64 B and 2 allocations became 21 ns and none, on
-  an M3 Max, and the eight-core figures above are now 7 ns and 15 ns.
+  the value is built. Together with the entry above, on an M3 Max: a warm
+  `Get` went from 38 ns, 64 B and 2 allocations to 21 ns and none, and at
+  eight cores from 56 ns to about 3 ns, or from 61 ns to about 6 ns through a
+  child scope.
 - A `Get` through nested scopes no longer locks every scope between the
   resolving one and the owner each time. Recording that the key was handed
   down now stops at the first scope already recorded as handing it down from
   the same owner or one further out, so a request scope under a shared middle
   scope takes that scope's mutex once per key rather than on every `Get`:
-  repeated warm `Get`s went from 181 ns at eight cores to 10 ns
+  repeated warm `Get`s went from 181 ns at eight cores to about 8 ns
   (`BenchmarkDI_Parallel_NestedGet`).
 - A child scope is smaller and cheaper to open: 256 bytes rather than 288,
   and one allocation where there were three, since what only `Run` and
@@ -37,7 +49,6 @@ below says plainly whether an upgrade can break a caller.
   method whose proto name is not its Go name (`rpc get_user`, served by
   `GetUser`); it looked the Go method up by the proto name. The generated
   handler now makes the typed call itself, with no reflection per call.
-
 - A `Wrap` racing another registration of the key it wraps can no longer
   leave two live values for the key or drop a registration unseen: an
   `Override` of the target could commit between `Wrap` finding it and
@@ -46,7 +57,6 @@ below says plainly whether an upgrade can break a caller.
   landing in the wrapper's own scope meanwhile was silently displaced. `Wrap`
   now panics with a configuration error naming the registration it lost to
   (#52).
-
 - A `Wrap` over a registration that is marked `Group()` only afterwards is
   now rejected at the next resolution, as it already was when the
   registration was a group member before `Wrap` ran. It used to commit, so
@@ -1213,7 +1223,8 @@ rollback and deterministic stop order, `Run` hooks for workers, health
 checks, `Run` and `Shutdown` for graceful termination, and observability
 events.
 
-[Unreleased]: https://github.com/yandex/di/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/yandex/di/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/yandex/di/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/yandex/di/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/yandex/di/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/yandex/di/compare/v0.16.2...v0.17.0
