@@ -103,13 +103,14 @@ resolution is the shared `topLevel`, which `wait` does not index, and a node is
 made only when the value is not ready. It writes nothing shared: `binding.used`
 is loaded before it is stored, since it sits on the line `single` is read from
 and a store per `Get` made every core miss. The remaining locks belong to the
-resolving side: `markServed` takes the resolving scope's own mutex for a key
-from an outer scope, `instanceFor` does for a `Scoped` binding, and `dependOn`
-the asker's while a constructor builds. `ready` summarises `ph`/`err`/`settled`
-and is recomputed by `refresh` in the same critical section as every change to
-them; it is set exactly when `await`'s locked loop would return at once.
-`startCtx` and `running` are atomics for the same reason.
-`benchmarks/parallel_test.go` is the record of what this bought.
+resolving side: `claimed` takes the resolving scope's own mutex for a key from
+an outer scope, and a new scope's first `claim` of it the mutexes above it up to
+the first scope with a recorded route, `instanceFor` does for a `Scoped`
+binding, and `dependOn` the asker's while a constructor builds. `ready`
+summarises `ph`/`err`/`settled` and is recomputed by `refresh` in the same
+critical section as every change to them; it is set exactly when `await`'s
+locked loop would return at once. `startCtx` and `running` are atomics for the
+same reason. `benchmarks/parallel_test.go` is the record of what this bought.
 
 What still takes a shared lock per request is `Child` and the detach at the end
 of `teardown`, both on the parent's mutex, and `claimBuild`/`settle` on
@@ -333,7 +334,7 @@ section as well as line. The guide pins both in `examples/guide/testdata/`.
 `state.current` reads this scope's pending batch and index *without* freezing,
 then `lookup` freezes ancestors as a resolution would — and stores it as
 `binding.inner`/`innerAt`. The build resolves the inner by binding, not by key,
-and calls `markServed`; edge, build order and cycle check fall out of that. A
+and calls `markBound`; edge, build order and cycle check fall out of that. A
 child's wrapper is that child's registration of the key over the parent's
 instance, which is fx's module-scoped `Decorate` with no new mechanism.
 
@@ -370,14 +371,38 @@ only. A `Scoped` dependency is walked in the caller's mode under the same
 holder. Cycles are reported once, keyed by their members.
 
 **A key is served to a whole route.** `binding.used` protects the owner;
-`markServed` records the key in every scope between the resolver and that owner,
-so a scope in the middle cannot shadow a key it already handed out. A mark names
-the owner it was made toward and scopes are marked top down, so the walk stops
-at the first scope marked toward this owner or an ancestor of it. A bare mark is
-not enough: a `Wrap` is bound to what it wraps at registration, so its build's
-route can run past a nearer owner that marked a scope first
-(`TestServedMarksReachTheOwnerAWrapperIsBoundTo`). An interface is served by a
-constructor returning the implementation — `Bind` aliases are gone.
+`served` marks every scope between the resolver and that owner, so a scope in
+the middle cannot shadow a key it already handed out. A scope's entry is nil for
+a bare mark, never trusted, or the owner of a *recorded* route: every scope from
+it to that owner is marked and none registers the key, so a registration there
+is refused and a lookup that found that owner, however long ago, still would.
+`get` does a lock-free `lookup`, which freezes the scopes up to the owner and no
+further, and trusts it when the owner is its own scope or within its scope's
+record (`recorded`). Otherwise, unless the scope has stopped, `claim` walks up
+under each scope's mutex, checking for the scope's own registration and marking
+it in the critical section `freeze` commits under: a registration either ends
+the walk there or is refused afterwards. A scope with a recorded route ends the
+walk too, the owner being what a lock-free `lookup` above it finds. Once the
+walk ends every scope it marked records the owner, so the next claim from a
+sibling stops at the first shared scope. The route is claimed before the build,
+so a failed build leaves it marked and the scope then refuses a fallback
+registration of the key (`TestReviewRouteIsClaimedBeforeTheBuild`,
+`TestReviewRegistrationOnARouteBeingResolved`,
+`TestClaimLooksUpAfterTheRecordItStopsAt`); a `Stop` landing between `get`'s
+stopped check and the claim can leave marks the same way. A `Wrap` is bound to
+what it wraps at registration, so its build marks the scopes above the wrapper's
+own up to the wrapped registration's owner with `markBound`, which freezes
+nothing and passes over a scope that registers the key itself, committed or
+pending. It records the route on the scope above the wrapper only if it passed
+over none, since that is what a record promises; a route that passes over a
+registration is walked again on every build. The scopes below the wrapper are
+the `get`'s claim (`TestServedMarksReachTheOwnerAWrapperIsBoundTo`,
+`TestWrapRouteBeingResolvedSeesARegistrationOnIt`,
+`TestWrapRoutePassesOverAPendingRegistration`,
+`TestWrapRouteRecordsNothingOverAPendingRegistration`,
+`TestWrapRouteEndsAtARecordedScope`, `TestWrapInAChildLeavesTheOwnerUnmarked`,
+`TestClaimLeavesUnrelatedBatchesAlone`). An interface is served by a constructor
+returning the implementation — `Bind` aliases are gone.
 
 **A stopped scope refuses to serve, checked twice.** `resolve` checks on the way
 in; `await` checks again after the wait, because the scope can stop while a

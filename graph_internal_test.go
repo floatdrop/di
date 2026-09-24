@@ -1,6 +1,9 @@
 package di
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // A wait is indexed under every node of the blocked resolution's path up to
 // and including the first finished one, because descends matches a node before
@@ -76,5 +79,62 @@ func TestTopLevelResolutionSharesAnUnindexedRoot(t *testing.T) {
 	g.unwait(e)
 	if topLevel.done.Load() {
 		t.Error("the shared root was marked finished")
+	}
+}
+
+// A claim that ends at a scope with a recorded route looks k up above it
+// after reading that record, so a registration committed since the caller's
+// own lookup is the owner it returns. (review 7, 3)
+func TestClaimLooksUpAfterTheRecordItStopsAt(t *testing.T) {
+	k := key{t: reflect.TypeFor[*graph]()}
+	root := New()
+	root.Provide(func(*Scope) *graph { return &graph{} })
+	mid := root.Child("mid")
+	leaf := mid.Child("leaf")
+	lc := leaf.Child("lc")
+	if _, owner := lc.st.lookup(k); owner != root.st {
+		t.Fatal("the setup expects the root to own the key at first")
+	}
+	mid.Provide(func(*Scope) *graph { return &graph{} })
+	_ = leaf.Get[*graph]() // commits mid's registration; leaf records mid
+	if _, owner := lc.st.claim(k); owner != mid.st {
+		t.Fatalf("claim returned %s's registration, want mid's", owner.name)
+	}
+}
+
+// get trusts a lookup only when it found the owner of its scope's recorded
+// route: a lookup made before a nearer owner was recorded is stale.
+// (review 7, 3)
+func TestClaimedDistrustsALookupStaleAgainstTheRecord(t *testing.T) {
+	k := key{t: reflect.TypeFor[*graph]()}
+	root := New()
+	root.Provide(func(*Scope) *graph { return &graph{} })
+	mid := root.Child("mid")
+	leaf := mid.Child("leaf")
+	_, stale := leaf.st.lookup(k)
+	mid.Provide(func(*Scope) *graph { return &graph{} })
+	_ = leaf.Child("sibling").Get[*graph]() // records mid on leaf
+	if leaf.st.claimed(k, stale) {
+		t.Fatal("a lookup that found the root before mid registered was trusted")
+	}
+	if !leaf.st.claimed(k, mid.st) {
+		t.Fatal("the recorded owner was not trusted")
+	}
+}
+
+// A wrapper's route that meets a scope with a recorded route stops there and
+// records the owner on the scope above the wrapper. (review 7, 3)
+func TestMarkBoundRecordsAtAScopeWithARecordedRoute(t *testing.T) {
+	k := key{t: reflect.TypeFor[*graph]()}
+	root := New()
+	root.Provide(func(*Scope) *graph { return &graph{} })
+	mid := root.Child("mid")
+	_ = mid.Child("y").Get[*graph]() // records root on mid
+	x := mid.Child("x")
+	w := x.Child("w")
+	w.Wrap[*graph](func(g *graph) *graph { return g })
+	_ = w.Get[*graph]()
+	if got := x.st.served[k]; got != root.st {
+		t.Fatalf("x records %v, want the root", got)
 	}
 }

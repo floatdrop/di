@@ -6,6 +6,7 @@ package di_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -583,5 +584,152 @@ func TestReviewOverrideRacingFirstResolution(t *testing.T) {
 		if got != nil && got.n == 1 && committed {
 			t.Fatalf("iteration %d: the old registration served a value and the Override still committed", i)
 		}
+	}
+}
+
+// A scope a resolution is passing through, between the resolving scope and
+// the owner it looked up, that commits its own registration of the key before
+// the route is marked gives the resolving scope nothing: the resolution looks
+// again, and its scope serves one value for the key. (review 7, 3)
+func TestReviewRegistrationOnARouteBeingResolved(t *testing.T) {
+	servedAny := false
+	for i := range 1000 {
+		root := di.New()
+		root.Provide(func(*di.Scope) *vT { return &vT{n: 1} })
+		mid := root.Child("mid")
+		leaf := mid.Child("leaf")
+		got := raceGetAgainst(func() *vT { return leaf.Get[*vT]() }, func() {
+			mid.Provide(func(*di.Scope) *vT { return &vT{n: 2} })
+			_, _ = mid.Resolve[*vT]()
+		})
+		if later := served(func() *vT { return leaf.Get[*vT]() }); got != nil && later != nil && later != got {
+			t.Fatalf("iteration %d: leaf was served n=%d, then n=%d", i, got.n, later.n)
+		}
+		servedAny = servedAny || got != nil
+	}
+	if !servedAny {
+		t.Fatal("no iteration served leaf a value, so none was checked")
+	}
+}
+
+// served returns what get serves, or the zero value if it panics, as it does
+// through a scope whose rejected registration is still pending.
+func served[T any](get func() T) (v T) {
+	defer func() { _ = recover() }()
+	return get()
+}
+
+// raceGetAgainst runs get and other together, released at once, and returns
+// what get served, or nil if it panicked.
+func raceGetAgainst[T any](get func() T, other func()) (got T) {
+	var ready atomic.Int32
+	gate := func() {
+		ready.Add(1)
+		for ready.Load() < 2 {
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer func() { _ = recover() }()
+		gate()
+		got = get()
+	})
+	wg.Go(func() {
+		defer func() { _ = recover() }()
+		gate()
+		other()
+	})
+	wg.Wait()
+	return got
+}
+
+// A route is claimed before its value is built, so a scope on it cannot
+// register the key while a resolution through it is still building, and no
+// value is built from an owner the resolution then abandons. (review 7, 3)
+func TestReviewRouteIsClaimedBeforeTheBuild(t *testing.T) {
+	for _, shape := range []string{"plain", "beside a wrapper"} {
+		t.Run(shape, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var park atomic.Bool
+			root := di.New()
+			root.Provide(func(*di.Scope) *vT {
+				if park.CompareAndSwap(true, false) {
+					close(entered)
+					<-release
+				}
+				return &vT{n: 1}
+			}).Scoped()
+			mid := root.Child("mid")
+			if shape == "beside a wrapper" {
+				// Built first, so its route's marks are there for leaf's claim.
+				// This shape passes on e7b5447 too: it guards how the two kinds
+				// of mark meet, not a defect.
+				wrapping := mid.Child("wrapping")
+				wrapping.Wrap[*vT](func(v *vT) *vT { return &vT{n: 10 + v.n} })
+				if got := wrapping.Child("r").Get[*vT]().n; got != 11 {
+					t.Fatalf("the wrapper served n=%d", got)
+				}
+			}
+			leaf := mid.Child("leaf")
+			park.Store(true)
+			var got *vT
+			var wg sync.WaitGroup
+			wg.Go(func() { got = leaf.Get[*vT]() })
+			<-entered
+			mid.Provide(func(*di.Scope) *vT { return &vT{n: 2} })
+			rejected(t, "already resolved it from an outer scope", func() { _, _ = mid.Resolve[*vT]() })
+			close(release)
+			wg.Wait()
+			if got.n != 1 {
+				t.Fatalf("leaf was served n=%d", got.n)
+			}
+		})
+	}
+}
+
+// A stopped scope refuses before it claims anything, so a resolution it
+// refuses leaves no mark on the live scopes above it. It passes on e7b5447
+// too, which marked only after a build: it guards the claim's order.
+// (review 7, 3)
+func TestReviewStoppedScopeClaimsNothing(t *testing.T) {
+	root := di.New()
+	root.Provide(func(*di.Scope) *vT { return &vT{n: 1} })
+	mid := root.Child("mid")
+	leaf := mid.Child("leaf")
+	if err := leaf.Stop(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leaf.Resolve[*vT](); !errors.Is(err, di.ErrStopped) {
+		t.Fatalf("got %v, want ErrStopped", err)
+	}
+	mid.Provide(func(*di.Scope) *vT { return &vT{n: 2} })
+	if got, err := mid.Resolve[*vT](); err != nil || got.n != 2 {
+		t.Fatalf("mid's own registration: %v, %v", got, err)
+	}
+}
+
+// A claim commits what the resolution would look through and nothing above
+// it, so a rejected batch in a scope above the owner, or between a wrapper
+// and what it wraps, is not this resolution's to report. It passes on e7b5447
+// too: it guards how far the claim reaches.
+func TestClaimLeavesUnrelatedBatchesAlone(t *testing.T) {
+	root := di.New()
+	mid := root.Child("mid")
+	mid.Provide(func(*di.Scope) *vT { return &vT{n: 1} })
+	root.Provide(func(*di.Scope) *DB { return &DB{} })
+	root.Provide(func(*di.Scope) *DB { return &DB{} }) // a collision, pending
+	if got, err := mid.Child("leaf").Resolve[*vT](); err != nil || got.n != 1 {
+		t.Fatalf("above the owner: %v, %v", got, err)
+	}
+
+	r := di.New()
+	r.Provide(func(*di.Scope) *vT { return &vT{n: 1} })
+	m := r.Child("m")
+	w := m.Child("w")
+	w.Wrap[*vT](func(v *vT) *vT { return &vT{n: 10 + v.n} })
+	m.Provide(func(*di.Scope) *DB { return &DB{} })
+	m.Provide(func(*di.Scope) *DB { return &DB{} }) // a collision, pending
+	if got, err := w.Resolve[*vT](); err != nil || got.n != 11 {
+		t.Fatalf("between a wrapper and what it wraps: %v, %v", got, err)
 	}
 }

@@ -254,7 +254,7 @@ func declared(b *binding, holder *state) []edge {
 			}
 			continue
 		}
-		dep, owner := (&Scope{st: holder}).lookup(w.k)
+		dep, owner := holder.lookup(w.k)
 		out = append(out, edge{k: w.k, b: dep, owner: owner, optional: w.kind == wantOptional})
 	}
 	return out

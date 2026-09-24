@@ -192,18 +192,23 @@ func (s *Scope) Wrap[T any](fn any) Binding[T] {
 	// Ancestors are looked up as a resolution would look them up.
 	inner, at := s.st.current(k)
 	if inner == nil && s.st.parent != nil {
-		inner, at = (&Scope{st: s.st.parent}).lookup(k)
+		inner, at = s.st.parent.lookup(k)
 	}
 	if inner == nil {
 		panic(fmt.Sprintf("di: %s: nothing provides %s in scope %s or above; a group is read with All and cannot be wrapped", name, k, s.st.name))
 	}
 	wants := params(ft, 1)
+	reg := s.st
 	b := s.register(k, func(s *Scope) any {
 		args := make([]reflect.Value, len(wants)+1)
+		// Above the wrapper's own scope, which has k: a claim marks the
+		// scopes below it.
+		if reg != at {
+			reg.parent.markBound(at, k)
+		}
 		// Resolved as a dependency, which records the edge, keeps build order
 		// and catches a wrapper that reaches back into itself.
 		args[0] = argument(s.resolve(inner, at), ft.In(0))
-		s.markServed(at, k)
 		s.arguments(wants, args[1:])
 		return call(fv, args, fails, served)
 	}, func(b *binding) {
@@ -479,6 +484,11 @@ func (s *Scope) arguments(wants []want, args []reflect.Value) {
 func (st *state) current(k key) (*binding, *state) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	return st.currentLocked(k)
+}
+
+// currentLocked is current with the scope's mutex held.
+func (st *state) currentLocked(k key) (*binding, *state) {
 	for _, b := range slices.Backward(st.pending) {
 		if b.key == k && !b.group {
 			return b, st

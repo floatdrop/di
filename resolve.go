@@ -198,8 +198,8 @@ func as[T any](v any) T {
 
 // lookup finds the binding registered for k in this scope or an ancestor,
 // and the scope that owns it, or nil.
-func (s *Scope) lookup(k key) (*binding, *state) {
-	for st := s.st; st != nil; st = st.parent {
+func (st *state) lookup(k key) (*binding, *state) {
+	for ; st != nil; st = st.parent {
 		st.freeze()
 		if b, ok := st.reg.Load().index[k]; ok {
 			return b, st
@@ -231,50 +231,123 @@ func (s *Scope) get(k key) any {
 		return s.enter().get(k)
 	}
 	for {
-		b, owner := s.lookup(k)
+		b, owner := s.st.lookup(k)
+		if b != nil && !s.st.claimed(k, owner) {
+			s.refuseIfStopped(k)
+			b, owner = s.st.claim(k)
+		}
 		if b == nil {
 			panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrNotProvided, s.r.path())})
 		}
 		if v, ok := s.resolveBy(b, owner, true); ok {
-			s.markServed(owner, k)
 			return v
 		}
 	}
 }
 
-// markServed records that k was served to this scope from owner, in every
-// scope between the two: each handed out a value for k, and registering k in
-// one of them afterwards would give the key two live values there. Scopes are
-// marked top down, so a scope marked toward owner or beyond has the rest of
-// the route marked above it and the walk stops there.
-func (s *Scope) markServed(owner *state, k key) {
-	stop := s.st
-	for ; stop != nil && stop != owner; stop = stop.parent {
-		stop.mu.Lock()
-		to := stop.served[k]
-		stop.mu.Unlock()
-		if owner.descendsFrom(to) {
-			break
-		}
+// refuseIfStopped aborts a resolution of k from a stopped scope.
+func (s *Scope) refuseIfStopped(k key) {
+	if s.st.isStopped() {
+		panic(abort{fmt.Errorf("di: %s: %w%s", k, ErrStopped, s.r.path())})
 	}
-	markDown(s.st, stop, owner, k)
 }
 
-// markDown marks k as served toward owner in each scope from st up to, not
-// including, stop, the highest first.
-func markDown(st, stop, owner *state, k key) {
-	if st == stop {
+// claimed reports whether owner, found by a lookup from this scope, is this
+// scope or the owner of its recorded route. Every scope on a recorded route is
+// marked and registers nothing for k, so a lookup that found that owner,
+// however long ago, still would; one that found another is stale.
+func (st *state) claimed(k key, owner *state) bool {
+	if owner == st {
+		return true
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return owner.descendsFrom(st.served[k])
+}
+
+// claim marks every scope from this one up to the owner of k, checking each
+// for its own registration in the critical section freeze commits under. It
+// ends at a registration, or at a scope with a recorded route, above which it
+// looks k up once that record is read; then it records the owner on every
+// scope it marked. The caller's lookup froze the scopes up to the owner.
+func (st *state) claim(k key) (*binding, *state) {
+	var b *binding
+	var owner, end *state
+	for at := st; at != nil && b == nil; at = at.parent {
+		if b = at.reg.Load().index[k]; b != nil { // the owner is not locked
+			owner, end = at, at
+			break
+		}
+		at.mu.Lock()
+		to := at.served[k]
+		if b = at.reg.Load().index[k]; b == nil {
+			at.markLocked(k)
+		}
+		at.mu.Unlock()
+		switch {
+		case b != nil:
+			owner, end = at, at
+		case to != nil:
+			b, owner = at.parent.lookup(k)
+			end = at
+		}
+	}
+	for at := st; at != end; at = at.parent {
+		at.record(k, owner)
+	}
+	return b, owner
+}
+
+// markLocked marks k as handed down from this scope, keeping a recorded owner.
+// Called with the scope's mutex held.
+func (st *state) markLocked(k key) {
+	if _, ok := st.served[k]; ok {
 		return
 	}
-	markDown(st.parent, stop, owner, k)
+	if st.served == nil {
+		st.served = make(map[key]*state, 4)
+	}
+	st.served[k] = nil
+}
+
+// record notes that the route from this scope to owner is marked.
+func (st *state) record(k key, owner *state) {
 	st.mu.Lock()
 	if !owner.descendsFrom(st.served[k]) {
-		if st.served == nil {
-			st.served = make(map[key]*state, 4)
-		}
+		st.markLocked(k)
 		st.served[k] = owner
 	}
 	st.mu.Unlock()
+}
+
+// markBound marks the scopes from this one up to, not including, owner for a
+// Wrap's bound route, passing over any that registers k itself, committed or
+// pending. It records the route here only if it passed over none, since a
+// record promises a route with no registration of k on it.
+func (st *state) markBound(owner *state, k key) {
+	if st == owner {
+		return
+	}
+	whole := true
+	for at := st; at != nil && at != owner; at = at.parent {
+		at.mu.Lock()
+		if owner.descendsFrom(at.served[k]) {
+			at.mu.Unlock()
+			if at == st {
+				return
+			}
+			break
+		}
+		if b, _ := at.currentLocked(k); b == nil {
+			at.markLocked(k)
+		} else {
+			whole = false
+		}
+		at.mu.Unlock()
+	}
+	if whole {
+		st.record(k, owner)
+	}
 }
 
 // decline is one optional key a build asked for and did not find, and the
@@ -343,9 +416,7 @@ func (s *Scope) resolve(b *binding, owner *state) any {
 // reports false, having built nothing, when an Override replaced b after it
 // was looked up.
 func (s *Scope) resolveBy(b *binding, owner *state, byKey bool) (any, bool) {
-	if s.st.isStopped() {
-		panic(abort{fmt.Errorf("di: %s: %w%s", b.key, ErrStopped, s.r.path())})
-	}
+	s.refuseIfStopped(b.key)
 	// The holder owns the instance: the registering scope for a singleton,
 	// the resolving scope for a Scoped binding.
 	holder := owner
@@ -589,7 +660,7 @@ func (s *Scope) Maybe[T any]() (T, bool) {
 // maybe is Maybe by key, shared with the Optional parameter of a Wire
 // constructor.
 func (s *Scope) maybe(k key) (any, bool) {
-	if b, _ := s.lookup(k); b == nil {
+	if b, _ := s.st.lookup(k); b == nil {
 		if s.inFlight() && s.r.b != nil {
 			s.r.declined(k, s.st)
 		}

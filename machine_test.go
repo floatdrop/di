@@ -882,6 +882,19 @@ func FuzzMachine(f *testing.F) {
 	// stopping at a wrapped link, and the cascade when that scope stops are
 	// reached by nothing else a generator builds.
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 1, 0, 1, 4, 0, 3, 0, 1, 4, 0, 1, 0, 1, 4, 0, 1, 0, 0, 2, 1, 1, 0, 0, 0, 6, 3, 0, 0, 0, 6, 0, 0, 0, 0})
+	// A grandchild's wrapper over the root's registration, which marks the
+	// route above the wrapper when built, then a resolution from the scope it
+	// passed; and a claim that ends at a scope whose own claim recorded the
+	// route.
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 3, 0, 1, 4, 2, 3, 0, 0, 0, 2, 1, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 0, 0, 2, 1, 0, 0, 0, 2, 3, 0, 0, 0})
+	// A wrapper's route that the scope above it already recorded, and one
+	// that passes over a registration still pending there.
+	f.Add([]byte{0, 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 3, 0, 1, 4, 2, 3, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 3, 0, 1, 4, 0, 1, 0, 0, 0, 2, 3, 0, 0, 0})
+	// An Override of a key already resolved, which a freeze claims and then
+	// refuses.
+	f.Add([]byte{0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		ops := decode(data)
 		if len(ops) == 0 {

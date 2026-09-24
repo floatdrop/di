@@ -159,11 +159,16 @@ nothing in the same scope to override is rejected, since a fake for a renamed
 service would otherwise be a registration nobody resolves.
 
 `served` is the one fact in that table a resolution leaves behind rather than a
-registration: the scope handed the key down, so registering it here now would
-give it two live values. It is recorded from the resolving scope as far as the
-owner, naming that owner, and marked from the top down, so a walk that meets a
-scope already marked toward the same owner or beyond it stops there: requests
-under a shared scope do not all take its mutex.
+registration: the scope hands the key down, so registering it here now would
+give it two live values. The route is claimed before the value is built, by one
+walk that checks each scope for its own registration and marks it under the
+mutex a registration commits under, so a registration in the middle either ends
+the walk there or is refused. Once the route is marked every scope the walk
+marked records the owner, and a later resolution from any of them trusts that
+record instead of walking and locking the scopes above it again. A wrapper's
+build marks the scopes above it up to what it wraps, passing over a scope that
+registers the key itself, and records its route only if it passed over none,
+since a record promises that no scope on the route registers the key.
 
 ## Two questions a build can ask that time changes
 
