@@ -19,9 +19,10 @@ import (
 func (s *Scope) Shutdown(cause error) {
 	first := false
 	for st := s.st; st != nil; st = st.parent {
-		st.shutdownOnce.Do(func() {
-			st.shutdownErr = cause
-			close(st.shutdownCh)
+		sd := st.shutdownState()
+		sd.once.Do(func() {
+			sd.err = cause
+			close(sd.ch)
 			first = first || st == s.st
 		})
 	}
@@ -104,10 +105,11 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 	}
 
 	var cause error
+	sd := s.st.shutdownState()
 	select {
 	case <-sigCtx.Done():
-	case <-s.st.shutdownCh:
-		cause = s.st.shutdownErr
+	case <-sd.ch:
+		cause = sd.err
 	}
 
 	stopCtx, cancel := cfg.stopContext(ctx)
@@ -125,9 +127,13 @@ func (s *Scope) Run(ctx context.Context, opts ...RunOption) error {
 // publishedCause reports the failure Shutdown recorded, without waiting for
 // one.
 func (s *Scope) publishedCause() error {
+	sd := s.st.shutdown.Load()
+	if sd == nil {
+		return nil
+	}
 	select {
-	case <-s.st.shutdownCh:
-		return s.st.shutdownErr
+	case <-sd.ch:
+		return sd.err
 	default:
 		return nil
 	}

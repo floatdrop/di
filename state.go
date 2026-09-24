@@ -26,12 +26,12 @@ type state struct {
 	// lookup that finds it clear skips the lock as well.
 	reg        atomic.Pointer[registry]
 	hasPending atomic.Bool
-	frozen     bool // guarded by mu
+	sealed     atomic.Bool // see drainGen; here so the two 4-byte atomics pack
 
 	mu       sync.Mutex
 	pending  []*binding             // registrations not yet indexed
 	started  []*instance            // build order; stopped in reverse
-	scoped   map[*binding]*instance // per-scope instances of Scoped bindings
+	scoped   map[*binding]*instance // per-scope instances of Scoped bindings; lazily made
 	served   map[key]*state         // keys this scope hands down from an outer scope: the owner a lookup finds along its recorded route, or nil; lazily made
 	children []*state
 
@@ -59,13 +59,26 @@ type state struct {
 	// and announce.
 	drainGen atomic.Uint64
 	sealCh   chan struct{} // guarded by mu; made by an announcer that must wait, closed when the seal is decided
-	sealed   atomic.Bool
 
-	// The fields are ordered so the 4-byte atomics and the bool pack
-	// together: a state is allocated per request scope.
-	shutdownOnce sync.Once
-	shutdownCh   chan struct{}
-	shutdownErr  error
+	// shutdown is made by the first Shutdown or Run that needs it: a state is
+	// allocated per request scope, and few of them are ever shut down.
+	shutdown atomic.Pointer[shutdown]
+}
+
+// shutdown is the cause Shutdown records for Run, published by closing ch.
+type shutdown struct {
+	once sync.Once
+	ch   chan struct{}
+	err  error
+}
+
+// shutdownState returns this scope's shutdown, making it if need be.
+func (st *state) shutdownState() *shutdown {
+	if sd := st.shutdown.Load(); sd != nil {
+		return sd
+	}
+	st.shutdown.CompareAndSwap(nil, &shutdown{ch: make(chan struct{})})
+	return st.shutdown.Load()
 }
 
 // registry is a scope's committed registrations. It is immutable once
@@ -178,7 +191,7 @@ func (st *state) freeze() {
 		}
 		prev.release()
 	}
-	st.pending, st.frozen = nil, true
+	st.pending = nil
 	st.hasPending.Store(false)
 }
 
@@ -275,6 +288,9 @@ func (st *state) instanceFor(b *binding) *instance {
 	defer st.mu.Unlock()
 	in := st.scoped[b]
 	if in == nil {
+		if st.scoped == nil {
+			st.scoped = map[*binding]*instance{}
+		}
 		in = &instance{b: b}
 		st.scoped[b] = in
 	}

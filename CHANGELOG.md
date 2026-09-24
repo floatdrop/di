@@ -25,6 +25,11 @@ below says plainly whether an upgrade can break a caller.
   scope takes that scope's mutex once per key rather than on every `Get`:
   repeated warm `Get`s went from 181 ns at eight cores to 10 ns
   (`BenchmarkDI_Parallel_NestedGet`).
+- A child scope is smaller and cheaper to open: 256 bytes rather than 288,
+  and one allocation where there were three, since what only `Run` and
+  `Shutdown` use, and the map only a `Scoped` binding needs, are made when
+  first needed. Opening and stopping an empty child takes 6 allocations
+  instead of 8.
 
 ### Fixed
 

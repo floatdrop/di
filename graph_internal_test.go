@@ -3,6 +3,7 @@ package di
 import (
 	"reflect"
 	"testing"
+	"unsafe"
 )
 
 // A wait is indexed under every node of the blocked resolution's path up to
@@ -136,5 +137,16 @@ func TestMarkBoundRecordsAtAScopeWithARecordedRoute(t *testing.T) {
 	_ = w.Get[*graph]()
 	if got := x.st.served[k]; got != root.st {
 		t.Fatalf("x records %v, want the root", got)
+	}
+}
+
+// A state is allocated per request scope and a binding per registration, and
+// each sits at the top of its size class: a field more moves it up one.
+func TestStateAndBindingKeepTheirSizeClass(t *testing.T) {
+	if n := unsafe.Sizeof(state{}); n > 256 {
+		t.Errorf("state is %d bytes, over the 256 size class", n)
+	}
+	if n := unsafe.Sizeof(binding{}); n > 160 {
+		t.Errorf("binding is %d bytes, over the 160 size class", n)
 	}
 }
